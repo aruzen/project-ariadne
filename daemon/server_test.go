@@ -163,6 +163,40 @@ func TestDefaultConfigUsesBoundedAriadnePTYPolicy(t *testing.T) {
 	}
 }
 
+func TestTerminalExitMapping(t *testing.T) {
+	tests := []struct {
+		name   string
+		status pty.ExitStatus
+		remove bool
+		state  core.TerminalState
+		exit   core.TerminalExit
+	}{
+		{name: "success", status: pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 0}, remove: true,
+			state: core.TerminalExited, exit: core.TerminalExit{Kind: core.TerminalExitProcess}},
+		{name: "explicit kill", status: pty.ExitStatus{Reason: pty.ExitReasonKilled}, remove: true,
+			state: core.TerminalFailed, exit: core.TerminalExit{Kind: core.TerminalExitPTYError, Message: "killed"}},
+		{name: "nonzero", status: pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 7},
+			state: core.TerminalExited, exit: core.TerminalExit{Kind: core.TerminalExitProcess, Code: 7}},
+		{name: "signal", status: pty.ExitStatus{Reason: pty.ExitReasonSignaled, Signal: "terminated"},
+			state: core.TerminalExited, exit: core.TerminalExit{Kind: core.TerminalExitSignal, Signal: "terminated"}},
+		{name: "signal without name", status: pty.ExitStatus{Reason: pty.ExitReasonSignaled},
+			state: core.TerminalExited, exit: core.TerminalExit{Kind: core.TerminalExitSignal, Signal: "unknown"}},
+		{name: "PTY I/O failure", status: pty.ExitStatus{Reason: pty.ExitReasonIOFailure, Error: "read failed"},
+			state: core.TerminalFailed, exit: core.TerminalExit{Kind: core.TerminalExitPTYError, Message: "read failed"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := terminalExitRemovesPane(test.status); got != test.remove {
+				t.Fatalf("terminalExitRemovesPane = %v, want %v", got, test.remove)
+			}
+			state, exit := terminalExit(test.status)
+			if state != test.state || exit != test.exit {
+				t.Fatalf("terminalExit = (%+v, %+v), want (%+v, %+v)", state, exit, test.state, test.exit)
+			}
+		})
+	}
+}
+
 func TestConfiguredPluginHostStartsWithDaemon(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	configuration := DefaultConfig(statePath)

@@ -111,6 +111,23 @@ func TestListenSecuresSocketChecksPeerAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestDialRejectsUnexpectedUID(t *testing.T) {
+	path := testSocketPath(t)
+	listener, err := Listen(path, os.Getuid())
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = listener.Cleanup()
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := DialContext(ctx, path, os.Getuid()+1); !errors.Is(err, ErrInvalidOwner) {
+		t.Fatalf("DialContext with unexpected UID error = %v", err)
+	}
+}
+
 func TestListenRejectsRunningDaemonAndRecoversStaleSocket(t *testing.T) {
 	path := testSocketPath(t)
 	first, err := Listen(path, os.Getuid())
