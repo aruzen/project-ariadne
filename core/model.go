@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/aruzen/streammux"
 )
@@ -21,6 +22,49 @@ const (
 	PaneTerminal PaneKind = "terminal"
 	PaneFixed    PaneKind = "fixed"
 )
+
+type TerminalState string
+
+const (
+	TerminalStarting    TerminalState = "starting"
+	TerminalRunning     TerminalState = "running"
+	TerminalStopping    TerminalState = "stopping"
+	TerminalExited      TerminalState = "exited"
+	TerminalFailed      TerminalState = "failed"
+	TerminalPlaceholder TerminalState = "placeholder"
+)
+
+type TerminalExitKind string
+
+const (
+	TerminalExitProcess  TerminalExitKind = "process"
+	TerminalExitSignal   TerminalExitKind = "signal"
+	TerminalExitPTYError TerminalExitKind = "pty_error"
+)
+
+// LaunchSpec is safe to persist. Environment variables are intentionally not
+// represented here and remain runtime-only daemon input.
+type LaunchSpec struct {
+	Argv []string `json:"argv"`
+	CWD  string   `json:"cwd"`
+}
+
+type TerminalExit struct {
+	Kind    TerminalExitKind `json:"kind"`
+	Code    int              `json:"code,omitempty"`
+	Signal  string           `json:"signal,omitempty"`
+	Message string           `json:"message,omitempty"`
+}
+
+// TerminalInstance is Pane-associated runtime state. ID is streammux's
+// runtime-only StreamID; Launch and abnormal exit data survive persistence.
+type TerminalInstance struct {
+	ID               *TerminalID   `json:"id,omitempty"`
+	State            TerminalState `json:"state"`
+	Launch           LaunchSpec    `json:"launch"`
+	Exit             *TerminalExit `json:"exit,omitempty"`
+	HistoryAvailable bool          `json:"history_available"`
+}
 
 type SplitDirection string
 
@@ -60,11 +104,11 @@ type Window struct {
 }
 
 type Pane struct {
-	ID         PaneID      `json:"id"`
-	WindowID   WindowID    `json:"window_id"`
-	Kind       PaneKind    `json:"kind"`
-	Title      string      `json:"title,omitempty"`
-	TerminalID *TerminalID `json:"terminal_id,omitempty"`
+	ID       PaneID            `json:"id"`
+	WindowID WindowID          `json:"window_id"`
+	Kind     PaneKind          `json:"kind"`
+	Title    string            `json:"title,omitempty"`
+	Terminal *TerminalInstance `json:"terminal,omitempty"`
 }
 
 // Snapshot is an immutable point-in-time copy of persistent Core state.
@@ -77,6 +121,19 @@ type Snapshot struct {
 	Workspaces      []Workspace `json:"workspaces"`
 	Windows         []Window    `json:"windows"`
 	Panes           []Pane      `json:"panes"`
+}
+
+// DefaultSnapshot returns the initial default/main hierarchy without starting
+// an executor.
+func DefaultSnapshot() Snapshot {
+	return defaultState().snapshot()
+}
+
+// ValidateSnapshot verifies all ID, hierarchy, layout, and Terminal
+// invariants without retaining or mutating snapshot.
+func ValidateSnapshot(snapshot Snapshot) error {
+	_, err := stateFromSnapshot(snapshot)
+	return err
 }
 
 type FrontendState struct {
@@ -171,11 +228,11 @@ func stateFromSnapshot(snapshot Snapshot) (*state, error) {
 		if _, exists := s.windows[pane.WindowID]; !exists {
 			return nil, fmt.Errorf("%w: pane %d references window %d", ErrInvalidState, pane.ID, pane.WindowID)
 		}
-		if pane.TerminalID != nil {
-			if _, exists := terminalIDs[*pane.TerminalID]; exists {
-				return nil, fmt.Errorf("%w: duplicate terminal ID %d", ErrInvalidState, *pane.TerminalID)
+		if pane.Terminal != nil && pane.Terminal.ID != nil {
+			if _, exists := terminalIDs[*pane.Terminal.ID]; exists {
+				return nil, fmt.Errorf("%w: duplicate terminal ID %d", ErrInvalidState, *pane.Terminal.ID)
 			}
-			terminalIDs[*pane.TerminalID] = struct{}{}
+			terminalIDs[*pane.Terminal.ID] = struct{}{}
 		}
 		s.panes[pane.ID] = pane
 		s.paneOrder = append(s.paneOrder, pane.ID)
@@ -308,11 +365,24 @@ func cloneWindow(window Window) Window {
 }
 
 func clonePane(pane Pane) Pane {
-	if pane.TerminalID != nil {
-		terminalID := *pane.TerminalID
-		pane.TerminalID = &terminalID
+	if pane.Terminal != nil {
+		terminal := cloneTerminal(*pane.Terminal)
+		pane.Terminal = &terminal
 	}
 	return pane
+}
+
+func cloneTerminal(terminal TerminalInstance) TerminalInstance {
+	terminal.Launch.Argv = append([]string(nil), terminal.Launch.Argv...)
+	if terminal.ID != nil {
+		terminalID := *terminal.ID
+		terminal.ID = &terminalID
+	}
+	if terminal.Exit != nil {
+		exit := *terminal.Exit
+		terminal.Exit = &exit
+	}
+	return terminal
 }
 
 func cloneLayout(node LayoutNode) LayoutNode {
@@ -331,9 +401,54 @@ func validDirection(direction SplitDirection) bool {
 func validPane(pane Pane) bool {
 	switch pane.Kind {
 	case PaneTerminal:
-		return pane.TerminalID == nil || *pane.TerminalID != 0
+		return pane.Terminal == nil || validTerminal(*pane.Terminal)
 	case PaneFixed:
-		return pane.TerminalID == nil
+		return pane.Terminal == nil
+	default:
+		return false
+	}
+}
+
+func validTerminal(terminal TerminalInstance) bool {
+	if len(terminal.Launch.Argv) == 0 || terminal.Launch.Argv[0] == "" || terminal.Launch.CWD == "" ||
+		strings.ContainsRune(terminal.Launch.CWD, 0) {
+		return false
+	}
+	for _, argument := range terminal.Launch.Argv {
+		if strings.ContainsRune(argument, 0) {
+			return false
+		}
+	}
+	if terminal.ID != nil && *terminal.ID == 0 {
+		return false
+	}
+	if terminal.HistoryAvailable && terminal.ID == nil {
+		return false
+	}
+	switch terminal.State {
+	case TerminalStarting:
+		return terminal.ID == nil && terminal.Exit == nil && !terminal.HistoryAvailable
+	case TerminalRunning, TerminalStopping:
+		return terminal.ID != nil && terminal.Exit == nil
+	case TerminalPlaceholder:
+		return terminal.ID == nil && terminal.Exit == nil && !terminal.HistoryAvailable
+	case TerminalExited:
+		return terminal.Exit != nil && validTerminalExit(*terminal.Exit) && terminal.Exit.Kind != TerminalExitPTYError
+	case TerminalFailed:
+		return terminal.Exit != nil && validTerminalExit(*terminal.Exit) && terminal.Exit.Kind == TerminalExitPTYError
+	default:
+		return false
+	}
+}
+
+func validTerminalExit(exit TerminalExit) bool {
+	switch exit.Kind {
+	case TerminalExitProcess:
+		return exit.Code >= 0 && exit.Signal == "" && exit.Message == ""
+	case TerminalExitSignal:
+		return exit.Code == 0 && exit.Signal != "" && exit.Message == ""
+	case TerminalExitPTYError:
+		return exit.Code == 0 && exit.Signal == "" && exit.Message != ""
 	default:
 		return false
 	}

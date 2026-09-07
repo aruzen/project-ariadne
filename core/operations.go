@@ -261,22 +261,22 @@ func (c *Core) setFocus(command SetFocusCommand, frontends map[FrontendID]*front
 
 func paneFromSpec(id PaneID, windowID WindowID, spec PaneSpec) Pane {
 	pane := Pane{ID: id, WindowID: windowID, Kind: spec.Kind, Title: spec.Title}
-	if spec.TerminalID != nil {
-		terminalID := *spec.TerminalID
-		pane.TerminalID = &terminalID
+	if spec.Terminal != nil {
+		terminal := cloneTerminal(*spec.Terminal)
+		pane.Terminal = &terminal
 	}
 	return pane
 }
 
 func (s *state) validatePaneSpec(spec PaneSpec) error {
-	pane := Pane{Kind: spec.Kind, TerminalID: spec.TerminalID}
+	pane := Pane{Kind: spec.Kind, Terminal: spec.Terminal}
 	if !validPane(pane) {
 		return fmt.Errorf("%w: invalid pane specification", ErrInvalidArgument)
 	}
-	if spec.TerminalID != nil {
+	if spec.Terminal != nil && spec.Terminal.ID != nil {
 		for _, existing := range s.panes {
-			if existing.TerminalID != nil && *existing.TerminalID == *spec.TerminalID {
-				return fmt.Errorf("%w: terminal %d is already displayed", ErrAlreadyExists, *spec.TerminalID)
+			if existing.Terminal != nil && existing.Terminal.ID != nil && *existing.Terminal.ID == *spec.Terminal.ID {
+				return fmt.Errorf("%w: terminal %d is already displayed", ErrAlreadyExists, *spec.Terminal.ID)
 			}
 		}
 	}

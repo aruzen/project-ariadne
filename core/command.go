@@ -7,9 +7,9 @@ type Command interface {
 }
 
 type PaneSpec struct {
-	Kind       PaneKind
-	Title      string
-	TerminalID *TerminalID
+	Kind     PaneKind
+	Title    string
+	Terminal *TerminalInstance
 }
 
 type CreateWorkspaceCommand struct {
@@ -153,9 +153,9 @@ func cloneCommand(command Command) (Command, error) {
 }
 
 func clonePaneSpec(spec PaneSpec) PaneSpec {
-	if spec.TerminalID != nil {
-		terminalID := *spec.TerminalID
-		spec.TerminalID = &terminalID
+	if spec.Terminal != nil {
+		terminal := cloneTerminal(*spec.Terminal)
+		spec.Terminal = &terminal
 	}
 	return spec
 }

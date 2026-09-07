@@ -199,18 +199,50 @@ func TestTerminalIDUsesStreammuxIdentityAndIsUnique(t *testing.T) {
 	terminalID := streammux.StreamID(42)
 	one := execute[CreatePaneResult](t, core, CreatePaneCommand{
 		WindowID: 1,
-		Pane:     PaneSpec{Kind: PaneTerminal, TerminalID: &terminalID},
+		Pane: PaneSpec{Kind: PaneTerminal, Terminal: &TerminalInstance{
+			ID: &terminalID, State: TerminalRunning, Launch: LaunchSpec{Argv: []string{"/bin/sh"}, CWD: "/tmp"},
+		}},
 	})
-	if one.Pane.TerminalID == nil || *one.Pane.TerminalID != terminalID {
+	if one.Pane.Terminal == nil || one.Pane.Terminal.ID == nil || *one.Pane.Terminal.ID != terminalID {
 		t.Fatalf("terminal identity lost: %+v", one.Pane)
 	}
 	_, err := core.Execute(context.Background(), SplitPaneCommand{
 		TargetPaneID: one.Pane.ID,
 		Direction:    SplitHorizontal,
-		Pane:         PaneSpec{Kind: PaneTerminal, TerminalID: &terminalID},
+		Pane: PaneSpec{Kind: PaneTerminal, Terminal: &TerminalInstance{
+			ID: &terminalID, State: TerminalRunning, Launch: LaunchSpec{Argv: []string{"/bin/sh"}, CWD: "/tmp"},
+		}},
 	})
 	if !errors.Is(err, ErrAlreadyExists) {
 		t.Fatalf("duplicate TerminalID error = %v", err)
+	}
+}
+
+func TestTerminalStateInvariants(t *testing.T) {
+	core := newTestCore(t, 8)
+	id := streammux.StreamID(7)
+	launch := LaunchSpec{Argv: []string{"agent"}, CWD: "/work"}
+	for _, test := range []struct {
+		name     string
+		terminal TerminalInstance
+	}{
+		{name: "running without ID", terminal: TerminalInstance{State: TerminalRunning, Launch: launch}},
+		{name: "placeholder with ID", terminal: TerminalInstance{ID: &id, State: TerminalPlaceholder, Launch: launch}},
+		{name: "failed without PTY error", terminal: TerminalInstance{State: TerminalFailed, Launch: launch, Exit: &TerminalExit{Kind: TerminalExitProcess, Code: 1}}},
+		{name: "exited with PTY error", terminal: TerminalInstance{State: TerminalExited, Launch: launch, Exit: &TerminalExit{Kind: TerminalExitPTYError, Message: "failed"}}},
+		{name: "history without runtime ID", terminal: TerminalInstance{State: TerminalPlaceholder, Launch: launch, HistoryAvailable: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := core.Execute(context.Background(), CreatePaneCommand{
+				WindowID: 1, Pane: PaneSpec{Kind: PaneTerminal, Terminal: &test.terminal},
+			})
+			if !errors.Is(err, ErrInvalidArgument) {
+				t.Fatalf("Execute error = %v", err)
+			}
+		})
+	}
+	if got := snapshot(t, core).Revision; got != 0 {
+		t.Fatalf("invalid Terminal commands changed Revision: %d", got)
 	}
 }
 
