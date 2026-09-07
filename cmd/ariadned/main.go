@@ -1,4 +1,4 @@
-//go:build darwin || linux
+//go:build darwin || linux || windows
 
 package main
 
@@ -12,13 +12,11 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"syscall"
 
 	ariadneconfig "github.com/aruzen/ariadne/config"
 	"github.com/aruzen/ariadne/daemon"
+	"github.com/aruzen/ariadne/platform/localipc"
 	"github.com/aruzen/ariadne/platform/paths"
-	"github.com/aruzen/ariadne/platform/unixsocket"
-	"github.com/aruzen/streammux/pty/unixpty"
 )
 
 func main() {
@@ -29,7 +27,7 @@ func main() {
 }
 
 func run(arguments []string) error {
-	defaultSocket, err := unixsocket.DefaultPath()
+	defaultSocket, err := localipc.DefaultEndpoint()
 	if err != nil {
 		return err
 	}
@@ -43,7 +41,7 @@ func run(arguments []string) error {
 	}
 	flags := flag.NewFlagSet("ariadned", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	socketPath := flags.String("socket", defaultSocket, "Unix socket path")
+	socketPath := flags.String("socket", defaultSocket, "local IPC endpoint")
 	statePath := flags.String("state", defaultState, "state JSON path")
 	configPath := flags.String("config", defaultConfiguration, "configuration TOML path")
 	if err := flags.Parse(arguments); err != nil {
@@ -56,12 +54,12 @@ func run(arguments []string) error {
 		return err
 	}
 
-	listener, err := unixsocket.Listen(*socketPath, os.Getuid())
+	listener, err := localipc.Listen(*socketPath)
 	if err != nil {
 		return err
 	}
 	configuration := daemon.DefaultConfig(*statePath)
-	server, loaded, err := daemon.Open(context.Background(), unixpty.ManagedFactory{}, configuration)
+	server, loaded, err := daemon.Open(context.Background(), daemonManagedFactory(), configuration)
 	if err != nil {
 		_ = listener.Close()
 		_ = listener.Cleanup()
@@ -72,7 +70,7 @@ func run(arguments []string) error {
 	}
 
 	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(signals, shutdownSignals()...)
 	defer signal.Stop(signals)
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(listener) }()

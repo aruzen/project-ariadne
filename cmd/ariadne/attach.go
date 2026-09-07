@@ -1,4 +1,4 @@
-//go:build darwin || linux
+//go:build darwin || linux || windows
 
 package main
 
@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/aruzen/ariadne/client"
@@ -65,12 +64,17 @@ func attachTerminal(ctx context.Context, frontend *client.Client, terminalID cor
 		return err
 	}
 	defer func() { resultErr = errors.Join(resultErr, platformterminal.Restore(os.Stdin, state)) }()
+	outputFile := stdout.(*os.File)
+	outputState, err := platformterminal.EnableOutput(outputFile)
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, platformterminal.RestoreOutput(outputFile, outputState)) }()
 
-	resize := make(chan os.Signal, 1)
+	resize, stopResize := watchTerminalResize(ctx, os.Stdin)
+	defer stopResize()
 	terminate := make(chan os.Signal, 1)
-	signal.Notify(resize, syscall.SIGWINCH)
-	signal.Notify(terminate, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
-	defer signal.Stop(resize)
+	signal.Notify(terminate, attachTerminationSignals()...)
 	defer signal.Stop(terminate)
 	if err := ptyClient.Resize(ctx, terminalID, terminalSize(os.Stdin)); err != nil {
 		return err
@@ -106,7 +110,11 @@ func attachTerminal(ctx context.Context, frontend *client.Client, terminalID cor
 				}
 				return fmt.Errorf("PTY %s: %s", event.Error.Code, event.Error.Message)
 			}
-		case <-resize:
+		case _, ok := <-resize:
+			if !ok {
+				resize = nil
+				continue
+			}
 			if err := ptyClient.Resize(ctx, terminalID, terminalSize(os.Stdin)); err != nil {
 				return err
 			}
@@ -174,41 +182,22 @@ func parseKey(value string) (byte, error) {
 
 func readTerminalInput(reader io.Reader, detach []byte, output chan<- inputMessage) {
 	buffer := make([]byte, 4096)
-	pendingPrefix := false
+	filter := newTerminalInputFilter(detach)
 	for {
 		count, err := reader.Read(buffer)
 		if count != 0 {
-			data := make([]byte, 0, count+1)
-			for _, value := range buffer[:count] {
-				if !pendingPrefix {
-					if value == detach[0] {
-						pendingPrefix = true
-					} else {
-						data = append(data, value)
-					}
-					continue
-				}
-				pendingPrefix = false
-				switch value {
-				case detach[1]:
-					if len(data) != 0 {
-						output <- inputMessage{kind: inputData, data: data}
-					}
-					output <- inputMessage{kind: inputDetach}
-					return
-				case detach[0]:
-					data = append(data, detach[0])
-				default:
-					data = append(data, detach[0], value)
-				}
-			}
+			data, detached := filter.Feed(buffer[:count])
 			if len(data) != 0 {
 				output <- inputMessage{kind: inputData, data: data}
 			}
+			if detached {
+				output <- inputMessage{kind: inputDetach}
+				return
+			}
 		}
 		if err != nil {
-			if pendingPrefix {
-				output <- inputMessage{kind: inputData, data: []byte{detach[0]}}
+			if data := filter.Flush(); len(data) != 0 {
+				output <- inputMessage{kind: inputData, data: data}
 			}
 			output <- inputMessage{kind: inputFailure, err: err}
 			return

@@ -16,6 +16,8 @@ type State struct {
 	termios unix.Termios
 }
 
+type OutputState struct{}
+
 func IsTerminal(file *os.File) bool {
 	if file == nil {
 		return false
@@ -52,4 +54,29 @@ func Restore(file *os.File, state *State) error {
 		return ErrNotTerminal
 	}
 	return unix.IoctlSetTermios(int(file.Fd()), ioctlWriteTermios, &state.termios)
+}
+
+func EnableOutput(file *os.File) (*OutputState, error) {
+	if !IsTerminal(file) {
+		return nil, ErrNotTerminal
+	}
+	return &OutputState{}, nil
+}
+
+func RestoreOutput(_ *os.File, state *OutputState) error {
+	if state == nil {
+		return ErrNotTerminal
+	}
+	return nil
+}
+
+func Size(file *os.File) (int, int, error) {
+	if file == nil {
+		return 0, 0, ErrNotTerminal
+	}
+	size, err := unix.IoctlGetWinsize(int(file.Fd()), unix.TIOCGWINSZ)
+	if err != nil || size.Col == 0 || size.Row == 0 {
+		return 0, 0, ErrNotTerminal
+	}
+	return int(size.Col), int(size.Row), nil
 }

@@ -7,14 +7,16 @@ import (
 )
 
 func TestXDGPaths(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", "/config")
-	t.Setenv("XDG_STATE_HOME", "/state")
+	configurationDirectory := filepath.Join(t.TempDir(), "config")
+	stateDirectory := filepath.Join(t.TempDir(), "state")
+	t.Setenv("XDG_CONFIG_HOME", configurationDirectory)
+	t.Setenv("XDG_STATE_HOME", stateDirectory)
 	configuration, err := DefaultConfigPath()
-	if err != nil || configuration != filepath.Join("/config", "ariadne", "config.toml") {
+	if err != nil || configuration != filepath.Join(configurationDirectory, "ariadne", "config.toml") {
 		t.Fatalf("DefaultConfigPath = %q, %v", configuration, err)
 	}
 	state, err := DefaultStatePath()
-	if err != nil || state != filepath.Join("/state", "ariadne", "state.json") {
+	if err != nil || state != filepath.Join(stateDirectory, "ariadne", "state.json") {
 		t.Fatalf("DefaultStatePath = %q, %v", state, err)
 	}
 }

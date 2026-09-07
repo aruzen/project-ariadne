@@ -1,4 +1,4 @@
-//go:build darwin || linux
+//go:build darwin || linux || windows
 
 package main
 
@@ -15,18 +15,17 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"github.com/aruzen/ariadne/client"
 	ariadneconfig "github.com/aruzen/ariadne/config"
 	"github.com/aruzen/ariadne/core"
+	"github.com/aruzen/ariadne/platform/localipc"
 	"github.com/aruzen/ariadne/platform/paths"
-	"github.com/aruzen/ariadne/platform/unixsocket"
+	platformterminal "github.com/aruzen/ariadne/platform/terminal"
 	"github.com/aruzen/ariadne/protocol"
 	"github.com/aruzen/streammux/pty"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -44,11 +43,11 @@ func main() {
 func run(arguments []string, stdout, stderr io.Writer) error {
 	global := flag.NewFlagSet("ariadne", flag.ContinueOnError)
 	global.SetOutput(stderr)
-	defaultSocket, err := unixsocket.DefaultPath()
+	defaultSocket, err := localipc.DefaultEndpoint()
 	if err != nil {
 		return err
 	}
-	socketPath := global.String("socket", defaultSocket, "Unix socket path")
+	socketPath := global.String("socket", defaultSocket, "local IPC endpoint")
 	if err := global.Parse(arguments); err != nil {
 		return err
 	}
@@ -307,7 +306,7 @@ func runDaemon(ctx context.Context, frontend *client.Client, arguments []string,
 }
 
 func connect(ctx context.Context, socketPath string, autoStart bool) (net.Conn, error) {
-	connection, err := unixsocket.DialContext(ctx, socketPath, os.Getuid())
+	connection, err := localipc.DialContext(ctx, socketPath)
 	if err == nil || !autoStart || !isDaemonAbsent(err) {
 		return connection, err
 	}
@@ -318,7 +317,7 @@ func connect(ctx context.Context, socketPath string, autoStart bool) (net.Conn, 
 	var lastErr error
 	for time.Now().Before(deadline) {
 		attemptCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-		connection, lastErr = unixsocket.DialContext(attemptCtx, socketPath, os.Getuid())
+		connection, lastErr = localipc.DialContext(attemptCtx, socketPath)
 		cancel()
 		if lastErr == nil {
 			return connection, nil
@@ -340,7 +339,7 @@ func startDaemon(socketPath string) error {
 	command.Stdin = nil
 	command.Stdout = nil
 	command.Stderr = nil
-	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	configureDetachedProcess(command)
 	if err := command.Start(); err != nil {
 		return fmt.Errorf("start daemon: %w", err)
 	}
@@ -353,8 +352,8 @@ func startDaemon(socketPath string) error {
 func findDaemon() (string, error) {
 	executable, err := os.Executable()
 	if err == nil {
-		candidate := filepath.Join(filepath.Dir(executable), "ariadned")
-		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+		candidate := filepath.Join(filepath.Dir(executable), daemonExecutableName())
+		if info, statErr := os.Stat(candidate); statErr == nil && daemonCandidateUsable(info) {
 			return candidate, nil
 		}
 	}
@@ -380,10 +379,7 @@ func resolveArgv(explicit []string) ([]string, error) {
 	if configuration.Shell != "" {
 		return []string{configuration.Shell}, nil
 	}
-	if shell := os.Getenv("SHELL"); shell != "" {
-		return []string{shell}, nil
-	}
-	return []string{"/bin/sh"}, nil
+	return defaultShell(), nil
 }
 
 func exactlyOnePaneID(arguments []string) (core.PaneID, error) {
@@ -398,10 +394,8 @@ func exactlyOnePaneID(arguments []string) (core.PaneID, error) {
 }
 
 func terminalSize(file *os.File) pty.Size {
-	if file != nil {
-		if size, err := unix.IoctlGetWinsize(int(file.Fd()), unix.TIOCGWINSZ); err == nil && size.Col != 0 && size.Row != 0 {
-			return pty.Size{Cols: int(size.Col), Rows: int(size.Row)}
-		}
+	if cols, rows, err := platformterminal.Size(file); err == nil && cols != 0 && rows != 0 {
+		return pty.Size{Cols: cols, Rows: rows}
 	}
 	return pty.Size{Cols: 80, Rows: 24}
 }
@@ -428,5 +422,5 @@ func formatArgv(argv []string) string {
 }
 
 func isDaemonAbsent(err error) bool {
-	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
+	return localipc.IsAbsent(err)
 }

@@ -30,9 +30,9 @@ func DefaultStatePath() (string, error) {
 		}
 		return filepath.Join(directory, "ariadne", "state.json"), nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
+	directory, err := defaultStateDirectory()
+	if err != nil || directory == "" {
 		return "", ErrHomeUnavailable
 	}
-	return filepath.Join(home, ".local", "state", "ariadne", "state.json"), nil
+	return filepath.Join(directory, "ariadne", "state.json"), nil
 }

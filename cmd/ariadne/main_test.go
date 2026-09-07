@@ -1,4 +1,4 @@
-//go:build darwin || linux
+//go:build darwin || linux || windows
 
 package main
 
@@ -13,7 +13,7 @@ import (
 func TestDaemonStatusReportsStoppedWithoutAutoStart(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	socketPath := "/tmp/ariadne-cli-status-definitely-missing.sock"
+	socketPath := missingEndpoint(t)
 	if err := run([]string{"-socket", socketPath, "daemon", "status"}, &stdout, &stderr); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -24,7 +24,7 @@ func TestDaemonStatusReportsStoppedWithoutAutoStart(t *testing.T) {
 
 func TestOpenRejectsNonTTYBeforeConnecting(t *testing.T) {
 	var output bytes.Buffer
-	err := run([]string{"-socket", "/tmp/ariadne-cli-open-missing.sock", "open", "--", "sh"}, &output, &output)
+	err := run([]string{"-socket", missingEndpoint(t), "open", "--", "sh"}, &output, &output)
 	if !errors.Is(err, platformterminal.ErrNotTerminal) {
 		t.Fatalf("open error = %v", err)
 	}
@@ -32,7 +32,7 @@ func TestOpenRejectsNonTTYBeforeConnecting(t *testing.T) {
 
 func TestUnknownCommandDoesNotConnect(t *testing.T) {
 	var output bytes.Buffer
-	err := run([]string{"-socket", "/tmp/ariadne-cli-unknown-missing.sock", "unknown"}, &output, &output)
+	err := run([]string{"-socket", missingEndpoint(t), "unknown"}, &output, &output)
 	if err == nil || err.Error() != `unknown command "unknown"` {
 		t.Fatalf("unknown command error = %v", err)
 	}
