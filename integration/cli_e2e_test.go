@@ -20,6 +20,7 @@ import (
 )
 
 const runE2EEnvironment = "ARIADNE_RUN_E2E"
+const e2eBinaryDirectoryEnvironment = "ARIADNE_E2E_BIN_DIR"
 
 type e2eRuntime struct {
 	clientPath  string
@@ -66,16 +67,24 @@ func TestCLIEndToEnd(t *testing.T) {
 
 func newE2ERuntime(t *testing.T) *e2eRuntime {
 	t.Helper()
-	_, source, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve integration source path")
+	binaryDirectory := os.Getenv(e2eBinaryDirectoryEnvironment)
+	if binaryDirectory == "" {
+		_, source, _, ok := runtime.Caller(0)
+		if !ok {
+			t.Fatal("resolve integration source path")
+		}
+		repository := filepath.Dir(filepath.Dir(source))
+		binaryDirectory = t.TempDir()
+		buildBinary(t, repository, filepath.Join(binaryDirectory, "ariadne"), "./cmd/ariadne")
+		buildBinary(t, repository, filepath.Join(binaryDirectory, "ariadned"), "./cmd/ariadned")
 	}
-	repository := filepath.Dir(filepath.Dir(source))
-	binaryDirectory := t.TempDir()
 	clientPath := filepath.Join(binaryDirectory, "ariadne")
 	daemonPath := filepath.Join(binaryDirectory, "ariadned")
-	buildBinary(t, repository, clientPath, "./cmd/ariadne")
-	buildBinary(t, repository, daemonPath, "./cmd/ariadned")
+	for _, executable := range []string{clientPath, daemonPath} {
+		if info, err := os.Stat(executable); err != nil || info.IsDir() {
+			t.Fatalf("E2E executable %q is unavailable: %v", executable, err)
+		}
+	}
 
 	runtimeDirectory, err := os.MkdirTemp("", "ariadne-e2e-")
 	if err != nil {

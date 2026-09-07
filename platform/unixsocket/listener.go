@@ -223,7 +223,7 @@ func (listener *Listener) Cleanup() error {
 			listener.cleanupErr = err
 			return
 		}
-		if !os.SameFile(listener.bound, current) {
+		if !os.SameFile(listener.bound, current) || !isOwnedSocket(current, listener.uid) {
 			listener.cleanupErr = ErrSocketReplaced
 			return
 		}
