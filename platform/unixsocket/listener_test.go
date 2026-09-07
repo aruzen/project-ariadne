@@ -3,6 +3,7 @@
 package unixsocket
 
 import (
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -81,7 +82,9 @@ func TestListenSecuresSocketChecksPeerAndCleansUp(t *testing.T) {
 		}
 		accepted <- connection
 	}()
-	client, err := net.DialTimeout("unix", path, time.Second)
+	dialContext, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	client, err := DialContext(dialContext, path, os.Getuid())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

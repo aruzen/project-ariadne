@@ -498,3 +498,55 @@ func TestCloseTerminatesSubscriptionsAndRejectsCommands(t *testing.T) {
 		t.Fatalf("Execute after Close error = %v", err)
 	}
 }
+
+func TestTerminalStartStopAndRestartTransitions(t *testing.T) {
+	engine := newTestCore(t, 16)
+	launch := LaunchSpec{Argv: []string{"/bin/sh"}, CWD: "/tmp"}
+	created := execute[CreatePaneResult](t, engine, CreatePaneCommand{
+		WindowID: 1,
+		Pane: PaneSpec{Kind: PaneTerminal, Terminal: &TerminalInstance{
+			State: TerminalStarting, Launch: launch,
+		}},
+	})
+	terminalID := TerminalID(42)
+	started := execute[TerminalResult](t, engine, ActivateTerminalCommand{
+		PaneID: created.Pane.ID, TerminalID: terminalID,
+	})
+	if started.Pane.Terminal == nil || started.Pane.Terminal.State != TerminalRunning ||
+		started.Pane.Terminal.ID == nil || *started.Pane.Terminal.ID != terminalID {
+		t.Fatalf("started terminal = %+v", started.Pane.Terminal)
+	}
+	stopping := execute[TerminalResult](t, engine, BeginTerminalStopCommand{PaneID: created.Pane.ID})
+	if stopping.Pane.Terminal.State != TerminalStopping {
+		t.Fatalf("stopping state = %q", stopping.Pane.Terminal.State)
+	}
+	execute[TerminalResult](t, engine, RecordTerminalExitCommand{
+		TerminalID: terminalID, State: TerminalExited,
+		Exit: TerminalExit{Kind: TerminalExitSignal, Signal: "terminated"},
+	})
+	restarting := execute[TerminalResult](t, engine, PrepareTerminalRestartCommand{PaneID: created.Pane.ID})
+	if restarting.Pane.Terminal.State != TerminalStarting || restarting.Pane.Terminal.ID != nil || restarting.Pane.Terminal.Exit != nil {
+		t.Fatalf("restarting terminal = %+v", restarting.Pane.Terminal)
+	}
+	failed := execute[TerminalResult](t, engine, FailTerminalStartCommand{PaneID: created.Pane.ID, Message: "start failed"})
+	if failed.Pane.Terminal.State != TerminalFailed || failed.Pane.Terminal.Exit == nil ||
+		failed.Pane.Terminal.Exit.Kind != TerminalExitPTYError {
+		t.Fatalf("failed terminal = %+v", failed.Pane.Terminal)
+	}
+}
+
+func TestActivateTerminalRejectsDuplicateRuntimeID(t *testing.T) {
+	engine := newTestCore(t, 8)
+	launch := LaunchSpec{Argv: []string{"sh"}, CWD: "/tmp"}
+	first := execute[CreatePaneResult](t, engine, CreatePaneCommand{WindowID: 1, Pane: PaneSpec{
+		Kind: PaneTerminal, Terminal: &TerminalInstance{State: TerminalStarting, Launch: launch},
+	}})
+	execute[TerminalResult](t, engine, ActivateTerminalCommand{PaneID: first.Pane.ID, TerminalID: 7})
+	second := execute[CreatePaneResult](t, engine, SplitPaneCommand{
+		TargetPaneID: first.Pane.ID, Direction: SplitVertical,
+		Pane: PaneSpec{Kind: PaneTerminal, Terminal: &TerminalInstance{State: TerminalStarting, Launch: launch}},
+	})
+	if _, err := engine.Execute(context.Background(), ActivateTerminalCommand{PaneID: second.Pane.ID, TerminalID: 7}); !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("duplicate terminal ID error = %v", err)
+	}
+}

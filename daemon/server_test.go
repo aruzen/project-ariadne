@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -185,7 +186,7 @@ func TestManagerAbnormalExitIsRetainedThenRemovalClearsRuntimeID(t *testing.T) {
 	})
 	waitFor(t, func() bool {
 		info, exists := server.manager.Get(1)
-		return exists && info.Info().State == pty.SessionExited
+		return exists && info.Info().State == pty.SessionExited && server.manager.Stats().RetainedExitedSessions == 1
 	})
 	if err := server.manager.Remove(1); err != nil {
 		t.Fatalf("Manager Remove: %v", err)
@@ -210,6 +211,159 @@ func TestManagerSuccessfulExitRemovesPaneAndSession(t *testing.T) {
 	waitFor(t, func() bool {
 		return len(serverSnapshot(t, server).Panes) == 0 && len(server.manager.List()) == 0
 	})
+}
+
+func TestTerminalOperationsNewListRestartKillAndDismiss(t *testing.T) {
+	first := newTestManagedProcess()
+	second := newTestManagedProcess()
+	third := newTestManagedProcess()
+	server, _ := openTestServer(t, &testFactory{processes: []*testManagedProcess{first, second, third}})
+	params := ariadneprotocol.NewTerminalParams{
+		Argv: []string{"test-command", "arg"}, CWD: "/tmp", Env: []string{"TEST=value"},
+		InitialSize: pty.Size{Cols: 100, Rows: 30},
+	}
+	created, err := server.NewTerminal(context.Background(), params)
+	if err != nil {
+		t.Fatalf("NewTerminal: %v", err)
+	}
+	if created.Pane.Terminal == nil || created.Pane.Terminal.State != core.TerminalRunning || created.Pane.Terminal.ID == nil {
+		t.Fatalf("created Pane = %+v", created.Pane)
+	}
+	firstID := *created.Pane.Terminal.ID
+	listed, err := server.ListTerminals(context.Background())
+	if err != nil || len(listed.Entries) != 1 || listed.Entries[0].Pane.ID != created.Pane.ID {
+		t.Fatalf("ListTerminals = %+v, %v", listed, err)
+	}
+	first.complete(pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 7})
+	waitFor(t, func() bool {
+		pane, exists := serverSnapshot(t, server).PaneByTerminalID(firstID)
+		return exists && pane.Terminal.State == core.TerminalExited
+	})
+	restarted, err := server.RestartTerminal(context.Background(), ariadneprotocol.RestartTerminalParams{
+		PaneID: created.Pane.ID, Env: []string{"TEST=new"}, InitialSize: pty.Size{Cols: 80, Rows: 24},
+	})
+	if err != nil {
+		t.Fatalf("RestartTerminal: %v", err)
+	}
+	if restarted.Pane.Terminal.ID == nil || *restarted.Pane.Terminal.ID == firstID || restarted.Pane.Terminal.State != core.TerminalRunning {
+		t.Fatalf("restarted Pane = %+v", restarted.Pane)
+	}
+	if _, err := server.KillTerminal(context.Background(), ariadneprotocol.PaneParams{PaneID: created.Pane.ID}); err != nil {
+		t.Fatalf("KillTerminal: %v", err)
+	}
+	if len(serverSnapshot(t, server).Panes) != 0 || len(server.manager.List()) != 0 {
+		t.Fatal("kill did not remove Pane and Session")
+	}
+
+	dismissed, err := server.NewTerminal(context.Background(), params)
+	if err != nil {
+		t.Fatalf("second NewTerminal: %v", err)
+	}
+	third.complete(pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 9})
+	waitFor(t, func() bool {
+		pane, exists := serverSnapshot(t, server).PaneByTerminalID(*dismissed.Pane.Terminal.ID)
+		return exists && pane.Terminal.State == core.TerminalExited
+	})
+	if _, err := server.DismissTerminal(context.Background(), ariadneprotocol.PaneParams{PaneID: dismissed.Pane.ID}); err != nil {
+		t.Fatalf("DismissTerminal: %v", err)
+	}
+	if len(serverSnapshot(t, server).Panes) != 0 || len(server.manager.List()) != 0 {
+		t.Fatal("dismiss did not remove Pane and retained Session")
+	}
+}
+
+func TestDaemonStopRefusesActiveTerminalWithoutForce(t *testing.T) {
+	process := newTestManagedProcess()
+	server, _ := openTestServer(t, &testFactory{processes: []*testManagedProcess{process}})
+	created, err := server.NewTerminal(context.Background(), ariadneprotocol.NewTerminalParams{
+		Argv: []string{"test-command"}, CWD: "/tmp", InitialSize: pty.Size{Cols: 80, Rows: 24},
+	})
+	if err != nil {
+		t.Fatalf("NewTerminal: %v", err)
+	}
+	if _, err := server.DaemonStop(context.Background(), ariadneprotocol.DaemonStopParams{}); !errors.Is(err, core.ErrInvalidState) {
+		t.Fatalf("DaemonStop without force error = %v", err)
+	}
+	server.mu.Lock()
+	stopping := server.stopping
+	server.mu.Unlock()
+	if stopping {
+		t.Fatal("refused stop changed daemon state")
+	}
+	if _, err := server.KillTerminal(context.Background(), ariadneprotocol.PaneParams{PaneID: created.Pane.ID}); err != nil {
+		t.Fatalf("KillTerminal: %v", err)
+	}
+	status, err := server.DaemonStop(context.Background(), ariadneprotocol.DaemonStopParams{})
+	if err != nil || !status.Stopping {
+		t.Fatalf("DaemonStop = %+v, %v", status, err)
+	}
+	server.AfterResponse(ariadneprotocol.OperationDaemonStop)
+	server.mu.Lock()
+	stopping = server.stopping
+	server.mu.Unlock()
+	if !stopping {
+		t.Fatal("accepted stop did not change daemon state")
+	}
+}
+
+func TestNewTerminalStartFailureLeavesRestartablePane(t *testing.T) {
+	server, _ := openTestServer(t, &testFactory{})
+	_, err := server.NewTerminal(context.Background(), ariadneprotocol.NewTerminalParams{
+		Argv: []string{"missing-command"}, CWD: "/tmp", Env: []string{"SECRET=not-persisted"},
+		InitialSize: pty.Size{Cols: 80, Rows: 24},
+	})
+	if err == nil {
+		t.Fatal("NewTerminal unexpectedly succeeded")
+	}
+	snapshot := serverSnapshot(t, server)
+	if len(snapshot.Panes) != 1 || snapshot.Panes[0].Terminal == nil {
+		t.Fatalf("failed Pane missing: %+v", snapshot.Panes)
+	}
+	terminal := snapshot.Panes[0].Terminal
+	if terminal.State != core.TerminalFailed || terminal.ID != nil || terminal.Exit == nil ||
+		terminal.Exit.Kind != core.TerminalExitPTYError || terminal.Exit.Message != terminalStartFailure {
+		t.Fatalf("failed Terminal = %+v", terminal)
+	}
+}
+
+func TestNewTerminalRejectsTargetOutsideDestinationWindow(t *testing.T) {
+	server, _ := openTestServer(t, &testFactory{})
+	executeCore[core.CreateWindowResult](t, server, core.CreateWindowCommand{WorkspaceID: 1, Name: "other"})
+	first := executeCore[core.CreatePaneResult](t, server, core.CreatePaneCommand{
+		WindowID: 1, Pane: core.PaneSpec{Kind: core.PaneFixed},
+	})
+	executeCore[core.CreatePaneResult](t, server, core.CreatePaneCommand{
+		WindowID: 2, Pane: core.PaneSpec{Kind: core.PaneFixed},
+	})
+	if _, err := server.NewTerminal(context.Background(), ariadneprotocol.NewTerminalParams{
+		WindowID: 2, TargetPaneID: first.Pane.ID, Direction: core.SplitVertical,
+		Argv: []string{"test-command"}, CWD: "/tmp", InitialSize: pty.Size{Cols: 80, Rows: 24},
+	}); !errors.Is(err, core.ErrInvalidArgument) {
+		t.Fatalf("outside target error = %v", err)
+	}
+}
+
+func TestTerminalStartFailureRemainsRestartableWithoutEnvironment(t *testing.T) {
+	server, _ := openTestServer(t, &testFactory{})
+	_, err := server.NewTerminal(context.Background(), ariadneprotocol.NewTerminalParams{
+		Argv: []string{"secret-command"}, CWD: "/tmp", Env: []string{"SECRET=value"},
+		InitialSize: pty.Size{Cols: 80, Rows: 24},
+	})
+	if err == nil {
+		t.Fatal("NewTerminal unexpectedly succeeded")
+	}
+	snapshot := serverSnapshot(t, server)
+	if len(snapshot.Panes) != 1 || snapshot.Panes[0].Terminal.State != core.TerminalFailed ||
+		snapshot.Panes[0].Terminal.Exit == nil || snapshot.Panes[0].Terminal.Exit.Message != terminalStartFailure {
+		t.Fatalf("failed Pane = %+v", snapshot.Panes)
+	}
+	data, marshalErr := json.Marshal(snapshot)
+	if marshalErr != nil {
+		t.Fatalf("Marshal Snapshot: %v", marshalErr)
+	}
+	if bytes.Contains(data, []byte("SECRET=value")) {
+		t.Fatal("environment leaked into Core snapshot")
+	}
 }
 
 func TestClosePersistsRunningTerminalAsPlaceholder(t *testing.T) {

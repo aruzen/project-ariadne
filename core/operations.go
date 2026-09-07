@@ -26,9 +26,101 @@ func (c *Core) execute(command Command, frontends map[FrontendID]*frontend) (any
 		return c.recordTerminalExit(value)
 	case ForgetTerminalSessionCommand:
 		return c.forgetTerminalSession(value)
+	case ActivateTerminalCommand:
+		return c.activateTerminal(value)
+	case FailTerminalStartCommand:
+		return c.failTerminalStart(value)
+	case PrepareTerminalRestartCommand:
+		return c.prepareTerminalRestart(value)
+	case BeginTerminalStopCommand:
+		return c.beginTerminalStop(value)
 	default:
 		return nil, nil, ErrInvalidCommand
 	}
+}
+
+func (c *Core) activateTerminal(command ActivateTerminalCommand) (any, *Event, error) {
+	if command.TerminalID == 0 {
+		return nil, nil, fmt.Errorf("%w: terminal ID is zero", ErrInvalidArgument)
+	}
+	if _, _, exists := c.state.paneByTerminalID(command.TerminalID); exists {
+		return nil, nil, fmt.Errorf("%w: terminal %d", ErrAlreadyExists, command.TerminalID)
+	}
+	pane, exists := c.state.panes[command.PaneID]
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: pane %d", ErrNotFound, command.PaneID)
+	}
+	if pane.Terminal == nil || pane.Terminal.State != TerminalStarting {
+		return nil, nil, fmt.Errorf("%w: pane %d is not starting", ErrInvalidState, command.PaneID)
+	}
+	terminal := cloneTerminal(*pane.Terminal)
+	terminal.ID = &command.TerminalID
+	terminal.State = TerminalRunning
+	pane.Terminal = &terminal
+	c.state.panes[pane.ID] = pane
+	result := TerminalResult{Pane: clonePane(pane)}
+	event := Event{Kind: EventTerminalStarted, Payload: TerminalEvent{Pane: clonePane(pane)}}
+	return result, &event, nil
+}
+
+func (c *Core) failTerminalStart(command FailTerminalStartCommand) (any, *Event, error) {
+	pane, exists := c.state.panes[command.PaneID]
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: pane %d", ErrNotFound, command.PaneID)
+	}
+	if pane.Terminal == nil || pane.Terminal.State != TerminalStarting || strings.TrimSpace(command.Message) == "" {
+		return nil, nil, fmt.Errorf("%w: invalid terminal start failure", ErrInvalidState)
+	}
+	terminal := cloneTerminal(*pane.Terminal)
+	terminal.State = TerminalFailed
+	terminal.Exit = &TerminalExit{Kind: TerminalExitPTYError, Message: command.Message}
+	pane.Terminal = &terminal
+	c.state.panes[pane.ID] = pane
+	result := TerminalResult{Pane: clonePane(pane)}
+	event := Event{Kind: EventTerminalStartFailed, Payload: TerminalEvent{Pane: clonePane(pane)}}
+	return result, &event, nil
+}
+
+func (c *Core) prepareTerminalRestart(command PrepareTerminalRestartCommand) (any, *Event, error) {
+	pane, exists := c.state.panes[command.PaneID]
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: pane %d", ErrNotFound, command.PaneID)
+	}
+	if pane.Terminal == nil {
+		return nil, nil, fmt.Errorf("%w: pane %d has no terminal", ErrInvalidState, command.PaneID)
+	}
+	switch pane.Terminal.State {
+	case TerminalPlaceholder, TerminalExited, TerminalFailed:
+	default:
+		return nil, nil, fmt.Errorf("%w: pane %d terminal cannot restart", ErrInvalidState, command.PaneID)
+	}
+	terminal := cloneTerminal(*pane.Terminal)
+	terminal.ID = nil
+	terminal.State = TerminalStarting
+	terminal.Exit = nil
+	terminal.HistoryAvailable = false
+	pane.Terminal = &terminal
+	c.state.panes[pane.ID] = pane
+	result := TerminalResult{Pane: clonePane(pane)}
+	event := Event{Kind: EventTerminalRestarting, Payload: TerminalEvent{Pane: clonePane(pane)}}
+	return result, &event, nil
+}
+
+func (c *Core) beginTerminalStop(command BeginTerminalStopCommand) (any, *Event, error) {
+	pane, exists := c.state.panes[command.PaneID]
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: pane %d", ErrNotFound, command.PaneID)
+	}
+	if pane.Terminal == nil || pane.Terminal.State != TerminalRunning || pane.Terminal.ID == nil {
+		return nil, nil, fmt.Errorf("%w: pane %d terminal is not running", ErrInvalidState, command.PaneID)
+	}
+	terminal := cloneTerminal(*pane.Terminal)
+	terminal.State = TerminalStopping
+	pane.Terminal = &terminal
+	c.state.panes[pane.ID] = pane
+	result := TerminalResult{Pane: clonePane(pane)}
+	event := Event{Kind: EventTerminalStopping, Payload: TerminalEvent{Pane: clonePane(pane)}}
+	return result, &event, nil
 }
 
 func (c *Core) recordTerminalExit(command RecordTerminalExitCommand) (any, *Event, error) {

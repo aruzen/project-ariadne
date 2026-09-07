@@ -44,6 +44,8 @@ type Server struct {
 	serveOnce         atomic.Bool
 	closeOnce         sync.Once
 	commandGate       sync.RWMutex
+	terminalMu        sync.Mutex
+	stopAfterResponse atomic.Bool
 	connectionsWG     sync.WaitGroup
 	workersWG         sync.WaitGroup
 
@@ -202,6 +204,7 @@ func (server *Server) serveConnection(connection net.Conn) {
 
 	ariadneConfig := server.config.AriadneProtocol
 	ariadneConfig.CommandGuard = server.guardCommand
+	ariadneConfig.Terminal = server
 	ariadneProtocol, err := ariadneprotocol.Register(peer, server.core, ariadneConfig)
 	if err != nil {
 		return
@@ -282,55 +285,64 @@ func (server *Server) managerLoop(subscription *pty.Subscription) {
 	defer close(server.managerLoopDone)
 	pendingRemoval := make(map[streammux.StreamID]struct{})
 	for event := range subscription.Events() {
-		switch event.Kind {
-		case pty.EventExited:
-			if event.Session.Exit == nil {
-				continue
-			}
-			if terminalExitRemovesPane(*event.Session.Exit) {
-				snapshot, err := server.core.Snapshot(server.ctx)
-				if err == nil {
-					if pane, exists := snapshot.PaneByTerminalID(event.Session.ID); exists {
-						_, err = server.core.Execute(server.ctx, core.ClosePaneCommand{PaneID: pane.ID})
-					}
-				}
-				if err == nil || errors.Is(err, core.ErrNotFound) {
-					pendingRemoval[event.Session.ID] = struct{}{}
-				} else if !errors.Is(err, context.Canceled) {
-					server.requestStop(err)
-					return
-				}
-				continue
-			}
-			state, exit := terminalExit(*event.Session.Exit)
-			_, err := server.core.Execute(server.ctx, core.RecordTerminalExitCommand{
-				TerminalID: event.Session.ID, State: state, Exit: exit,
-				HistoryAvailable: event.Session.HistoryAvailable,
-			})
-			if err != nil && !errors.Is(err, core.ErrNotFound) && !errors.Is(err, context.Canceled) {
-				server.requestStop(err)
-				return
-			}
-		case pty.EventRetained:
-			if _, remove := pendingRemoval[event.Session.ID]; remove {
-				delete(pendingRemoval, event.Session.ID)
-				if err := server.manager.Remove(event.Session.ID); err != nil && !errors.Is(err, pty.ErrSessionNotFound) {
-					server.requestStop(err)
-					return
-				}
-			}
-		case pty.EventEvicted, pty.EventRemoved:
-			delete(pendingRemoval, event.Session.ID)
-			_, err := server.core.Execute(server.ctx, core.ForgetTerminalSessionCommand{TerminalID: event.Session.ID})
-			if err != nil && !errors.Is(err, core.ErrNotFound) && !errors.Is(err, context.Canceled) {
-				server.requestStop(err)
-				return
-			}
+		server.terminalMu.Lock()
+		err := server.handleManagerEvent(event, pendingRemoval)
+		server.terminalMu.Unlock()
+		if err != nil {
+			server.requestStop(err)
+			return
 		}
 	}
 	if err := subscription.Err(); err != nil && !errors.Is(err, pty.ErrManagerClosed) {
 		server.requestStop(err)
 	}
+}
+
+func (server *Server) handleManagerEvent(event pty.Event, pendingRemoval map[streammux.StreamID]struct{}) error {
+	switch event.Kind {
+	case pty.EventExited:
+		if event.Session.Exit == nil {
+			return nil
+		}
+		if terminalExitRemovesPane(*event.Session.Exit) {
+			snapshot, err := server.core.Snapshot(server.ctx)
+			if err == nil {
+				if pane, exists := snapshot.PaneByTerminalID(event.Session.ID); exists {
+					_, err = server.core.Execute(server.ctx, core.ClosePaneCommand{PaneID: pane.ID})
+				}
+			}
+			if err == nil || errors.Is(err, core.ErrNotFound) {
+				pendingRemoval[event.Session.ID] = struct{}{}
+				return nil
+			}
+			if !errors.Is(err, context.Canceled) {
+				return err
+			}
+			return nil
+		}
+		state, exit := terminalExit(*event.Session.Exit)
+		_, err := server.core.Execute(server.ctx, core.RecordTerminalExitCommand{
+			TerminalID: event.Session.ID, State: state, Exit: exit,
+			HistoryAvailable: event.Session.HistoryAvailable,
+		})
+		if err != nil && !errors.Is(err, core.ErrNotFound) && !errors.Is(err, context.Canceled) {
+			return err
+		}
+	case pty.EventRetained:
+		if _, remove := pendingRemoval[event.Session.ID]; remove {
+			delete(pendingRemoval, event.Session.ID)
+			if err := server.manager.Remove(event.Session.ID); err != nil && !errors.Is(err, pty.ErrSessionNotFound) {
+				return err
+			}
+		}
+	case pty.EventEvicted, pty.EventRemoved:
+		delete(pendingRemoval, event.Session.ID)
+		_, err := server.core.Execute(server.ctx, core.ForgetTerminalSessionCommand{TerminalID: event.Session.ID})
+		if err != nil && !errors.Is(err, core.ErrNotFound) && !errors.Is(err, context.Canceled) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (server *Server) guardCommand() (func(), error) {

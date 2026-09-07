@@ -10,6 +10,10 @@ const (
 	EventPaneClosed          EventKind = "pane_closed"
 	EventTerminalExited      EventKind = "terminal_exited"
 	EventTerminalUnavailable EventKind = "terminal_unavailable"
+	EventTerminalStarted     EventKind = "terminal_started"
+	EventTerminalStartFailed EventKind = "terminal_start_failed"
+	EventTerminalRestarting  EventKind = "terminal_restarting"
+	EventTerminalStopping    EventKind = "terminal_stopping"
 )
 
 // Event exists only in memory. Revision is incremented once for every

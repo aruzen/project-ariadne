@@ -5,6 +5,7 @@
 package unixsocket
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -32,6 +33,52 @@ type Listener struct {
 
 	cleanupOnce sync.Once
 	cleanupErr  error
+}
+
+// DialContext connects only to a same-user socket whose inode remains stable
+// across connect and whose peer credentials match uid.
+func DialContext(ctx context.Context, path string, uid int) (*net.UnixConn, error) {
+	if ctx == nil || path == "" || !filepath.IsAbs(path) || len(path) >= maxSocketPathBytes || uid < 0 {
+		return nil, ErrInvalidPath
+	}
+	initial, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("unixsocket: stat: %w", err)
+	}
+	if !isOwnedSocket(initial, uid) || initial.Mode().Perm()&0o077 != 0 {
+		return nil, ErrInvalidOwner
+	}
+	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
+	if err != nil {
+		return nil, fmt.Errorf("unixsocket: dial: %w", err)
+	}
+	unixConnection, ok := connection.(*net.UnixConn)
+	if !ok {
+		_ = connection.Close()
+		return nil, ErrInvalidPath
+	}
+	failed := true
+	defer func() {
+		if failed {
+			_ = unixConnection.Close()
+		}
+	}()
+	peer, err := peerUID(unixConnection)
+	if err != nil {
+		return nil, fmt.Errorf("unixsocket: peer credentials: %w", err)
+	}
+	if peer != uid {
+		return nil, ErrInvalidOwner
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("unixsocket: stat connected socket: %w", err)
+	}
+	if !os.SameFile(initial, current) || !isOwnedSocket(current, uid) {
+		return nil, ErrSocketReplaced
+	}
+	failed = false
+	return unixConnection, nil
 }
 
 func Listen(path string, uid int) (*Listener, error) {

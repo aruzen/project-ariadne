@@ -69,15 +69,45 @@ type ForgetTerminalSessionCommand struct {
 	TerminalID TerminalID
 }
 
-func (CreateWorkspaceCommand) isCommand()       {}
-func (CreateWindowCommand) isCommand()          {}
-func (CreatePaneCommand) isCommand()            {}
-func (SplitPaneCommand) isCommand()             {}
-func (MovePaneCommand) isCommand()              {}
-func (ClosePaneCommand) isCommand()             {}
-func (SetFocusCommand) isCommand()              {}
-func (RecordTerminalExitCommand) isCommand()    {}
-func (ForgetTerminalSessionCommand) isCommand() {}
+// ActivateTerminalCommand binds the runtime StreamID allocated by the PTY
+// manager to a Pane previously reserved in TerminalStarting state.
+type ActivateTerminalCommand struct {
+	PaneID     PaneID
+	TerminalID TerminalID
+}
+
+// FailTerminalStartCommand records a PTY startup failure without persisting
+// environment variables or backend-specific error values.
+type FailTerminalStartCommand struct {
+	PaneID  PaneID
+	Message string
+}
+
+// PrepareTerminalRestartCommand transitions a placeholder or exited Terminal
+// back to its I/O-free reservation state before the daemon starts a process.
+type PrepareTerminalRestartCommand struct {
+	PaneID PaneID
+}
+
+// BeginTerminalStopCommand makes a user-requested stop visible before the
+// daemon waits for the process to exit.
+type BeginTerminalStopCommand struct {
+	PaneID PaneID
+}
+
+func (CreateWorkspaceCommand) isCommand()        {}
+func (CreateWindowCommand) isCommand()           {}
+func (CreatePaneCommand) isCommand()             {}
+func (SplitPaneCommand) isCommand()              {}
+func (MovePaneCommand) isCommand()               {}
+func (ClosePaneCommand) isCommand()              {}
+func (SetFocusCommand) isCommand()               {}
+func (RecordTerminalExitCommand) isCommand()     {}
+func (ForgetTerminalSessionCommand) isCommand()  {}
+func (ActivateTerminalCommand) isCommand()       {}
+func (FailTerminalStartCommand) isCommand()      {}
+func (PrepareTerminalRestartCommand) isCommand() {}
+func (BeginTerminalStopCommand) isCommand()      {}
 
 type CreateWorkspaceResult struct {
 	Workspace Workspace `json:"workspace"`
@@ -178,6 +208,34 @@ func cloneCommand(command Command) (Command, error) {
 	case ForgetTerminalSessionCommand:
 		return value, nil
 	case *ForgetTerminalSessionCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case ActivateTerminalCommand:
+		return value, nil
+	case *ActivateTerminalCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case FailTerminalStartCommand:
+		return value, nil
+	case *FailTerminalStartCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case PrepareTerminalRestartCommand:
+		return value, nil
+	case *PrepareTerminalRestartCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case BeginTerminalStopCommand:
+		return value, nil
+	case *BeginTerminalStopCommand:
 		if value == nil {
 			return nil, ErrInvalidCommand
 		}

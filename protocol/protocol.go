@@ -14,6 +14,7 @@ import (
 
 	"github.com/aruzen/ariadne/core"
 	"github.com/aruzen/streammux"
+	"github.com/aruzen/streammux/pty"
 )
 
 const (
@@ -34,6 +35,13 @@ const (
 	OperationSplitPane       Operation = "split_pane"
 	OperationMovePane        Operation = "move_pane"
 	OperationSetFocus        Operation = "set_focus"
+	OperationNewTerminal     Operation = "new_terminal"
+	OperationListTerminals   Operation = "list_terminals"
+	OperationRestartTerminal Operation = "restart_terminal"
+	OperationKillTerminal    Operation = "kill_terminal"
+	OperationDismissTerminal Operation = "dismiss_terminal"
+	OperationDaemonStatus    Operation = "daemon_status"
+	OperationDaemonStop      Operation = "daemon_stop"
 )
 
 type ErrorCode string
@@ -61,6 +69,23 @@ type Config struct {
 	// CommandGuard brackets request execution. A daemon can use it to reject
 	// new work and wait for in-flight commands before its shutdown Snapshot.
 	CommandGuard func() (release func(), err error)
+	Terminal     TerminalController
+}
+
+// TerminalController owns operations that cross the Core/PTY I/O boundary.
+// Implementations must serialize lifecycle transitions where necessary.
+type TerminalController interface {
+	NewTerminal(context.Context, NewTerminalParams) (TerminalOperationResult, error)
+	ListTerminals(context.Context) (ListTerminalsResult, error)
+	RestartTerminal(context.Context, RestartTerminalParams) (TerminalOperationResult, error)
+	KillTerminal(context.Context, PaneParams) (TerminalOperationResult, error)
+	DismissTerminal(context.Context, PaneParams) (TerminalOperationResult, error)
+	DaemonStatus(context.Context) (DaemonStatusResult, error)
+	DaemonStop(context.Context, DaemonStopParams) (DaemonStatusResult, error)
+}
+
+type ResponseObserver interface {
+	AfterResponse(Operation)
 }
 
 func DefaultConfig() Config {
@@ -118,37 +143,84 @@ type EventEnvelope struct {
 	Event   core.Event `json:"event"`
 }
 
-type createWorkspaceParams struct {
+type CreateWorkspaceParams struct {
 	Name string `json:"name"`
 }
 
-type createWindowParams struct {
+type CreateWindowParams struct {
 	WorkspaceID core.WorkspaceID `json:"workspace_id"`
 	Name        string           `json:"name"`
 }
 
-type createPaneParams struct {
+type CreatePaneParams struct {
 	WindowID core.WindowID `json:"window_id"`
 	Kind     core.PaneKind `json:"kind"`
 	Title    string        `json:"title,omitempty"`
 }
 
-type splitPaneParams struct {
+type SplitPaneParams struct {
 	TargetPaneID core.PaneID         `json:"target_pane_id"`
 	Direction    core.SplitDirection `json:"direction"`
 	Kind         core.PaneKind       `json:"kind"`
 	Title        string              `json:"title,omitempty"`
 }
 
-type movePaneParams struct {
+type MovePaneParams struct {
 	PaneID        core.PaneID         `json:"pane_id"`
 	DestinationID core.WindowID       `json:"destination_window_id"`
 	TargetPaneID  core.PaneID         `json:"target_pane_id,omitempty"`
 	Direction     core.SplitDirection `json:"direction,omitempty"`
 }
 
-type setFocusParams struct {
+type SetFocusParams struct {
 	PaneID core.PaneID `json:"pane_id"`
+}
+
+type NewTerminalParams struct {
+	WindowID     core.WindowID       `json:"window_id,omitempty"`
+	TargetPaneID core.PaneID         `json:"target_pane_id,omitempty"`
+	Direction    core.SplitDirection `json:"direction,omitempty"`
+	Title        string              `json:"title,omitempty"`
+	Argv         []string            `json:"argv"`
+	CWD          string              `json:"cwd"`
+	Env          []string            `json:"env"`
+	InitialSize  pty.Size            `json:"initial_size"`
+}
+
+type RestartTerminalParams struct {
+	PaneID      core.PaneID `json:"pane_id"`
+	Env         []string    `json:"env"`
+	InitialSize pty.Size    `json:"initial_size"`
+}
+
+type PaneParams struct {
+	PaneID core.PaneID `json:"pane_id"`
+}
+
+type TerminalOperationResult struct {
+	Pane core.Pane `json:"pane"`
+}
+
+type TerminalListEntry struct {
+	Pane            core.Pane `json:"pane"`
+	AttachmentCount int       `json:"attachment_count"`
+}
+
+type ListTerminalsResult struct {
+	Revision uint64              `json:"revision"`
+	Entries  []TerminalListEntry `json:"entries"`
+}
+
+type DaemonStatusResult struct {
+	Stopping          bool `json:"stopping"`
+	Connections       int  `json:"connections"`
+	Sessions          int  `json:"sessions"`
+	ActiveTerminals   int  `json:"active_terminals"`
+	RetainedTerminals int  `json:"retained_terminals"`
+}
+
+type DaemonStopParams struct {
+	Force bool `json:"force"`
 }
 
 type Protocol struct {
@@ -248,6 +320,19 @@ func (protocol *Protocol) handleCommand(ctx context.Context, peer *streammux.Pee
 		go protocol.forwardEvents(subscription)
 		return nil
 	}
+	if isTerminalOperation(request.Operation) {
+		result, err := protocol.executeTerminal(ctx, request)
+		release()
+		release = nil
+		if err != nil {
+			return protocol.respondCoreError(ctx, frame, err)
+		}
+		responseErr := protocol.respondResult(ctx, frame, result)
+		if observer, ok := protocol.config.Terminal.(ResponseObserver); ok {
+			observer.AfterResponse(request.Operation)
+		}
+		return responseErr
+	}
 	frontendID, err := protocol.frontendID()
 	if err != nil {
 		release()
@@ -267,6 +352,69 @@ func (protocol *Protocol) handleCommand(ctx context.Context, peer *streammux.Pee
 		return protocol.respondCoreError(ctx, frame, err)
 	}
 	return protocol.respondResult(ctx, frame, result)
+}
+
+func isTerminalOperation(operation Operation) bool {
+	switch operation {
+	case OperationNewTerminal, OperationListTerminals, OperationRestartTerminal,
+		OperationKillTerminal, OperationDismissTerminal, OperationDaemonStatus, OperationDaemonStop:
+		return true
+	default:
+		return false
+	}
+}
+
+func (protocol *Protocol) executeTerminal(ctx context.Context, request Request) (any, error) {
+	if _, err := protocol.frontendID(); err != nil {
+		return nil, err
+	}
+	if protocol.config.Terminal == nil {
+		return nil, fmt.Errorf("%w: terminal operations are unavailable", core.ErrInvalidState)
+	}
+	switch request.Operation {
+	case OperationNewTerminal:
+		var params NewTerminalParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return protocol.config.Terminal.NewTerminal(ctx, params)
+	case OperationListTerminals:
+		if err := decodeNoParams(request.Params); err != nil {
+			return nil, err
+		}
+		return protocol.config.Terminal.ListTerminals(ctx)
+	case OperationRestartTerminal:
+		var params RestartTerminalParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return protocol.config.Terminal.RestartTerminal(ctx, params)
+	case OperationKillTerminal:
+		var params PaneParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return protocol.config.Terminal.KillTerminal(ctx, params)
+	case OperationDismissTerminal:
+		var params PaneParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return protocol.config.Terminal.DismissTerminal(ctx, params)
+	case OperationDaemonStatus:
+		if err := decodeNoParams(request.Params); err != nil {
+			return nil, err
+		}
+		return protocol.config.Terminal.DaemonStatus(ctx)
+	case OperationDaemonStop:
+		var params DaemonStopParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return protocol.config.Terminal.DaemonStop(ctx, params)
+	default:
+		return nil, fmt.Errorf("%w: unknown terminal operation", core.ErrInvalidArgument)
+	}
 }
 
 func (protocol *Protocol) synchronize(params json.RawMessage) (SyncResult, *core.Subscription, error) {
@@ -310,37 +458,37 @@ func (protocol *Protocol) frontendID() (core.FrontendID, error) {
 func commandFromRequest(request Request, frontendID core.FrontendID) (core.Command, error) {
 	switch request.Operation {
 	case OperationCreateWorkspace:
-		var params createWorkspaceParams
+		var params CreateWorkspaceParams
 		if err := decodeParams(request.Params, &params); err != nil {
 			return nil, err
 		}
 		return core.CreateWorkspaceCommand{Name: params.Name}, nil
 	case OperationCreateWindow:
-		var params createWindowParams
+		var params CreateWindowParams
 		if err := decodeParams(request.Params, &params); err != nil {
 			return nil, err
 		}
 		return core.CreateWindowCommand{WorkspaceID: params.WorkspaceID, Name: params.Name}, nil
 	case OperationCreatePane:
-		var params createPaneParams
+		var params CreatePaneParams
 		if err := decodeParams(request.Params, &params); err != nil {
 			return nil, err
 		}
 		return core.CreatePaneCommand{WindowID: params.WindowID, Pane: core.PaneSpec{Kind: params.Kind, Title: params.Title}}, nil
 	case OperationSplitPane:
-		var params splitPaneParams
+		var params SplitPaneParams
 		if err := decodeParams(request.Params, &params); err != nil {
 			return nil, err
 		}
 		return core.SplitPaneCommand{TargetPaneID: params.TargetPaneID, Direction: params.Direction, Pane: core.PaneSpec{Kind: params.Kind, Title: params.Title}}, nil
 	case OperationMovePane:
-		var params movePaneParams
+		var params MovePaneParams
 		if err := decodeParams(request.Params, &params); err != nil {
 			return nil, err
 		}
 		return core.MovePaneCommand{PaneID: params.PaneID, DestinationID: params.DestinationID, TargetPaneID: params.TargetPaneID, Direction: params.Direction}, nil
 	case OperationSetFocus:
-		var params setFocusParams
+		var params SetFocusParams
 		if err := decodeParams(request.Params, &params); err != nil {
 			return nil, err
 		}
@@ -356,6 +504,17 @@ func decodeParams(data json.RawMessage, destination any) error {
 	}
 	if err := decodeStrict(data, destination); err != nil {
 		return fmt.Errorf("%w: %v", core.ErrInvalidArgument, err)
+	}
+	return nil
+}
+
+func decodeNoParams(data json.RawMessage) error {
+	if len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) || bytes.Equal(bytes.TrimSpace(data), []byte("{}")) {
+		return nil
+	}
+	var empty struct{}
+	if err := decodeStrict(data, &empty); err != nil {
+		return fmt.Errorf("%w: operation does not accept parameters", core.ErrInvalidArgument)
 	}
 	return nil
 }
@@ -418,9 +577,14 @@ func classifyError(err error) (ErrorCode, string) {
 		return CodeInvalidArgument, "invalid argument"
 	case errors.Is(err, core.ErrNotFound):
 		return CodeNotFound, "not found"
+	case errors.Is(err, pty.ErrSessionNotFound):
+		return CodeNotFound, "not found"
 	case errors.Is(err, core.ErrAlreadyExists):
 		return CodeAlreadyExists, "already exists"
-	case errors.Is(err, core.ErrInvalidState), errors.Is(err, ErrNotSynchronized), errors.Is(err, ErrAlreadySynchronized):
+	case errors.Is(err, pty.ErrAttachmentLimit):
+		return CodeAlreadyAttached, "already attached"
+	case errors.Is(err, core.ErrInvalidState), errors.Is(err, ErrNotSynchronized), errors.Is(err, ErrAlreadySynchronized),
+		errors.Is(err, pty.ErrSessionRunning), errors.Is(err, pty.ErrSessionLimit):
 		return CodeInvalidState, "invalid state"
 	default:
 		return CodeInternal, "internal error"
