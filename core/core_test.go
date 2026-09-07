@@ -550,3 +550,43 @@ func TestActivateTerminalRejectsDuplicateRuntimeID(t *testing.T) {
 		t.Fatalf("duplicate terminal ID error = %v", err)
 	}
 }
+
+func TestLabelLifecycleAndPaneCleanup(t *testing.T) {
+	engine := newTestCore(t, 16)
+	pane := execute[CreatePaneResult](t, engine, CreatePaneCommand{
+		WindowID: 1, Pane: PaneSpec{Kind: PaneFixed, Title: "labels"},
+	}).Pane
+	label := Label{TargetKind: LabelPane, TargetID: uint64(pane.ID), Source: "test-plugin", Name: "status", Value: "busy"}
+	set := execute[LabelResult](t, engine, SetLabelCommand{Label: label})
+	if !set.Changed {
+		t.Fatal("first SetLabel did not change state")
+	}
+	revision := snapshot(t, engine).Revision
+	set = execute[LabelResult](t, engine, SetLabelCommand{Label: label})
+	if set.Changed || snapshot(t, engine).Revision != revision {
+		t.Fatal("identical SetLabel changed state or revision")
+	}
+	second := label
+	second.Name = "detail"
+	second.Value = "running"
+	execute[LabelResult](t, engine, SetLabelCommand{Label: second})
+	removed := execute[RemoveLabelsResult](t, engine, RemoveLabelsBySourceCommand{Source: label.Source})
+	if len(removed.Labels) != 2 || len(snapshot(t, engine).Labels) != 0 {
+		t.Fatalf("source cleanup = %+v", removed)
+	}
+	execute[LabelResult](t, engine, SetLabelCommand{Label: label})
+	closed := execute[ClosePaneResult](t, engine, ClosePaneCommand{PaneID: pane.ID})
+	if closed.Pane.ID != pane.ID || len(snapshot(t, engine).Labels) != 0 {
+		t.Fatal("closing Pane left labels behind")
+	}
+}
+
+func TestLabelRejectsMissingTarget(t *testing.T) {
+	engine := newTestCore(t, 8)
+	_, err := engine.Execute(context.Background(), SetLabelCommand{Label: Label{
+		TargetKind: LabelPane, TargetID: 999, Source: "plugin", Name: "state", Value: "bad",
+	}})
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("missing target error = %v", err)
+	}
+}

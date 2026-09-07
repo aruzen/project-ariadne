@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aruzen/ariadne/core"
+	ariadneplugin "github.com/aruzen/ariadne/plugin"
 	ariadneprotocol "github.com/aruzen/ariadne/protocol"
 	"github.com/aruzen/ariadne/statefile"
 	"github.com/aruzen/streammux"
@@ -68,6 +69,16 @@ func (process *testManagedProcess) complete(status pty.ExitStatus) {
 type testFactory struct {
 	mu        sync.Mutex
 	processes []*testManagedProcess
+}
+
+type daemonTestPlugin struct{}
+
+func (daemonTestPlugin) Name() string { return "daemon-test" }
+func (daemonTestPlugin) Initialize(ctx context.Context, _ core.Snapshot, labels ariadneplugin.Labels) error {
+	return labels.Set(ctx, core.LabelWorkspace, 1, "ready", "true")
+}
+func (daemonTestPlugin) HandleEvent(context.Context, core.Event, ariadneplugin.Labels) error {
+	return nil
 }
 
 func (factory *testFactory) StartManaged(context.Context, pty.ProcessSpec) (pty.ManagedProcess, error) {
@@ -152,6 +163,52 @@ func TestDefaultConfigUsesBoundedAriadnePTYPolicy(t *testing.T) {
 	}
 }
 
+func TestConfiguredPluginHostStartsWithDaemon(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	configuration := DefaultConfig(statePath)
+	configuration.Plugins = []ariadneplugin.Plugin{daemonTestPlugin{}}
+	server, _, err := Open(context.Background(), &testFactory{}, configuration)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer server.Close(context.Background())
+	if server.PluginHost() == nil {
+		t.Fatal("PluginHost was not created")
+	}
+	waitFor(t, func() bool {
+		snapshot := serverSnapshot(t, server)
+		return len(snapshot.Labels) == 1 && snapshot.Labels[0].Source == ariadneplugin.LabelSource("daemon-test")
+	})
+}
+
+func TestAbnormalTerminalRestoresDerivedErrorLabel(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	configuration := DefaultConfig(statePath)
+	first, _, err := Open(context.Background(), &testFactory{}, configuration)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	executeCore[core.CreatePaneResult](t, first, core.CreatePaneCommand{
+		WindowID: 1,
+		Pane: core.PaneSpec{Kind: core.PaneTerminal, Terminal: &core.TerminalInstance{
+			State: core.TerminalExited, Launch: core.LaunchSpec{Argv: []string{"failed"}, CWD: "/tmp"},
+			Exit: &core.TerminalExit{Kind: core.TerminalExitProcess, Code: 7},
+		}},
+	})
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	second, _, err := Open(context.Background(), &testFactory{}, configuration)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	defer second.Close(context.Background())
+	snapshot := serverSnapshot(t, second)
+	if len(snapshot.Labels) != 1 || snapshot.Labels[0].Source != systemLabelSource || snapshot.Labels[0].Value != "process exited with code 7" {
+		t.Fatalf("restored Labels = %+v", snapshot.Labels)
+	}
+}
+
 func TestPTYAuthorizationRequiresAriadneOwnership(t *testing.T) {
 	server, _ := openTestServer(t, &testFactory{})
 	addRunningPane(t, server, 7)
@@ -182,7 +239,15 @@ func TestManagerAbnormalExitIsRetainedThenRemovalClearsRuntimeID(t *testing.T) {
 	process.complete(pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 7})
 	waitFor(t, func() bool {
 		pane, exists := serverSnapshot(t, server).PaneByTerminalID(1)
-		return exists && pane.Terminal.State == core.TerminalExited && pane.Terminal.Exit != nil && pane.Terminal.Exit.Code == 7
+		if !exists || pane.Terminal.State != core.TerminalExited || pane.Terminal.Exit == nil || pane.Terminal.Exit.Code != 7 {
+			return false
+		}
+		for _, label := range serverSnapshot(t, server).Labels {
+			if label.TargetKind == core.LabelPane && label.TargetID == uint64(pane.ID) && label.Source == systemLabelSource && label.Name == terminalErrorLabel {
+				return true
+			}
+		}
+		return false
 	})
 	waitFor(t, func() bool {
 		info, exists := server.manager.Get(1)
@@ -323,6 +388,9 @@ func TestNewTerminalStartFailureLeavesRestartablePane(t *testing.T) {
 	if terminal.State != core.TerminalFailed || terminal.ID != nil || terminal.Exit == nil ||
 		terminal.Exit.Kind != core.TerminalExitPTYError || terminal.Exit.Message != terminalStartFailure {
 		t.Fatalf("failed Terminal = %+v", terminal)
+	}
+	if len(snapshot.Labels) != 1 || snapshot.Labels[0].Source != systemLabelSource || snapshot.Labels[0].TargetID != uint64(snapshot.Panes[0].ID) {
+		t.Fatalf("start failure Labels = %+v", snapshot.Labels)
 	}
 }
 

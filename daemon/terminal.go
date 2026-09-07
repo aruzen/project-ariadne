@@ -14,6 +14,8 @@ import (
 
 const terminalStartFailure = "PTY process failed to start"
 const terminalCleanupTimeout = 5 * time.Second
+const systemLabelSource = "ariadne"
+const terminalErrorLabel = "error"
 
 func (server *Server) NewTerminal(ctx context.Context, params ariadneprotocol.NewTerminalParams) (ariadneprotocol.TerminalOperationResult, error) {
 	server.terminalMu.Lock()
@@ -70,6 +72,11 @@ func (server *Server) RestartTerminal(ctx context.Context, params ariadneprotoco
 			return ariadneprotocol.TerminalOperationResult{}, err
 		}
 	}
+	if _, err := server.core.Execute(ctx, core.RemoveLabelCommand{
+		TargetKind: core.LabelPane, TargetID: uint64(pane.ID), Source: systemLabelSource, Name: terminalErrorLabel,
+	}); err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
 	result, err := server.core.Execute(ctx, core.PrepareTerminalRestartCommand{PaneID: pane.ID})
 	if err != nil {
 		return ariadneprotocol.TerminalOperationResult{}, err
@@ -85,9 +92,12 @@ func (server *Server) startReservedTerminal(ctx context.Context, pane core.Pane,
 		Env: append([]string(nil), environment...), Dir: launch.CWD, InitialSize: size,
 	})
 	if err != nil {
-		_, recordErr := server.core.Execute(context.WithoutCancel(ctx), core.FailTerminalStartCommand{
+		failed, recordErr := server.core.Execute(context.WithoutCancel(ctx), core.FailTerminalStartCommand{
 			PaneID: pane.ID, Message: terminalStartFailure,
 		})
+		if recordErr == nil {
+			recordErr = server.setTerminalErrorLabel(context.WithoutCancel(ctx), failed.(core.TerminalResult).Pane)
+		}
 		return ariadneprotocol.TerminalOperationResult{}, errors.Join(err, recordErr)
 	}
 	result, err := server.core.Execute(ctx, core.ActivateTerminalCommand{PaneID: pane.ID, TerminalID: session.ID()})
@@ -96,10 +106,49 @@ func (server *Server) startReservedTerminal(ctx context.Context, pane core.Pane,
 		defer cancel()
 		_ = server.manager.Kill(cleanupCtx, session.ID())
 		_ = server.manager.Remove(session.ID())
-		_, recordErr := server.core.Execute(cleanupCtx, core.FailTerminalStartCommand{PaneID: pane.ID, Message: terminalStartFailure})
+		failed, recordErr := server.core.Execute(cleanupCtx, core.FailTerminalStartCommand{PaneID: pane.ID, Message: terminalStartFailure})
+		if recordErr == nil {
+			recordErr = server.setTerminalErrorLabel(cleanupCtx, failed.(core.TerminalResult).Pane)
+		}
 		return ariadneprotocol.TerminalOperationResult{}, errors.Join(err, recordErr)
 	}
 	return ariadneprotocol.TerminalOperationResult{Pane: result.(core.TerminalResult).Pane}, nil
+}
+
+func (server *Server) setTerminalErrorLabel(ctx context.Context, pane core.Pane) error {
+	if pane.Terminal == nil || pane.Terminal.Exit == nil {
+		return fmt.Errorf("%w: terminal error label without exit", core.ErrInvalidState)
+	}
+	value := pane.Terminal.Exit.Message
+	if value == "" {
+		switch pane.Terminal.Exit.Kind {
+		case core.TerminalExitProcess:
+			value = fmt.Sprintf("process exited with code %d", pane.Terminal.Exit.Code)
+		case core.TerminalExitSignal:
+			value = "process exited by signal " + pane.Terminal.Exit.Signal
+		}
+	}
+	_, err := server.core.Execute(ctx, core.SetLabelCommand{Label: core.Label{
+		TargetKind: core.LabelPane, TargetID: uint64(pane.ID), Source: systemLabelSource,
+		Name: terminalErrorLabel, Value: value,
+	}})
+	return err
+}
+
+func (server *Server) restoreSystemLabels(ctx context.Context) error {
+	snapshot, err := server.core.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	for _, pane := range snapshot.Panes {
+		if pane.Terminal == nil || pane.Terminal.Exit == nil {
+			continue
+		}
+		if err := server.setTerminalErrorLabel(ctx, pane); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (server *Server) ListTerminals(ctx context.Context) (ariadneprotocol.ListTerminalsResult, error) {

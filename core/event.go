@@ -14,6 +14,9 @@ const (
 	EventTerminalStartFailed EventKind = "terminal_start_failed"
 	EventTerminalRestarting  EventKind = "terminal_restarting"
 	EventTerminalStopping    EventKind = "terminal_stopping"
+	EventLabelSet            EventKind = "label_set"
+	EventLabelRemoved        EventKind = "label_removed"
+	EventLabelSourceCleared  EventKind = "label_source_cleared"
 )
 
 // Event exists only in memory. Revision is incremented once for every
@@ -48,12 +51,21 @@ type PaneMovedEvent struct {
 }
 
 type PaneClosedEvent struct {
-	Pane   Pane   `json:"pane"`
-	Window Window `json:"window"`
+	Pane          Pane    `json:"pane"`
+	Window        Window  `json:"window"`
+	RemovedLabels []Label `json:"removed_labels,omitempty"`
 }
 
 type TerminalEvent struct {
 	Pane Pane `json:"pane"`
+}
+
+type LabelEvent struct {
+	Label Label `json:"label"`
+}
+
+type LabelsEvent struct {
+	Labels []Label `json:"labels"`
 }
 
 func cloneEvent(event Event) Event {
@@ -76,9 +88,13 @@ func cloneEvent(event Event) Event {
 	case PaneClosedEvent:
 		payload.Pane = clonePane(payload.Pane)
 		payload.Window = cloneWindow(payload.Window)
+		payload.RemovedLabels = append([]Label(nil), payload.RemovedLabels...)
 		event.Payload = payload
 	case TerminalEvent:
 		payload.Pane = clonePane(payload.Pane)
+		event.Payload = payload
+	case LabelsEvent:
+		payload.Labels = append([]Label(nil), payload.Labels...)
 		event.Payload = payload
 	}
 	return event

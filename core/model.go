@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/aruzen/streammux"
@@ -111,6 +112,31 @@ type Pane struct {
 	Terminal *TerminalInstance `json:"terminal,omitempty"`
 }
 
+type LabelTargetKind string
+
+const (
+	LabelWorkspace LabelTargetKind = "workspace"
+	LabelWindow    LabelTargetKind = "window"
+	LabelPane      LabelTargetKind = "pane"
+)
+
+// Label is keyed by Target, Source and Name. Source identifies the Plugin or
+// built-in subsystem that owns the Label and is used for failure cleanup.
+type Label struct {
+	TargetKind LabelTargetKind `json:"target_kind"`
+	TargetID   uint64          `json:"target_id"`
+	Source     string          `json:"source"`
+	Name       string          `json:"name"`
+	Value      string          `json:"value"`
+}
+
+type labelKey struct {
+	targetKind LabelTargetKind
+	targetID   uint64
+	source     string
+	name       string
+}
+
 // Snapshot is an immutable point-in-time copy of persistent Core state.
 // Callers may mutate their copy without affecting Core.
 type Snapshot struct {
@@ -121,6 +147,7 @@ type Snapshot struct {
 	Workspaces      []Workspace `json:"workspaces"`
 	Windows         []Window    `json:"windows"`
 	Panes           []Pane      `json:"panes"`
+	Labels          []Label     `json:"labels,omitempty"`
 }
 
 // DefaultSnapshot returns the initial default/main hierarchy without starting
@@ -164,6 +191,7 @@ type state struct {
 	workspaces      map[WorkspaceID]Workspace
 	windows         map[WindowID]Window
 	panes           map[PaneID]Pane
+	labels          map[labelKey]Label
 	workspaceOrder  []WorkspaceID
 	windowOrder     []WindowID
 	paneOrder       []PaneID
@@ -179,6 +207,7 @@ func defaultState() *state {
 		workspaces:      map[WorkspaceID]Workspace{workspace.ID: workspace},
 		windows:         map[WindowID]Window{window.ID: window},
 		panes:           make(map[PaneID]Pane),
+		labels:          make(map[labelKey]Label),
 		workspaceOrder:  []WorkspaceID{workspace.ID},
 		windowOrder:     []WindowID{window.ID},
 	}
@@ -193,6 +222,7 @@ func stateFromSnapshot(snapshot Snapshot) (*state, error) {
 		workspaces:      make(map[WorkspaceID]Workspace, len(snapshot.Workspaces)),
 		windows:         make(map[WindowID]Window, len(snapshot.Windows)),
 		panes:           make(map[PaneID]Pane, len(snapshot.Panes)),
+		labels:          make(map[labelKey]Label, len(snapshot.Labels)),
 	}
 	for _, workspace := range snapshot.Workspaces {
 		workspace = cloneWorkspace(workspace)
@@ -249,6 +279,16 @@ func stateFromSnapshot(snapshot Snapshot) (*state, error) {
 		}
 		s.panes[pane.ID] = pane
 		s.paneOrder = append(s.paneOrder, pane.ID)
+	}
+	for _, label := range snapshot.Labels {
+		if !validLabel(label) || !s.labelTargetExists(label.TargetKind, label.TargetID) {
+			return nil, fmt.Errorf("%w: invalid label", ErrInvalidState)
+		}
+		key := keyForLabel(label)
+		if _, exists := s.labels[key]; exists {
+			return nil, fmt.Errorf("%w: duplicate label", ErrInvalidState)
+		}
+		s.labels[key] = label
 	}
 	if err := s.validateHierarchy(); err != nil {
 		return nil, err
@@ -351,6 +391,7 @@ func (s *state) snapshot() Snapshot {
 		Workspaces:      make([]Workspace, 0, len(s.workspaces)),
 		Windows:         make([]Window, 0, len(s.windows)),
 		Panes:           make([]Pane, 0, len(s.panes)),
+		Labels:          make([]Label, 0, len(s.labels)),
 	}
 	for _, id := range s.workspaceOrder {
 		snapshot.Workspaces = append(snapshot.Workspaces, cloneWorkspace(s.workspaces[id]))
@@ -361,7 +402,51 @@ func (s *state) snapshot() Snapshot {
 	for _, id := range s.paneOrder {
 		snapshot.Panes = append(snapshot.Panes, clonePane(s.panes[id]))
 	}
+	for _, label := range s.labels {
+		snapshot.Labels = append(snapshot.Labels, label)
+	}
+	sort.Slice(snapshot.Labels, func(left, right int) bool {
+		first, second := snapshot.Labels[left], snapshot.Labels[right]
+		if first.TargetKind != second.TargetKind {
+			return first.TargetKind < second.TargetKind
+		}
+		if first.TargetID != second.TargetID {
+			return first.TargetID < second.TargetID
+		}
+		if first.Source != second.Source {
+			return first.Source < second.Source
+		}
+		return first.Name < second.Name
+	})
 	return snapshot
+}
+
+func keyForLabel(label Label) labelKey {
+	return labelKey{targetKind: label.TargetKind, targetID: label.TargetID, source: label.Source, name: label.Name}
+}
+
+func validLabel(label Label) bool {
+	if label.TargetID == 0 || strings.TrimSpace(label.Source) == "" || strings.TrimSpace(label.Name) == "" ||
+		len(label.Source) > 128 || len(label.Name) > 128 || len(label.Value) > 4096 {
+		return false
+	}
+	return !strings.ContainsRune(label.Source, 0) && !strings.ContainsRune(label.Name, 0) && !strings.ContainsRune(label.Value, 0)
+}
+
+func (s *state) labelTargetExists(kind LabelTargetKind, id uint64) bool {
+	switch kind {
+	case LabelWorkspace:
+		_, exists := s.workspaces[WorkspaceID(id)]
+		return exists
+	case LabelWindow:
+		_, exists := s.windows[WindowID(id)]
+		return exists
+	case LabelPane:
+		_, exists := s.panes[PaneID(id)]
+		return exists
+	default:
+		return false
+	}
 }
 
 func cloneWorkspace(workspace Workspace) Workspace {

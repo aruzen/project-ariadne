@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/aruzen/ariadne/core"
+	"github.com/aruzen/ariadne/plugin"
 	ariadneprotocol "github.com/aruzen/ariadne/protocol"
 	"github.com/aruzen/ariadne/statefile"
 	"github.com/aruzen/streammux"
@@ -31,6 +32,8 @@ type Config struct {
 	AriadneProtocol ariadneprotocol.Config
 	PTYProtocol     pty.ProtocolConfig
 	State           statefile.Options
+	Plugins         []plugin.Plugin
+	Plugin          plugin.Config
 }
 
 func DefaultConfig(statePath string) Config {
@@ -48,7 +51,7 @@ func DefaultConfig(statePath string) Config {
 		Core: core.DefaultConfig(), Manager: manager,
 		Stream: streammux.DefaultConfig(), Peer: peer,
 		AriadneProtocol: ariadneprotocol.DefaultConfig(), PTYProtocol: ptyProtocol,
-		State: statefile.DefaultOptions(),
+		State: statefile.DefaultOptions(), Plugin: plugin.DefaultConfig(),
 	}
 }
 

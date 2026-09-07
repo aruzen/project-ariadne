@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 )
 
@@ -34,9 +35,69 @@ func (c *Core) execute(command Command, frontends map[FrontendID]*frontend) (any
 		return c.prepareTerminalRestart(value)
 	case BeginTerminalStopCommand:
 		return c.beginTerminalStop(value)
+	case SetLabelCommand:
+		return c.setLabel(value)
+	case RemoveLabelCommand:
+		return c.removeLabel(value)
+	case RemoveLabelsBySourceCommand:
+		return c.removeLabelsBySource(value)
 	default:
 		return nil, nil, ErrInvalidCommand
 	}
+}
+
+func (c *Core) setLabel(command SetLabelCommand) (any, *Event, error) {
+	label := command.Label
+	if !validLabel(label) || !c.state.labelTargetExists(label.TargetKind, label.TargetID) {
+		return nil, nil, fmt.Errorf("%w: invalid label", ErrInvalidArgument)
+	}
+	key := keyForLabel(label)
+	if existing, exists := c.state.labels[key]; exists && existing.Value == label.Value {
+		return LabelResult{Label: existing, Changed: false}, nil, nil
+	}
+	c.state.labels[key] = label
+	return LabelResult{Label: label, Changed: true}, &Event{Kind: EventLabelSet, Payload: LabelEvent{Label: label}}, nil
+}
+
+func (c *Core) removeLabel(command RemoveLabelCommand) (any, *Event, error) {
+	probe := Label{TargetKind: command.TargetKind, TargetID: command.TargetID, Source: command.Source, Name: command.Name}
+	if !validLabel(probe) {
+		return nil, nil, fmt.Errorf("%w: invalid label identity", ErrInvalidArgument)
+	}
+	key := keyForLabel(probe)
+	label, exists := c.state.labels[key]
+	if !exists {
+		return LabelResult{Label: probe, Changed: false}, nil, nil
+	}
+	delete(c.state.labels, key)
+	return LabelResult{Label: label, Changed: true}, &Event{Kind: EventLabelRemoved, Payload: LabelEvent{Label: label}}, nil
+}
+
+func (c *Core) removeLabelsBySource(command RemoveLabelsBySourceCommand) (any, *Event, error) {
+	if strings.TrimSpace(command.Source) == "" || len(command.Source) > 128 || strings.ContainsRune(command.Source, 0) {
+		return nil, nil, fmt.Errorf("%w: invalid label source", ErrInvalidArgument)
+	}
+	removed := make([]Label, 0)
+	for key, label := range c.state.labels {
+		if label.Source == command.Source {
+			removed = append(removed, label)
+			delete(c.state.labels, key)
+		}
+	}
+	sort.Slice(removed, func(left, right int) bool {
+		if removed[left].TargetKind != removed[right].TargetKind {
+			return removed[left].TargetKind < removed[right].TargetKind
+		}
+		if removed[left].TargetID != removed[right].TargetID {
+			return removed[left].TargetID < removed[right].TargetID
+		}
+		return removed[left].Name < removed[right].Name
+	})
+	result := RemoveLabelsResult{Labels: removed}
+	if len(removed) == 0 {
+		return result, nil, nil
+	}
+	return result, &Event{Kind: EventLabelSourceCleared, Payload: LabelsEvent{Labels: append([]Label(nil), removed...)}}, nil
 }
 
 func (c *Core) activateTerminal(command ActivateTerminalCommand) (any, *Event, error) {
@@ -377,6 +438,13 @@ func (c *Core) closePane(command ClosePaneCommand, frontends map[FrontendID]*fro
 	window.Layout = layout
 	c.state.windows[window.ID] = window
 	delete(c.state.panes, pane.ID)
+	removedLabels := make([]Label, 0)
+	for key, label := range c.state.labels {
+		if label.TargetKind == LabelPane && label.TargetID == uint64(pane.ID) {
+			removedLabels = append(removedLabels, label)
+			delete(c.state.labels, key)
+		}
+	}
 	c.state.paneOrder = removePaneID(c.state.paneOrder, pane.ID)
 	for _, frontend := range frontends {
 		if frontend.state.PaneID == pane.ID {
@@ -387,7 +455,7 @@ func (c *Core) closePane(command ClosePaneCommand, frontends map[FrontendID]*fro
 		}
 	}
 	result := ClosePaneResult{Pane: clonePane(pane), Window: cloneWindow(window)}
-	event := Event{Kind: EventPaneClosed, Payload: PaneClosedEvent{Pane: clonePane(pane), Window: cloneWindow(window)}}
+	event := Event{Kind: EventPaneClosed, Payload: PaneClosedEvent{Pane: clonePane(pane), Window: cloneWindow(window), RemovedLabels: removedLabels}}
 	return result, &event, nil
 }
 

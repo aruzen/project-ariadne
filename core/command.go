@@ -95,6 +95,21 @@ type BeginTerminalStopCommand struct {
 	PaneID PaneID
 }
 
+type SetLabelCommand struct {
+	Label Label
+}
+
+type RemoveLabelCommand struct {
+	TargetKind LabelTargetKind
+	TargetID   uint64
+	Source     string
+	Name       string
+}
+
+type RemoveLabelsBySourceCommand struct {
+	Source string
+}
+
 func (CreateWorkspaceCommand) isCommand()        {}
 func (CreateWindowCommand) isCommand()           {}
 func (CreatePaneCommand) isCommand()             {}
@@ -108,6 +123,9 @@ func (ActivateTerminalCommand) isCommand()       {}
 func (FailTerminalStartCommand) isCommand()      {}
 func (PrepareTerminalRestartCommand) isCommand() {}
 func (BeginTerminalStopCommand) isCommand()      {}
+func (SetLabelCommand) isCommand()               {}
+func (RemoveLabelCommand) isCommand()            {}
+func (RemoveLabelsBySourceCommand) isCommand()   {}
 
 type CreateWorkspaceResult struct {
 	Workspace Workspace `json:"workspace"`
@@ -139,6 +157,15 @@ type SetFocusResult struct {
 
 type TerminalResult struct {
 	Pane Pane `json:"pane"`
+}
+
+type LabelResult struct {
+	Label   Label `json:"label"`
+	Changed bool  `json:"changed"`
+}
+
+type RemoveLabelsResult struct {
+	Labels []Label `json:"labels"`
 }
 
 func cloneCommand(command Command) (Command, error) {
@@ -236,6 +263,27 @@ func cloneCommand(command Command) (Command, error) {
 	case BeginTerminalStopCommand:
 		return value, nil
 	case *BeginTerminalStopCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case SetLabelCommand:
+		return value, nil
+	case *SetLabelCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case RemoveLabelCommand:
+		return value, nil
+	case *RemoveLabelCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case RemoveLabelsBySourceCommand:
+		return value, nil
+	case *RemoveLabelsBySourceCommand:
 		if value == nil {
 			return nil, ErrInvalidCommand
 		}

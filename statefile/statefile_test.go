@@ -81,6 +81,11 @@ func snapshotWithTerminals(t *testing.T) core.Snapshot {
 	if err != nil {
 		t.Fatalf("create signaled Pane: %v", err)
 	}
+	if _, err := engine.Execute(context.Background(), core.SetLabelCommand{Label: core.Label{
+		TargetKind: core.LabelPane, TargetID: uint64(runningPane.ID), Source: "runtime-plugin", Name: "status", Value: "busy",
+	}}); err != nil {
+		t.Fatalf("set runtime Label: %v", err)
+	}
 	snapshot, err := engine.Snapshot(context.Background())
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
@@ -94,7 +99,7 @@ func TestEncodeDecodeStripsRuntimeStateAndRestoresPlaceholder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	if strings.Contains(string(data), "history_available") || strings.Contains(string(data), "\"revision\"") {
+	if strings.Contains(string(data), "history_available") || strings.Contains(string(data), "\"revision\"") || strings.Contains(string(data), "runtime-plugin") {
 		t.Fatalf("runtime fields leaked into state file:\n%s", data)
 	}
 
@@ -120,6 +125,9 @@ func TestEncodeDecodeStripsRuntimeStateAndRestoresPlaceholder(t *testing.T) {
 	}
 	if restored.Revision != 0 {
 		t.Fatalf("restored Revision = %d, want 0", restored.Revision)
+	}
+	if len(restored.Labels) != 0 {
+		t.Fatalf("runtime Labels persisted: %+v", restored.Labels)
 	}
 	if restored.NextPaneID != original.NextPaneID || len(restored.Panes) != 4 {
 		t.Fatalf("restored counters or Panes differ: %+v", restored)

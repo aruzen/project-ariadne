@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 
 	"github.com/aruzen/ariadne/core"
+	"github.com/aruzen/ariadne/plugin"
 	ariadneprotocol "github.com/aruzen/ariadne/protocol"
 	"github.com/aruzen/ariadne/statefile"
 	"github.com/aruzen/streammux"
@@ -28,6 +29,7 @@ type Server struct {
 	core    *core.Core
 	manager *pty.Manager
 	store   *statefile.Store
+	plugins *plugin.Host
 	load    statefile.LoadResult
 
 	ctx    context.Context
@@ -88,12 +90,34 @@ func Open(parent context.Context, factory pty.ManagedFactory, configuration Conf
 		ctx: ctx, cancel: cancel, connections: make(map[*streammux.Peer]struct{}), fatal: make(chan error, 1),
 		stateLoopDone: make(chan struct{}), managerLoopDone: make(chan struct{}),
 	}
+	if err := server.restoreSystemLabels(context.Background()); err != nil {
+		cancel()
+		_ = store.Close(context.Background())
+		_ = manager.Close()
+		_ = engine.Close()
+		return nil, loaded, err
+	}
 	if err := server.startObservers(); err != nil {
 		cancel()
 		_ = store.Close(context.Background())
 		_ = manager.Close()
 		_ = engine.Close()
 		return nil, loaded, err
+	}
+	if len(configuration.Plugins) != 0 {
+		server.plugins, err = plugin.New(server.ctx, engine, configuration.Plugins, configuration.Plugin)
+		if err != nil {
+			cancel()
+			_ = server.managerSubscription.Close()
+			_ = server.stateSubscription.Close()
+			<-server.managerLoopDone
+			<-server.stateLoopDone
+			_ = store.Close(context.Background())
+			_ = manager.Close()
+			server.workersWG.Wait()
+			_ = engine.Close()
+			return nil, loaded, err
+		}
 	}
 	server.workersWG.Add(1)
 	go func() {
@@ -110,6 +134,7 @@ func Open(parent context.Context, factory pty.ManagedFactory, configuration Conf
 func (server *Server) Core() *core.Core                 { return server.core }
 func (server *Server) Manager() *pty.Manager            { return server.manager }
 func (server *Server) LoadResult() statefile.LoadResult { return server.load }
+func (server *Server) PluginHost() *plugin.Host         { return server.plugins }
 
 func (server *Server) Serve(listener net.Listener) error {
 	if listener == nil {
@@ -321,12 +346,17 @@ func (server *Server) handleManagerEvent(event pty.Event, pendingRemoval map[str
 			return nil
 		}
 		state, exit := terminalExit(*event.Session.Exit)
-		_, err := server.core.Execute(server.ctx, core.RecordTerminalExitCommand{
+		result, err := server.core.Execute(server.ctx, core.RecordTerminalExitCommand{
 			TerminalID: event.Session.ID, State: state, Exit: exit,
 			HistoryAvailable: event.Session.HistoryAvailable,
 		})
 		if err != nil && !errors.Is(err, core.ErrNotFound) && !errors.Is(err, context.Canceled) {
 			return err
+		}
+		if err == nil {
+			if err := server.setTerminalErrorLabel(server.ctx, result.(core.TerminalResult).Pane); err != nil {
+				return err
+			}
 		}
 	case pty.EventRetained:
 		if _, remove := pendingRemoval[event.Session.ID]; remove {
@@ -422,6 +452,11 @@ func (server *Server) Close(ctx context.Context) error {
 		}
 
 		var shutdownErrors []error
+		if server.plugins != nil {
+			if err := server.plugins.Close(ctx); err != nil {
+				shutdownErrors = append(shutdownErrors, err)
+			}
+		}
 		if server.managerSubscription != nil {
 			_ = server.managerSubscription.Close()
 			<-server.managerLoopDone
