@@ -116,6 +116,8 @@ func (client *Client) Close() error {
 }
 
 func (client *Client) Peer() *streammux.Peer { return client.peer }
+func (client *Client) Done() <-chan struct{} { return client.peer.Done() }
+func (client *Client) Err() error            { return client.peer.Err() }
 
 func (client *Client) ignoreEvent(context.Context, *streammux.Peer, streammux.Frame) error {
 	return nil

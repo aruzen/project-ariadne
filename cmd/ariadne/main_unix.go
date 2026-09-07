@@ -56,12 +56,22 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if len(remaining) == 0 {
 		return errors.New("command is required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	lifetimeCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	command := remaining[0]
+	if !knownCommand(command) {
+		return fmt.Errorf("unknown command %q", command)
+	}
+	if command == "open" || command == "attach" {
+		if err := requireAttachTTY(stdout); err != nil {
+			return err
+		}
+	}
 	autoStart := command != "daemon"
-	connection, err := connect(ctx, *socketPath, autoStart)
+	connectCtx, cancelConnect := context.WithTimeout(lifetimeCtx, commandTimeout)
+	connection, err := connect(connectCtx, *socketPath, autoStart)
+	cancelConnect()
 	if err != nil {
 		if command == "daemon" && len(remaining) >= 2 && remaining[1] == "status" && isDaemonAbsent(err) {
 			_, _ = fmt.Fprintln(stdout, "stopped")
@@ -69,35 +79,68 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		}
 		return err
 	}
-	frontend, err := client.Open(ctx, connection, client.DefaultConfig())
+	frontend, err := client.Open(lifetimeCtx, connection, client.DefaultConfig())
 	if err != nil {
 		_ = connection.Close()
 		return err
 	}
 	defer frontend.Close()
-	if _, err := frontend.Sync(ctx); err != nil {
+	syncCtx, cancelSync := context.WithTimeout(lifetimeCtx, commandTimeout)
+	_, err = frontend.Sync(syncCtx)
+	cancelSync()
+	if err != nil {
 		return err
+	}
+	operationCtx := lifetimeCtx
+	if command != "open" && command != "attach" {
+		var cancelOperation context.CancelFunc
+		operationCtx, cancelOperation = context.WithTimeout(lifetimeCtx, commandTimeout)
+		defer cancelOperation()
 	}
 
 	switch command {
 	case "new":
-		return runNew(ctx, frontend, remaining[1:], stdout, stderr)
+		return runNew(operationCtx, frontend, remaining[1:], stdout, stderr)
+	case "open":
+		return runOpen(operationCtx, frontend, remaining[1:], stdout, stderr)
+	case "attach":
+		return runAttach(operationCtx, frontend, remaining[1:], stdout)
 	case "list":
-		return runList(ctx, frontend, remaining[1:], stdout, stderr)
+		return runList(operationCtx, frontend, remaining[1:], stdout, stderr)
 	case "restart":
-		return runRestart(ctx, frontend, remaining[1:], stdout, stderr)
+		return runRestart(operationCtx, frontend, remaining[1:], stdout, stderr)
 	case "kill":
-		return runPaneCommand(ctx, frontend, protocol.OperationKillTerminal, remaining[1:], stdout, "killed")
+		return runPaneCommand(operationCtx, frontend, protocol.OperationKillTerminal, remaining[1:], stdout, "killed")
 	case "dismiss":
-		return runPaneCommand(ctx, frontend, protocol.OperationDismissTerminal, remaining[1:], stdout, "dismissed")
+		return runPaneCommand(operationCtx, frontend, protocol.OperationDismissTerminal, remaining[1:], stdout, "dismissed")
 	case "daemon":
-		return runDaemon(ctx, frontend, remaining[1:], stdout, stderr)
+		return runDaemon(operationCtx, frontend, remaining[1:], stdout, stderr)
+	}
+	return nil
+}
+
+func knownCommand(command string) bool {
+	switch command {
+	case "new", "open", "attach", "list", "restart", "kill", "dismiss", "daemon":
+		return true
 	default:
-		return fmt.Errorf("unknown command %q", command)
+		return false
 	}
 }
 
 func runNew(ctx context.Context, frontend *client.Client, arguments []string, stdout, stderr io.Writer) error {
+	params, err := parseNewParams(arguments, stderr)
+	if err != nil {
+		return err
+	}
+	result, err := client.Call[protocol.TerminalOperationResult](ctx, frontend, protocol.OperationNewTerminal, params)
+	if err != nil {
+		return err
+	}
+	return printTerminalResult(stdout, "created", result.Pane)
+}
+
+func parseNewParams(arguments []string, stderr io.Writer) (protocol.NewTerminalParams, error) {
 	flags := flag.NewFlagSet("new", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	windowID := flags.Uint64("window", 0, "destination Window ID")
@@ -106,26 +149,49 @@ func runNew(ctx context.Context, frontend *client.Client, arguments []string, st
 	title := flags.String("title", "", "Pane title")
 	cwd, err := os.Getwd()
 	if err != nil {
-		return err
+		return protocol.NewTerminalParams{}, err
 	}
 	workingDirectory := flags.String("cwd", cwd, "working directory")
 	if err := flags.Parse(arguments); err != nil {
-		return err
+		return protocol.NewTerminalParams{}, err
 	}
 	argv, err := resolveArgv(flags.Args())
 	if err != nil {
-		return err
+		return protocol.NewTerminalParams{}, err
 	}
-	params := protocol.NewTerminalParams{
+	return protocol.NewTerminalParams{
 		WindowID: core.WindowID(*windowID), TargetPaneID: core.PaneID(*targetID),
 		Direction: core.SplitDirection(*direction), Title: *title,
 		Argv: argv, CWD: *workingDirectory, Env: os.Environ(), InitialSize: terminalSize(os.Stdin),
-	}
-	result, err := client.Call[protocol.TerminalOperationResult](ctx, frontend, protocol.OperationNewTerminal, params)
+	}, nil
+}
+
+func runOpen(ctx context.Context, frontend *client.Client, arguments []string, stdout, stderr io.Writer) error {
+	params, err := parseNewParams(arguments, stderr)
 	if err != nil {
 		return err
 	}
-	return printTerminalResult(stdout, "created", result.Pane)
+	createCtx, cancel := context.WithTimeout(ctx, commandTimeout)
+	result, err := client.Call[protocol.TerminalOperationResult](createCtx, frontend, protocol.OperationNewTerminal, params)
+	cancel()
+	if err != nil {
+		return err
+	}
+	if result.Pane.Terminal == nil || result.Pane.Terminal.ID == nil {
+		return errors.New("created Pane has no Terminal ID")
+	}
+	return attachTerminal(ctx, frontend, *result.Pane.Terminal.ID, stdout)
+}
+
+func runAttach(ctx context.Context, frontend *client.Client, arguments []string, stdout io.Writer) error {
+	if len(arguments) != 1 {
+		return errors.New("attach requires one Terminal ID")
+	}
+	id, err := strconv.ParseUint(arguments[0], 10, 64)
+	if err != nil || id == 0 {
+		return fmt.Errorf("invalid Terminal ID %q", arguments[0])
+	}
+	return attachTerminal(ctx, frontend, core.TerminalID(id), stdout)
 }
 
 func runRestart(ctx context.Context, frontend *client.Client, arguments []string, stdout, stderr io.Writer) error {

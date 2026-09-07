@@ -4,7 +4,10 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"testing"
+
+	platformterminal "github.com/aruzen/ariadne/platform/terminal"
 )
 
 func TestDaemonStatusReportsStoppedWithoutAutoStart(t *testing.T) {
@@ -16,6 +19,22 @@ func TestDaemonStatusReportsStoppedWithoutAutoStart(t *testing.T) {
 	}
 	if stdout.String() != "stopped\n" || stderr.Len() != 0 {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestOpenRejectsNonTTYBeforeConnecting(t *testing.T) {
+	var output bytes.Buffer
+	err := run([]string{"-socket", "/tmp/ariadne-cli-open-missing.sock", "open", "--", "sh"}, &output, &output)
+	if !errors.Is(err, platformterminal.ErrNotTerminal) {
+		t.Fatalf("open error = %v", err)
+	}
+}
+
+func TestUnknownCommandDoesNotConnect(t *testing.T) {
+	var output bytes.Buffer
+	err := run([]string{"-socket", "/tmp/ariadne-cli-unknown-missing.sock", "unknown"}, &output, &output)
+	if err == nil || err.Error() != `unknown command "unknown"` {
+		t.Fatalf("unknown command error = %v", err)
 	}
 }
 
