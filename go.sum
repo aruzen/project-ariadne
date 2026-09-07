@@ -1,5 +1,7 @@
 github.com/aruzen/streammux v0.2.0 h1:UZ6DnYfW8tSx/7lurjrM14SV+P5rF4goteqkzOmoTVs=
 github.com/aruzen/streammux v0.2.0/go.mod h1:btoKxBLrww2fEp0iE0Oidhyp4/AN/mwsbRj4ZiJPRxg=
+github.com/creack/pty v1.1.24 h1:bJrF4RRfyJnbTJqzRLHzcGaZK1NeM5kTC9jGgovnR1s=
+github.com/creack/pty v1.1.24/go.mod h1:08sCNb52WyoAwi2QDyzUCTgcvVFhUzewun7wtTfvcwE=
 github.com/pelletier/go-toml/v2 v2.4.3 h1:GTRvJQutkOSftxIFD5xw9aepkYNuPWmVJpffdDPYVpY=
 github.com/pelletier/go-toml/v2 v2.4.3/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=
 go.uber.org/goleak v1.3.0 h1:2K3zAYmnTNqV73imy9J1T3WC+gmCePx2hEGkimedGto=

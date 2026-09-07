@@ -22,9 +22,65 @@ func (c *Core) execute(command Command, frontends map[FrontendID]*frontend) (any
 		return c.closePane(value, frontends)
 	case SetFocusCommand:
 		return c.setFocus(value, frontends)
+	case RecordTerminalExitCommand:
+		return c.recordTerminalExit(value)
+	case ForgetTerminalSessionCommand:
+		return c.forgetTerminalSession(value)
 	default:
 		return nil, nil, ErrInvalidCommand
 	}
+}
+
+func (c *Core) recordTerminalExit(command RecordTerminalExitCommand) (any, *Event, error) {
+	paneID, pane, exists := c.state.paneByTerminalID(command.TerminalID)
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: terminal %d", ErrNotFound, command.TerminalID)
+	}
+	if command.State != TerminalExited && command.State != TerminalFailed {
+		return nil, nil, fmt.Errorf("%w: terminal exit state %q", ErrInvalidArgument, command.State)
+	}
+	terminal := cloneTerminal(*pane.Terminal)
+	terminal.State = command.State
+	terminal.Exit = &TerminalExit{Kind: command.Exit.Kind, Code: command.Exit.Code, Signal: command.Exit.Signal, Message: command.Exit.Message}
+	terminal.HistoryAvailable = command.HistoryAvailable
+	if !validTerminal(terminal) {
+		return nil, nil, fmt.Errorf("%w: invalid terminal exit", ErrInvalidArgument)
+	}
+	pane.Terminal = &terminal
+	c.state.panes[paneID] = pane
+	result := TerminalResult{Pane: clonePane(pane)}
+	event := Event{Kind: EventTerminalExited, Payload: TerminalEvent{Pane: clonePane(pane)}}
+	return result, &event, nil
+}
+
+func (c *Core) forgetTerminalSession(command ForgetTerminalSessionCommand) (any, *Event, error) {
+	paneID, pane, exists := c.state.paneByTerminalID(command.TerminalID)
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: terminal %d", ErrNotFound, command.TerminalID)
+	}
+	terminal := cloneTerminal(*pane.Terminal)
+	if terminal.State != TerminalExited && terminal.State != TerminalFailed {
+		return nil, nil, fmt.Errorf("%w: terminal %d is active", ErrInvalidState, command.TerminalID)
+	}
+	terminal.ID = nil
+	terminal.HistoryAvailable = false
+	pane.Terminal = &terminal
+	c.state.panes[paneID] = pane
+	result := TerminalResult{Pane: clonePane(pane)}
+	event := Event{Kind: EventTerminalUnavailable, Payload: TerminalEvent{Pane: clonePane(pane)}}
+	return result, &event, nil
+}
+
+func (s *state) paneByTerminalID(id TerminalID) (PaneID, Pane, bool) {
+	if id == 0 {
+		return 0, Pane{}, false
+	}
+	for paneID, pane := range s.panes {
+		if pane.Terminal != nil && pane.Terminal.ID != nil && *pane.Terminal.ID == id {
+			return paneID, pane, true
+		}
+	}
+	return 0, Pane{}, false
 }
 
 func (c *Core) createWorkspace(command CreateWorkspaceCommand) (any, *Event, error) {

@@ -136,6 +136,19 @@ func ValidateSnapshot(snapshot Snapshot) error {
 	return err
 }
 
+// PaneByTerminalID finds the Pane associated with one runtime StreamID.
+func (snapshot Snapshot) PaneByTerminalID(id TerminalID) (Pane, bool) {
+	if id == 0 {
+		return Pane{}, false
+	}
+	for _, pane := range snapshot.Panes {
+		if pane.Terminal != nil && pane.Terminal.ID != nil && *pane.Terminal.ID == id {
+			return clonePane(pane), true
+		}
+	}
+	return Pane{}, false
+}
+
 type FrontendState struct {
 	ID          FrontendID  `json:"id"`
 	WorkspaceID WorkspaceID `json:"workspace_id"`

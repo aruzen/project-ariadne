@@ -3,47 +3,53 @@ package core
 type EventKind string
 
 const (
-	EventWorkspaceCreated EventKind = "workspace_created"
-	EventWindowCreated    EventKind = "window_created"
-	EventPaneCreated      EventKind = "pane_created"
-	EventPaneMoved        EventKind = "pane_moved"
-	EventPaneClosed       EventKind = "pane_closed"
+	EventWorkspaceCreated    EventKind = "workspace_created"
+	EventWindowCreated       EventKind = "window_created"
+	EventPaneCreated         EventKind = "pane_created"
+	EventPaneMoved           EventKind = "pane_moved"
+	EventPaneClosed          EventKind = "pane_closed"
+	EventTerminalExited      EventKind = "terminal_exited"
+	EventTerminalUnavailable EventKind = "terminal_unavailable"
 )
 
 // Event exists only in memory. Revision is incremented once for every
 // persistent domain mutation.
 type Event struct {
-	Revision uint64
-	Kind     EventKind
-	Payload  any
+	Revision uint64    `json:"revision"`
+	Kind     EventKind `json:"kind"`
+	Payload  any       `json:"payload"`
 }
 
 type WorkspaceCreatedEvent struct {
-	Workspace Workspace
+	Workspace Workspace `json:"workspace"`
 }
 
 type WindowCreatedEvent struct {
-	Window Window
+	Window Window `json:"window"`
 }
 
 type PaneCreatedEvent struct {
-	Pane         Pane
-	Window       Window
-	TargetPaneID PaneID
-	Direction    SplitDirection
+	Pane         Pane           `json:"pane"`
+	Window       Window         `json:"window"`
+	TargetPaneID PaneID         `json:"target_pane_id,omitempty"`
+	Direction    SplitDirection `json:"direction,omitempty"`
 }
 
 type PaneMovedEvent struct {
-	Pane              Pane
-	SourceWindow      Window
-	DestinationWindow Window
-	TargetPaneID      PaneID
-	Direction         SplitDirection
+	Pane              Pane           `json:"pane"`
+	SourceWindow      Window         `json:"source_window"`
+	DestinationWindow Window         `json:"destination_window"`
+	TargetPaneID      PaneID         `json:"target_pane_id,omitempty"`
+	Direction         SplitDirection `json:"direction,omitempty"`
 }
 
 type PaneClosedEvent struct {
-	Pane   Pane
-	Window Window
+	Pane   Pane   `json:"pane"`
+	Window Window `json:"window"`
+}
+
+type TerminalEvent struct {
+	Pane Pane `json:"pane"`
 }
 
 func cloneEvent(event Event) Event {
@@ -66,6 +72,9 @@ func cloneEvent(event Event) Event {
 	case PaneClosedEvent:
 		payload.Pane = clonePane(payload.Pane)
 		payload.Window = cloneWindow(payload.Window)
+		event.Payload = payload
+	case TerminalEvent:
+		payload.Pane = clonePane(payload.Pane)
 		event.Payload = payload
 	}
 	return event

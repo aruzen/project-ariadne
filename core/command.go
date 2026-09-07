@@ -54,40 +54,61 @@ type SetFocusCommand struct {
 	PaneID     PaneID
 }
 
-func (CreateWorkspaceCommand) isCommand() {}
-func (CreateWindowCommand) isCommand()    {}
-func (CreatePaneCommand) isCommand()      {}
-func (SplitPaneCommand) isCommand()       {}
-func (MovePaneCommand) isCommand()        {}
-func (ClosePaneCommand) isCommand()       {}
-func (SetFocusCommand) isCommand()        {}
+// RecordTerminalExitCommand is emitted by the daemon's PTY Manager observer
+// for abnormal exits that remain visible in Core.
+type RecordTerminalExitCommand struct {
+	TerminalID       TerminalID
+	State            TerminalState
+	Exit             TerminalExit
+	HistoryAvailable bool
+}
+
+// ForgetTerminalSessionCommand clears a runtime StreamID after its retained
+// streammux Session is evicted or removed while preserving Pane diagnostics.
+type ForgetTerminalSessionCommand struct {
+	TerminalID TerminalID
+}
+
+func (CreateWorkspaceCommand) isCommand()       {}
+func (CreateWindowCommand) isCommand()          {}
+func (CreatePaneCommand) isCommand()            {}
+func (SplitPaneCommand) isCommand()             {}
+func (MovePaneCommand) isCommand()              {}
+func (ClosePaneCommand) isCommand()             {}
+func (SetFocusCommand) isCommand()              {}
+func (RecordTerminalExitCommand) isCommand()    {}
+func (ForgetTerminalSessionCommand) isCommand() {}
 
 type CreateWorkspaceResult struct {
-	Workspace Workspace
+	Workspace Workspace `json:"workspace"`
 }
 
 type CreateWindowResult struct {
-	Window Window
+	Window Window `json:"window"`
 }
 
 type CreatePaneResult struct {
-	Pane   Pane
-	Window Window
+	Pane   Pane   `json:"pane"`
+	Window Window `json:"window"`
 }
 
 type MovePaneResult struct {
-	Pane              Pane
-	SourceWindow      Window
-	DestinationWindow Window
+	Pane              Pane   `json:"pane"`
+	SourceWindow      Window `json:"source_window"`
+	DestinationWindow Window `json:"destination_window"`
 }
 
 type ClosePaneResult struct {
-	Pane   Pane
-	Window Window
+	Pane   Pane   `json:"pane"`
+	Window Window `json:"window"`
 }
 
 type SetFocusResult struct {
-	Focus FrontendState
+	Focus FrontendState `json:"focus"`
+}
+
+type TerminalResult struct {
+	Pane Pane `json:"pane"`
 }
 
 func cloneCommand(command Command) (Command, error) {
@@ -143,6 +164,20 @@ func cloneCommand(command Command) (Command, error) {
 	case SetFocusCommand:
 		return value, nil
 	case *SetFocusCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case RecordTerminalExitCommand:
+		return value, nil
+	case *RecordTerminalExitCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case ForgetTerminalSessionCommand:
+		return value, nil
+	case *ForgetTerminalSessionCommand:
 		if value == nil {
 			return nil, ErrInvalidCommand
 		}

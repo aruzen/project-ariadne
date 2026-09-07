@@ -246,6 +246,48 @@ func TestTerminalStateInvariants(t *testing.T) {
 	}
 }
 
+func TestRecordAndForgetTerminalSession(t *testing.T) {
+	core := newTestCore(t, 8)
+	id := streammux.StreamID(17)
+	created := execute[CreatePaneResult](t, core, CreatePaneCommand{
+		WindowID: 1,
+		Pane: PaneSpec{Kind: PaneTerminal, Terminal: &TerminalInstance{
+			ID: &id, State: TerminalRunning, Launch: LaunchSpec{Argv: []string{"agent"}, CWD: "/work"},
+		}},
+	}).Pane
+	if found, ok := snapshot(t, core).PaneByTerminalID(id); !ok || found.ID != created.ID {
+		t.Fatalf("PaneByTerminalID = %+v, %v", found, ok)
+	}
+	exited := execute[TerminalResult](t, core, RecordTerminalExitCommand{
+		TerminalID: id, State: TerminalExited,
+		Exit: TerminalExit{Kind: TerminalExitProcess, Code: 9}, HistoryAvailable: true,
+	}).Pane
+	if exited.Terminal == nil || exited.Terminal.State != TerminalExited || exited.Terminal.Exit.Code != 9 || !exited.Terminal.HistoryAvailable {
+		t.Fatalf("unexpected exited Terminal: %+v", exited.Terminal)
+	}
+	forgotten := execute[TerminalResult](t, core, ForgetTerminalSessionCommand{TerminalID: id}).Pane
+	if forgotten.Terminal.ID != nil || forgotten.Terminal.HistoryAvailable || forgotten.Terminal.Exit.Code != 9 {
+		t.Fatalf("unexpected forgotten Terminal: %+v", forgotten.Terminal)
+	}
+	if _, ok := snapshot(t, core).PaneByTerminalID(id); ok {
+		t.Fatal("forgotten TerminalID is still indexed")
+	}
+}
+
+func TestCannotForgetActiveTerminal(t *testing.T) {
+	core := newTestCore(t, 8)
+	id := streammux.StreamID(18)
+	execute[CreatePaneResult](t, core, CreatePaneCommand{
+		WindowID: 1,
+		Pane: PaneSpec{Kind: PaneTerminal, Terminal: &TerminalInstance{
+			ID: &id, State: TerminalRunning, Launch: LaunchSpec{Argv: []string{"agent"}, CWD: "/work"},
+		}},
+	})
+	if _, err := core.Execute(context.Background(), ForgetTerminalSessionCommand{TerminalID: id}); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("Forget active error = %v", err)
+	}
+}
+
 func TestSnapshotIsDeepCopyAndCanBeRestored(t *testing.T) {
 	core := newTestCore(t, 8)
 	one := execute[CreatePaneResult](t, core, CreatePaneCommand{WindowID: 1, Pane: PaneSpec{Kind: PaneTerminal}}).Pane
