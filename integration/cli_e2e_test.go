@@ -28,6 +28,17 @@ type e2eRuntime struct {
 	environment []string
 }
 
+type terminalRead struct {
+	data []byte
+	err  error
+}
+
+type terminalSession struct {
+	*os.File
+	reads  <-chan terminalRead
+	output strings.Builder
+}
+
 type listResult struct {
 	Entries []struct {
 		Pane struct {
@@ -289,6 +300,13 @@ func (runtime *e2eRuntime) testOpenDetachReattachResize(t *testing.T) {
 		t.Fatalf("write open terminal: %v", err)
 	}
 	readUntil(t, terminal, "ARIADNE_PTY_E2E", "30 90")
+	if err := pty.Setsize(terminal.File, &pty.Winsize{Rows: 42, Cols: 111}); err != nil {
+		t.Fatalf("resize frontend PTY: %v", err)
+	}
+	if _, err := terminal.Write([]byte("sleep 1; stty size\n")); err != nil {
+		t.Fatalf("write resized stty command: %v", err)
+	}
+	readUntil(t, terminal, "42 111")
 	if _, err := terminal.Write([]byte{1, 'd'}); err != nil {
 		t.Fatalf("write detach sequence: %v", err)
 	}
@@ -310,7 +328,7 @@ func (runtime *e2eRuntime) testOpenDetachReattachResize(t *testing.T) {
 	runtime.waitForEntries(t, ctx, func(result listResult) bool { return len(result.Entries) == 0 })
 }
 
-func (runtime *e2eRuntime) startPTY(t *testing.T, ctx context.Context, arguments ...string) (*exec.Cmd, *os.File) {
+func (runtime *e2eRuntime) startPTY(t *testing.T, ctx context.Context, arguments ...string) (*exec.Cmd, *terminalSession) {
 	t.Helper()
 	arguments = append([]string{"-socket", runtime.socketPath}, arguments...)
 	command := runtime.command(ctx, runtime.clientPath, arguments...)
@@ -318,7 +336,22 @@ func (runtime *e2eRuntime) startPTY(t *testing.T, ctx context.Context, arguments
 	if err != nil {
 		t.Fatalf("start PTY command: %v", err)
 	}
-	return command, terminal
+	reads := make(chan terminalRead, 64)
+	go func() {
+		buffer := make([]byte, 4096)
+		for {
+			count, err := terminal.Read(buffer)
+			result := terminalRead{err: err}
+			if count != 0 {
+				result.data = append([]byte(nil), buffer[:count]...)
+			}
+			reads <- result
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return command, &terminalSession{File: terminal, reads: reads}
 }
 
 func (runtime *e2eRuntime) list(ctx context.Context) (listResult, error) {
@@ -359,46 +392,26 @@ func parseTerminalResult(t *testing.T, output, verb string) (uint64, uint64) {
 	return paneID, terminalID
 }
 
-func readUntil(t *testing.T, terminal *os.File, expected ...string) string {
+func readUntil(t *testing.T, terminal *terminalSession, expected ...string) string {
 	t.Helper()
-	type readResult struct {
-		data []byte
-		err  error
-	}
-	reads := make(chan readResult, 64)
-	go func() {
-		buffer := make([]byte, 4096)
-		for {
-			count, err := terminal.Read(buffer)
-			result := readResult{err: err}
-			if count != 0 {
-				result.data = append([]byte(nil), buffer[:count]...)
-			}
-			reads <- result
-			if err != nil {
-				return
-			}
-		}
-	}()
 	timer := time.NewTimer(10 * time.Second)
 	defer timer.Stop()
-	var output strings.Builder
 	for {
 		select {
-		case result := <-reads:
-			output.Write(result.data)
+		case result := <-terminal.reads:
+			terminal.output.Write(result.data)
 			matched := true
 			for _, value := range expected {
-				matched = matched && strings.Contains(output.String(), value)
+				matched = matched && strings.Contains(terminal.output.String(), value)
 			}
 			if matched {
-				return output.String()
+				return terminal.output.String()
 			}
 			if result.err != nil {
-				t.Fatalf("read PTY before %q: %v; output=%q", expected, result.err, output.String())
+				t.Fatalf("read PTY before %q: %v; output=%q", expected, result.err, terminal.output.String())
 			}
 		case <-timer.C:
-			t.Fatalf("PTY output did not contain %q: %q", expected, output.String())
+			t.Fatalf("PTY output did not contain %q: %q", expected, terminal.output.String())
 		}
 	}
 }
