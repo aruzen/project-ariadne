@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aruzen/ariadne/platform/localipc"
+	"github.com/aruzen/ariadne/internal/platform/localipc"
 	"github.com/aruzen/streammux/pty"
 	"github.com/aruzen/streammux/pty/windowspty"
 )
