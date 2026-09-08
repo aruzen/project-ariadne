@@ -1,0 +1,26 @@
+Ariadne incorporates the following third-party software. The corresponding
+license text is included at the listed path.
+
+libghostty-vt (Ghostty), revision b0c421fcd2e290629d4285c181b52fe2f2095f06
+  License: MIT
+  License file: third_party/ghostty/LICENSE
+
+github.com/Microsoft/go-winio v0.6.2
+  License: MIT
+  License file: third_party/go/github.com/Microsoft/go-winio/LICENSE
+
+github.com/aruzen/streammux v0.3.0
+  License: MIT
+  License file: third_party/go/github.com/aruzen/streammux/LICENSE
+
+github.com/creack/pty v1.1.24
+  License: MIT
+  License file: third_party/go/github.com/creack/pty/LICENSE
+
+github.com/pelletier/go-toml/v2 v2.4.3
+  License: MIT
+  License file: third_party/go/github.com/pelletier/go-toml-v2/LICENSE
+
+golang.org/x/sys v0.47.0
+  License: BSD-3-Clause
+  License file: third_party/go/golang.org/x/sys/LICENSE
