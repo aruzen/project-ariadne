@@ -21,6 +21,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - name: Build libghostty-vt
+        run: go run ./tools/build-libghostty-vt
       - name: Race tests
         run: go test -race -shuffle=on ./...
       - name: Vet
