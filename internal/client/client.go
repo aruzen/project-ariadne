@@ -10,6 +10,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/aruzen/ariadne/internal/core"
 	"github.com/aruzen/ariadne/internal/protocol"
 	"github.com/aruzen/streammux"
 )
@@ -17,22 +18,28 @@ import (
 type Config struct {
 	Stream streammux.Config
 	Peer   streammux.PeerConfig
+	// EventBuffer bounds frontend state lag. Overflow closes the connection.
+	EventBuffer int
 }
 
 func DefaultConfig() Config {
-	return Config{Stream: streammux.DefaultConfig(), Peer: streammux.DefaultPeerConfig()}
+	return Config{Stream: streammux.DefaultConfig(), Peer: streammux.DefaultPeerConfig(), EventBuffer: 256}
 }
 
 type Client struct {
 	peer      *streammux.Peer
 	cancel    context.CancelFunc
 	serveDone chan error
+	events    chan core.Event
 	closeOnce sync.Once
 }
 
 func Open(parent context.Context, connection io.ReadWriteCloser, configuration Config) (*Client, error) {
 	if parent == nil || connection == nil {
 		return nil, errors.New("client: nil dependency")
+	}
+	if configuration.EventBuffer <= 0 {
+		return nil, errors.New("client: EventBuffer must be positive")
 	}
 	ctx, cancel := context.WithCancel(parent)
 	muxConnection, err := streammux.Open(ctx, connection, configuration.Stream)
@@ -46,8 +53,8 @@ func Open(parent context.Context, connection io.ReadWriteCloser, configuration C
 		_ = muxConnection.Close()
 		return nil, err
 	}
-	client := &Client{peer: peer, cancel: cancel, serveDone: make(chan error, 1)}
-	if err := peer.Register(protocol.MessageEvent, client.ignoreEvent); err != nil {
+	client := &Client{peer: peer, cancel: cancel, serveDone: make(chan error, 1), events: make(chan core.Event, configuration.EventBuffer)}
+	if err := peer.Register(protocol.MessageEvent, client.handleEvent); err != nil {
 		cancel()
 		_ = peer.Close()
 		return nil, err
@@ -115,12 +122,27 @@ func (client *Client) Close() error {
 	return closeErr
 }
 
-func (client *Client) Peer() *streammux.Peer { return client.peer }
-func (client *Client) Done() <-chan struct{} { return client.peer.Done() }
-func (client *Client) Err() error            { return client.peer.Err() }
+func (client *Client) Peer() *streammux.Peer     { return client.peer }
+func (client *Client) Done() <-chan struct{}     { return client.peer.Done() }
+func (client *Client) Err() error                { return client.peer.Err() }
+func (client *Client) Events() <-chan core.Event { return client.events }
 
-func (client *Client) ignoreEvent(context.Context, *streammux.Peer, streammux.Frame) error {
-	return nil
+func (client *Client) handleEvent(ctx context.Context, _ *streammux.Peer, frame streammux.Frame) error {
+	if frame.Header.Flags != streammux.FlagEvent || frame.Header.StreamID != 0 {
+		return errors.New("client: invalid Core event frame")
+	}
+	event, err := protocol.DecodeEvent(frame.Payload)
+	if err != nil {
+		return fmt.Errorf("client: decode Core event: %w", err)
+	}
+	select {
+	case client.events <- event:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return errors.New("client: Core event queue overflow")
+	}
 }
 
 func marshalRequest(request protocol.Request) ([]byte, error) {

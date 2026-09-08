@@ -143,6 +143,68 @@ type EventEnvelope struct {
 	Event   core.Event `json:"event"`
 }
 
+// DecodeEvent decodes an event while preserving its concrete payload type.
+func DecodeEvent(data []byte) (core.Event, error) {
+	var envelope struct {
+		Version uint16 `json:"version"`
+		Event   struct {
+			Revision uint64          `json:"revision"`
+			Kind     core.EventKind  `json:"kind"`
+			Payload  json.RawMessage `json:"payload"`
+		} `json:"event"`
+	}
+	if err := decodeStrict(data, &envelope); err != nil {
+		return core.Event{}, err
+	}
+	if envelope.Version != Version {
+		return core.Event{}, ErrUnsupportedVersion
+	}
+	var payload any
+	switch envelope.Event.Kind {
+	case core.EventWorkspaceCreated:
+		payload = &core.WorkspaceCreatedEvent{}
+	case core.EventWindowCreated:
+		payload = &core.WindowCreatedEvent{}
+	case core.EventPaneCreated:
+		payload = &core.PaneCreatedEvent{}
+	case core.EventPaneMoved:
+		payload = &core.PaneMovedEvent{}
+	case core.EventPaneClosed:
+		payload = &core.PaneClosedEvent{}
+	case core.EventTerminalExited, core.EventTerminalUnavailable, core.EventTerminalStarted,
+		core.EventTerminalStartFailed, core.EventTerminalRestarting, core.EventTerminalStopping:
+		payload = &core.TerminalEvent{}
+	case core.EventLabelSet, core.EventLabelRemoved:
+		payload = &core.LabelEvent{}
+	case core.EventLabelSourceCleared:
+		payload = &core.LabelsEvent{}
+	default:
+		return core.Event{}, fmt.Errorf("%w: unknown event kind %q", ErrInvalidPayload, envelope.Event.Kind)
+	}
+	if err := decodeStrict(envelope.Event.Payload, payload); err != nil {
+		return core.Event{}, err
+	}
+	switch value := payload.(type) {
+	case *core.WorkspaceCreatedEvent:
+		payload = *value
+	case *core.WindowCreatedEvent:
+		payload = *value
+	case *core.PaneCreatedEvent:
+		payload = *value
+	case *core.PaneMovedEvent:
+		payload = *value
+	case *core.PaneClosedEvent:
+		payload = *value
+	case *core.TerminalEvent:
+		payload = *value
+	case *core.LabelEvent:
+		payload = *value
+	case *core.LabelsEvent:
+		payload = *value
+	}
+	return core.Event{Revision: envelope.Event.Revision, Kind: envelope.Event.Kind, Payload: payload}, nil
+}
+
 type CreateWorkspaceParams struct {
 	Name string `json:"name"`
 }

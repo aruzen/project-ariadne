@@ -52,6 +52,14 @@ func TestSyncCallAndRemoteError(t *testing.T) {
 	if err != nil || created.Workspace.Name != "work" {
 		t.Fatalf("CreateWorkspace = %+v, %v", created, err)
 	}
+	select {
+	case event := <-client.Events():
+		if event.Kind != core.EventWorkspaceCreated || event.Revision != 1 {
+			t.Fatalf("event = %+v", event)
+		}
+	case <-ctx.Done():
+		t.Fatal("Core event was not delivered")
+	}
 	_, err = Call[core.CreateWorkspaceResult](ctx, client, protocol.OperationCreateWorkspace, protocol.CreateWorkspaceParams{Name: "work"})
 	var remote *protocol.RemoteError
 	if !errors.As(err, &remote) || remote.Code != protocol.CodeAlreadyExists {

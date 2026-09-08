@@ -20,11 +20,11 @@ import (
 	"github.com/aruzen/ariadne/internal/client"
 	ariadneconfig "github.com/aruzen/ariadne/internal/config"
 	"github.com/aruzen/ariadne/internal/core"
+	"github.com/aruzen/ariadne/internal/frontend/tui"
 	"github.com/aruzen/ariadne/internal/platform/localipc"
 	"github.com/aruzen/ariadne/internal/platform/paths"
 	platformterminal "github.com/aruzen/ariadne/internal/platform/terminal"
 	"github.com/aruzen/ariadne/internal/protocol"
-	"github.com/aruzen/ariadne/internal/vt/libghostty"
 	"github.com/aruzen/streammux/pty"
 )
 
@@ -35,9 +35,6 @@ const (
 
 // Run executes the command-line frontend against endpoint with explicitly supplied I/O.
 func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
-	if _, err := libghostty.Version(); err != nil {
-		return fmt.Errorf("initialize VT engine: %w", err)
-	}
 	if len(arguments) == 0 {
 		return errors.New("command is required")
 	}
@@ -58,7 +55,7 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 			return fmt.Errorf("unknown daemon subcommand %q", arguments[1])
 		}
 	}
-	if command == "open" || command == "attach" {
+	if command == "open" || command == "attach" || command == "tui" {
 		if err := requireAttachTTY(stdout); err != nil {
 			return err
 		}
@@ -81,19 +78,24 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 	}
 	defer frontend.Close()
 	syncCtx, cancelSync := context.WithTimeout(lifetimeCtx, commandTimeout)
-	_, err = frontend.Sync(syncCtx)
+	synchronized, err := frontend.Sync(syncCtx)
 	cancelSync()
 	if err != nil {
 		return err
 	}
 	operationCtx := lifetimeCtx
-	if command != "open" && command != "attach" {
+	if command != "open" && command != "attach" && command != "tui" {
 		var cancelOperation context.CancelFunc
 		operationCtx, cancelOperation = context.WithTimeout(lifetimeCtx, commandTimeout)
 		defer cancelOperation()
 	}
 
 	switch command {
+	case "tui":
+		if len(arguments) != 1 {
+			return errors.New("tui does not accept arguments")
+		}
+		return tui.Run(operationCtx, frontend, synchronized.Snapshot, stdout)
 	case "new":
 		return runNew(operationCtx, frontend, arguments[1:], stdout, stderr)
 	case "open":
@@ -116,7 +118,7 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 
 func knownCommand(command string) bool {
 	switch command {
-	case "new", "open", "attach", "list", "restart", "kill", "dismiss", "daemon":
+	case "tui", "new", "open", "attach", "list", "restart", "kill", "dismiss", "daemon":
 		return true
 	default:
 		return false
