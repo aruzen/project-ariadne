@@ -187,3 +187,22 @@ func TestListenRejectsOverlongPath(t *testing.T) {
 		t.Fatalf("Listen error = %v", err)
 	}
 }
+
+func TestRawListenCreatesOwnerOnlySocket(t *testing.T) {
+	path := testSocketPath(t)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	listener, err := listen(path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("Lstat: %v", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("socket mode before chmod = %04o", info.Mode().Perm())
+	}
+}

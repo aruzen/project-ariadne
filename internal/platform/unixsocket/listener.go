@@ -23,6 +23,7 @@ var (
 	ErrAlreadyRunning    = errors.New("unixsocket: daemon already running")
 	ErrStaleNotConfirmed = errors.New("unixsocket: cannot confirm stale socket")
 	ErrSocketReplaced    = errors.New("unixsocket: socket path was replaced")
+	listenUmaskMu        sync.Mutex
 )
 
 type Listener struct {
@@ -120,6 +121,10 @@ func Listen(path string, uid int) (*Listener, error) {
 }
 
 func listen(path string) (*net.UnixListener, error) {
+	listenUmaskMu.Lock()
+	defer listenUmaskMu.Unlock()
+	previousUmask := syscall.Umask(0o077)
+	defer syscall.Umask(previousUmask)
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		return nil, err
