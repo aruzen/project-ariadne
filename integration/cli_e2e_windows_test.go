@@ -26,7 +26,6 @@ const windowsE2EBinaryDirectoryEnvironment = "ARIADNE_E2E_BIN_DIR"
 
 type windowsE2ERuntime struct {
 	clientPath  string
-	daemonPath  string
 	endpoint    string
 	environment []string
 }
@@ -77,20 +76,15 @@ func newWindowsE2ERuntime(t *testing.T) *windowsE2ERuntime {
 		repository := filepath.Dir(filepath.Dir(source))
 		binaryDirectory = t.TempDir()
 		windowsBuildBinary(t, repository, filepath.Join(binaryDirectory, "ariadne.exe"), "./cmd/ariadne")
-		windowsBuildBinary(t, repository, filepath.Join(binaryDirectory, "ariadned.exe"), "./cmd/ariadned")
 	}
 	clientPath := filepath.Join(binaryDirectory, "ariadne.exe")
-	daemonPath := filepath.Join(binaryDirectory, "ariadned.exe")
-	for _, executable := range []string{clientPath, daemonPath} {
-		if info, err := os.Stat(executable); err != nil || info.IsDir() {
-			t.Fatalf("E2E executable %q is unavailable: %v", executable, err)
-		}
+	if info, err := os.Stat(clientPath); err != nil || info.IsDir() {
+		t.Fatalf("E2E executable %q is unavailable: %v", clientPath, err)
 	}
 
 	runtimeDirectory := t.TempDir()
 	instance := &windowsE2ERuntime{
 		clientPath: clientPath,
-		daemonPath: daemonPath,
 		endpoint:   fmt.Sprintf(`\\.\pipe\ariadne-e2e-%d-%d`, os.Getpid(), time.Now().UnixNano()),
 		environment: windowsOverrideEnvironment(map[string]string{
 			"XDG_CONFIG_HOME": filepath.Join(runtimeDirectory, "config"),
@@ -170,7 +164,7 @@ func (runtime *windowsE2ERuntime) testConcurrentAutoStart(t *testing.T) {
 			t.Fatalf("concurrent daemon auto-start: %v", err)
 		}
 	}
-	duplicate := runtime.command(ctx, runtime.daemonPath, "-socket", runtime.endpoint)
+	duplicate := runtime.command(ctx, runtime.clientPath, "-socket", runtime.endpoint, "daemon", "serve")
 	if data, err := duplicate.CombinedOutput(); err == nil {
 		t.Fatalf("second daemon unexpectedly started: %s", data)
 	}

@@ -33,7 +33,7 @@ func Run(arguments []string) error {
 	if err != nil {
 		return err
 	}
-	flags := flag.NewFlagSet("ariadned", flag.ContinueOnError)
+	flags := flag.NewFlagSet("ariadne daemon serve", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	socketPath := flags.String("socket", defaultSocket, "local IPC endpoint")
 	statePath := flags.String("state", defaultState, "state JSON path")
@@ -60,7 +60,7 @@ func Run(arguments []string) error {
 		return err
 	}
 	if loaded.RecoveryCause != nil {
-		log.Printf("ariadned: recovered invalid state to %s: %v", loaded.QuarantinedPath, loaded.RecoveryCause)
+		log.Printf("ariadne daemon: recovered invalid state to %s: %v", loaded.QuarantinedPath, loaded.RecoveryCause)
 	}
 
 	signals := make(chan os.Signal, 2)

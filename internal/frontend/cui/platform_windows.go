@@ -17,10 +17,6 @@ func configureDetachedProcess(command *exec.Cmd) {
 	}
 }
 
-func daemonExecutableName() string { return "ariadned.exe" }
-
-func daemonCandidateUsable(info os.FileInfo) bool { return !info.IsDir() }
-
 func defaultShell() []string {
 	if shell := os.Getenv("COMSPEC"); shell != "" {
 		return []string{shell}

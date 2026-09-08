@@ -24,7 +24,6 @@ const e2eBinaryDirectoryEnvironment = "ARIADNE_E2E_BIN_DIR"
 
 type e2eRuntime struct {
 	clientPath  string
-	daemonPath  string
 	socketPath  string
 	environment []string
 }
@@ -76,14 +75,10 @@ func newE2ERuntime(t *testing.T) *e2eRuntime {
 		repository := filepath.Dir(filepath.Dir(source))
 		binaryDirectory = t.TempDir()
 		buildBinary(t, repository, filepath.Join(binaryDirectory, "ariadne"), "./cmd/ariadne")
-		buildBinary(t, repository, filepath.Join(binaryDirectory, "ariadned"), "./cmd/ariadned")
 	}
 	clientPath := filepath.Join(binaryDirectory, "ariadne")
-	daemonPath := filepath.Join(binaryDirectory, "ariadned")
-	for _, executable := range []string{clientPath, daemonPath} {
-		if info, err := os.Stat(executable); err != nil || info.IsDir() {
-			t.Fatalf("E2E executable %q is unavailable: %v", executable, err)
-		}
+	if info, err := os.Stat(clientPath); err != nil || info.IsDir() {
+		t.Fatalf("E2E executable %q is unavailable: %v", clientPath, err)
 	}
 
 	runtimeDirectory, err := os.MkdirTemp("", "ariadne-e2e-")
@@ -93,7 +88,6 @@ func newE2ERuntime(t *testing.T) *e2eRuntime {
 	t.Cleanup(func() { _ = os.RemoveAll(runtimeDirectory) })
 	instance := &e2eRuntime{
 		clientPath: clientPath,
-		daemonPath: daemonPath,
 		socketPath: filepath.Join(runtimeDirectory, "ariadned.sock"),
 		environment: overrideEnvironment(map[string]string{
 			"XDG_CONFIG_HOME": filepath.Join(runtimeDirectory, "config"),
@@ -175,7 +169,7 @@ func (runtime *e2eRuntime) testConcurrentAutoStart(t *testing.T) {
 		}
 	}
 
-	duplicate := runtime.command(ctx, runtime.daemonPath, "-socket", runtime.socketPath)
+	duplicate := runtime.command(ctx, runtime.clientPath, "-socket", runtime.socketPath, "daemon", "serve")
 	if data, err := duplicate.CombinedOutput(); err == nil {
 		t.Fatalf("second daemon unexpectedly started: %s", data)
 	}

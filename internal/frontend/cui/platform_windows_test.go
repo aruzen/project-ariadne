@@ -14,10 +14,7 @@ func TestWindowsPlatformDefaults(t *testing.T) {
 	if got := defaultShell(); len(got) != 1 || got[0] != `C:\Windows\System32\cmd.exe` {
 		t.Fatalf("defaultShell = %q", got)
 	}
-	if got := daemonExecutableName(); got != "ariadned.exe" {
-		t.Fatalf("daemonExecutableName = %q", got)
-	}
-	command := exec.Command("ariadned.exe")
+	command := exec.Command("ariadne.exe")
 	configureDetachedProcess(command)
 	if command.SysProcAttr == nil || !command.SysProcAttr.HideWindow ||
 		command.SysProcAttr.CreationFlags&(windows.CREATE_NEW_PROCESS_GROUP|windows.DETACHED_PROCESS) !=

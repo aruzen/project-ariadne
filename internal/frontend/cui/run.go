@@ -12,7 +12,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -33,28 +32,27 @@ const (
 	readyTimeout   = 3 * time.Second
 )
 
-// Run executes the command-line frontend with explicitly supplied I/O.
-func Run(arguments []string, stdout, stderr io.Writer) error {
-	global := flag.NewFlagSet("ariadne", flag.ContinueOnError)
-	global.SetOutput(stderr)
-	defaultSocket, err := localipc.DefaultEndpoint()
-	if err != nil {
-		return err
-	}
-	socketPath := global.String("socket", defaultSocket, "local IPC endpoint")
-	if err := global.Parse(arguments); err != nil {
-		return err
-	}
-	remaining := global.Args()
-	if len(remaining) == 0 {
+// Run executes the command-line frontend against endpoint with explicitly supplied I/O.
+func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
+	if len(arguments) == 0 {
 		return errors.New("command is required")
 	}
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	command := remaining[0]
+	command := arguments[0]
 	if !knownCommand(command) {
 		return fmt.Errorf("unknown command %q", command)
+	}
+	if command == "daemon" {
+		if len(arguments) == 1 {
+			return errors.New("daemon subcommand is required")
+		}
+		switch arguments[1] {
+		case "status", "stop":
+		default:
+			return fmt.Errorf("unknown daemon subcommand %q", arguments[1])
+		}
 	}
 	if command == "open" || command == "attach" {
 		if err := requireAttachTTY(stdout); err != nil {
@@ -63,10 +61,10 @@ func Run(arguments []string, stdout, stderr io.Writer) error {
 	}
 	autoStart := command != "daemon"
 	connectCtx, cancelConnect := context.WithTimeout(lifetimeCtx, commandTimeout)
-	connection, err := connect(connectCtx, *socketPath, autoStart)
+	connection, err := connect(connectCtx, endpoint, autoStart)
 	cancelConnect()
 	if err != nil {
-		if command == "daemon" && len(remaining) >= 2 && remaining[1] == "status" && isDaemonAbsent(err) {
+		if command == "daemon" && len(arguments) >= 2 && arguments[1] == "status" && isDaemonAbsent(err) {
 			_, _ = fmt.Fprintln(stdout, "stopped")
 			return nil
 		}
@@ -93,21 +91,21 @@ func Run(arguments []string, stdout, stderr io.Writer) error {
 
 	switch command {
 	case "new":
-		return runNew(operationCtx, frontend, remaining[1:], stdout, stderr)
+		return runNew(operationCtx, frontend, arguments[1:], stdout, stderr)
 	case "open":
-		return runOpen(operationCtx, frontend, remaining[1:], stdout, stderr)
+		return runOpen(operationCtx, frontend, arguments[1:], stdout, stderr)
 	case "attach":
-		return runAttach(operationCtx, frontend, remaining[1:], stdout)
+		return runAttach(operationCtx, frontend, arguments[1:], stdout)
 	case "list":
-		return runList(operationCtx, frontend, remaining[1:], stdout, stderr)
+		return runList(operationCtx, frontend, arguments[1:], stdout, stderr)
 	case "restart":
-		return runRestart(operationCtx, frontend, remaining[1:], stdout, stderr)
+		return runRestart(operationCtx, frontend, arguments[1:], stdout, stderr)
 	case "kill":
-		return runPaneCommand(operationCtx, frontend, protocol.OperationKillTerminal, remaining[1:], stdout, "killed")
+		return runPaneCommand(operationCtx, frontend, protocol.OperationKillTerminal, arguments[1:], stdout, "killed")
 	case "dismiss":
-		return runPaneCommand(operationCtx, frontend, protocol.OperationDismissTerminal, remaining[1:], stdout, "dismissed")
+		return runPaneCommand(operationCtx, frontend, protocol.OperationDismissTerminal, arguments[1:], stdout, "dismissed")
 	case "daemon":
-		return runDaemon(operationCtx, frontend, remaining[1:], stdout, stderr)
+		return runDaemon(operationCtx, frontend, arguments[1:], stdout, stderr)
 	}
 	return nil
 }
@@ -325,11 +323,11 @@ func connect(ctx context.Context, socketPath string, autoStart bool) (net.Conn, 
 }
 
 func startDaemon(socketPath string) error {
-	daemonPath, err := findDaemon()
+	executable, err := os.Executable()
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve ariadne executable: %w", err)
 	}
-	command := exec.Command(daemonPath, "-socket", socketPath)
+	command := exec.Command(executable, "-socket", socketPath, "daemon", "serve")
 	command.Stdin = nil
 	command.Stdout = nil
 	command.Stderr = nil
@@ -341,21 +339,6 @@ func startDaemon(socketPath string) error {
 		return fmt.Errorf("release daemon process: %w", err)
 	}
 	return nil
-}
-
-func findDaemon() (string, error) {
-	executable, err := os.Executable()
-	if err == nil {
-		candidate := filepath.Join(filepath.Dir(executable), daemonExecutableName())
-		if info, statErr := os.Stat(candidate); statErr == nil && daemonCandidateUsable(info) {
-			return candidate, nil
-		}
-	}
-	path, err := exec.LookPath("ariadned")
-	if err != nil {
-		return "", errors.New("ariadned executable was not found")
-	}
-	return path, nil
 }
 
 func resolveArgv(explicit []string) ([]string, error) {
