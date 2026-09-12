@@ -9,7 +9,7 @@ github.com/Microsoft/go-winio v0.6.2
   License: MIT
   License file: third_party/go/github.com/Microsoft/go-winio/LICENSE
 
-github.com/aruzen/streammux v0.3.0
+github.com/aruzen/streammux v0.3.1
   License: MIT
   License file: third_party/go/github.com/aruzen/streammux/LICENSE
 

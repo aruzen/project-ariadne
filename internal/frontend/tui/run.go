@@ -55,7 +55,7 @@ type session struct {
 	cancel      context.CancelFunc
 	client      *client.Client
 	pty         *client.PTYClient
-	output      io.Writer
+	output      *latestFrameWriter
 	snapshot    core.Snapshot
 	workspace   core.WorkspaceID
 	window      core.WindowID
@@ -94,8 +94,9 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 	if err := writeAll(stdout, []byte("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H")); err != nil {
 		return err
 	}
+	frameOutput := newLatestFrameWriter(stdout)
 	defer func() {
-		resultErr = errors.Join(resultErr, writeAll(stdout, []byte("\x1b[0m\x1b[?25h\x1b[?1049l")))
+		resultErr = errors.Join(resultErr, frameOutput.Close([]byte("\x1b[0m\x1b[?25h\x1b[?1049l")))
 	}()
 
 	ctx, cancel := context.WithCancel(parent)
@@ -105,7 +106,7 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 		return err
 	}
 	value := &session{
-		ctx: ctx, cancel: cancel, client: frontend, pty: ptyClient, output: stdout,
+		ctx: ctx, cancel: cancel, client: frontend, pty: ptyClient, output: frameOutput,
 		snapshot: snapshot, width: cols, height: rows, views: make(map[core.PaneID]*paneView),
 		ptyEvents: make(chan paneEvent, 256), statusBar: DefaultStatusBar(), dirty: true,
 	}
@@ -187,11 +188,17 @@ func (session *session) loop(output *os.File) error {
 			session.dirty = true
 		case <-frames.C:
 			if session.dirty {
-				if err := session.render(); err != nil {
+				frame, err := session.render()
+				if err != nil {
+					return err
+				}
+				if err = session.output.Submit(frame); err != nil {
 					return err
 				}
 				session.dirty = false
 			}
+		case <-session.output.Done():
+			return session.output.Err()
 		case received := <-termination:
 			return fmt.Errorf("received %s", received)
 		case <-session.client.Done():
@@ -437,7 +444,7 @@ func directionalDistance(action inputAction, cx, cy, x, y int) (int, int, bool) 
 	}
 }
 
-func (session *session) render() error {
+func (session *session) render() ([]byte, error) {
 	base := Style{Foreground: Color{R: 220, G: 220, B: 220}, Background: Color{R: 18, G: 20, B: 24}}
 	surface := NewSurface(session.width, session.height, base)
 	cursor := Cursor{}
@@ -497,7 +504,7 @@ func (session *session) render() error {
 		Workspace: workspaceName, Window: windowName, PaneID: pane.ID, PaneTitle: pane.Title,
 		State: state, Message: message, Now: time.Now(),
 	})
-	return writeAll(session.output, EncodeFrame(surface, cursor))
+	return EncodeFrame(surface, cursor), nil
 }
 
 func drawPaneBorder(surface *Surface, rect Rect, title string, focused bool) {
