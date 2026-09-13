@@ -23,7 +23,9 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-	return Config{Stream: streammux.DefaultConfig(), Peer: streammux.DefaultPeerConfig(), EventBuffer: 256}
+	peer := streammux.DefaultPeerConfig()
+	peer.InboundQueuePolicy = streammux.InboundQueueBackpressure
+	return Config{Stream: streammux.DefaultConfig(), Peer: peer, EventBuffer: 256}
 }
 
 type Client struct {

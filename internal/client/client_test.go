@@ -12,6 +12,12 @@ import (
 	"github.com/aruzen/streammux"
 )
 
+func TestDefaultConfigBackpressuresInboundStreams(t *testing.T) {
+	if policy := DefaultConfig().Peer.InboundQueuePolicy; policy != streammux.InboundQueueBackpressure {
+		t.Fatalf("InboundQueuePolicy = %v", policy)
+	}
+}
+
 func TestSyncCallAndRemoteError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

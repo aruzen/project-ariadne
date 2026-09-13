@@ -60,6 +60,14 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 			return err
 		}
 	}
+	configPath, err := paths.DefaultConfigPath()
+	if err != nil {
+		return err
+	}
+	fileConfiguration, err := ariadneconfig.Load(configPath)
+	if err != nil {
+		return err
+	}
 	autoStart := command != "daemon"
 	connectCtx, cancelConnect := context.WithTimeout(lifetimeCtx, commandTimeout)
 	connection, err := connect(connectCtx, endpoint, autoStart)
@@ -71,7 +79,10 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 		}
 		return err
 	}
-	frontend, err := client.Open(lifetimeCtx, connection, client.DefaultConfig())
+	clientConfiguration := client.DefaultConfig()
+	fileConfiguration.ApplyStream(&clientConfiguration.Stream)
+	fileConfiguration.ApplyPeer(&clientConfiguration.Peer)
+	frontend, err := client.Open(lifetimeCtx, connection, clientConfiguration)
 	if err != nil {
 		_ = connection.Close()
 		return err

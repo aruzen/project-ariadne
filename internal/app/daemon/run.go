@@ -44,7 +44,8 @@ func Run(arguments []string) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments")
 	}
-	if _, err := ariadneconfig.Load(*configPath); err != nil {
+	fileConfiguration, err := ariadneconfig.Load(*configPath)
+	if err != nil {
 		return err
 	}
 
@@ -53,6 +54,9 @@ func Run(arguments []string) error {
 		return err
 	}
 	configuration := daemon.DefaultConfig(*statePath)
+	fileConfiguration.ApplyManager(&configuration.Manager)
+	fileConfiguration.ApplyStream(&configuration.Stream)
+	fileConfiguration.ApplyPeer(&configuration.Peer)
 	server, loaded, err := daemon.Open(context.Background(), daemonManagedFactory(), configuration)
 	if err != nil {
 		_ = listener.Close()

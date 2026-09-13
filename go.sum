@@ -1,7 +1,7 @@
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
-github.com/aruzen/streammux v0.3.1 h1:XRb3ULas64CFSGT83juHAfmEhA5gebeK5eGJtnJW6JE=
-github.com/aruzen/streammux v0.3.1/go.mod h1:btoKxBLrww2fEp0iE0Oidhyp4/AN/mwsbRj4ZiJPRxg=
+github.com/aruzen/streammux v0.3.2 h1:OeAXJIgHCNp8xan/dE6r2LR8yuHpquj+fgPg5W7TFT0=
+github.com/aruzen/streammux v0.3.2/go.mod h1:btoKxBLrww2fEp0iE0Oidhyp4/AN/mwsbRj4ZiJPRxg=
 github.com/creack/pty v1.1.24 h1:bJrF4RRfyJnbTJqzRLHzcGaZK1NeM5kTC9jGgovnR1s=
 github.com/creack/pty v1.1.24/go.mod h1:08sCNb52WyoAwi2QDyzUCTgcvVFhUzewun7wtTfvcwE=
 github.com/pelletier/go-toml/v2 v2.4.3 h1:GTRvJQutkOSftxIFD5xw9aepkYNuPWmVJpffdDPYVpY=

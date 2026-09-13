@@ -44,6 +44,7 @@ func DefaultConfig(statePath string) Config {
 	manager.MaxAttachmentsPerSession = 1
 	peer := streammux.DefaultPeerConfig()
 	peer.Classify = classifyFrame
+	peer.InboundQueuePolicy = streammux.InboundQueueBackpressure
 	ptyProtocol := pty.DefaultProtocolConfig()
 	ptyProtocol.Types = DefaultPTYMessageTypes()
 	return Config{
