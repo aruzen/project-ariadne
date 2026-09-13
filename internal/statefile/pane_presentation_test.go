@@ -9,7 +9,7 @@ import (
 func TestPanePresentationRoundTrip(t *testing.T) {
 	snapshot := core.DefaultSnapshot()
 	snapshot.Panes = []core.Pane{{
-		ID: 1, WindowID: 1, Kind: core.PaneFixed,
+		ID: 1, WindowID: 1, Kind: core.PaneTool,
 		Presentation: core.PanePresentation{Chrome: core.PaneChromeNone},
 	}}
 	snapshot.Windows[0].Layout = &core.LayoutNode{Kind: core.LayoutPane, PaneID: 1}

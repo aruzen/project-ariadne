@@ -182,7 +182,7 @@ func TestUnknownOperationAndCoreErrorsUseStableCodes(t *testing.T) {
 
 func TestCreatePaneCommandPreservesPresentation(t *testing.T) {
 	params, err := json.Marshal(CreatePaneParams{
-		WindowID: 1, Kind: core.PaneFixed,
+		WindowID: 1, Kind: core.PaneTool,
 		Presentation: core.PanePresentation{Chrome: core.PaneChromeNone},
 	})
 	if err != nil {

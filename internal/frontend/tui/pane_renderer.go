@@ -129,12 +129,12 @@ func (content *terminalPaneContent) Close() {
 	}
 }
 
-type fixedPaneRenderer struct{}
+type toolPaneRenderer struct{}
 
-func (fixedPaneRenderer) DefaultChrome() core.PaneChrome { return core.PaneChromeBorder }
-func (fixedPaneRenderer) UsesTerminal() bool             { return false }
-func (fixedPaneRenderer) Focusable(core.Pane) bool       { return true }
-func (fixedPaneRenderer) NewContent(core.Pane) paneContent {
+func (toolPaneRenderer) DefaultChrome() core.PaneChrome { return core.PaneChromeBorder }
+func (toolPaneRenderer) UsesTerminal() bool             { return false }
+func (toolPaneRenderer) Focusable(core.Pane) bool       { return true }
+func (toolPaneRenderer) NewContent(core.Pane) paneContent {
 	return emptyPaneContent{}
 }
 
@@ -156,7 +156,7 @@ type paneRendererRegistry map[core.PaneKind]paneRenderer
 func defaultPaneRendererRegistry() paneRendererRegistry {
 	return paneRendererRegistry{
 		core.PaneTerminal: terminalPaneRenderer{},
-		core.PaneFixed:    fixedPaneRenderer{},
+		core.PaneTool:     toolPaneRenderer{},
 	}
 }
 

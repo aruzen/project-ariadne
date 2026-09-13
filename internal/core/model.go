@@ -21,7 +21,8 @@ type PaneKind string
 
 const (
 	PaneTerminal PaneKind = "terminal"
-	PaneFixed    PaneKind = "fixed"
+	// PaneTool hosts frontend or plugin-provided content without a PTY.
+	PaneTool PaneKind = "tool"
 )
 
 // PaneChrome is a frontend-neutral presentation hint. Auto lets each frontend
@@ -518,7 +519,7 @@ func validPane(pane Pane) bool {
 	switch pane.Kind {
 	case PaneTerminal:
 		return pane.Terminal == nil || validTerminal(*pane.Terminal)
-	case PaneFixed:
+	case PaneTool:
 		return pane.Terminal == nil
 	default:
 		return false

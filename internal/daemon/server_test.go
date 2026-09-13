@@ -435,10 +435,10 @@ func TestNewTerminalRejectsTargetOutsideDestinationWindow(t *testing.T) {
 	server, _ := openTestServer(t, &testFactory{})
 	executeCore[core.CreateWindowResult](t, server, core.CreateWindowCommand{WorkspaceID: 1, Name: "other"})
 	first := executeCore[core.CreatePaneResult](t, server, core.CreatePaneCommand{
-		WindowID: 1, Pane: core.PaneSpec{Kind: core.PaneFixed},
+		WindowID: 1, Pane: core.PaneSpec{Kind: core.PaneTool},
 	})
 	executeCore[core.CreatePaneResult](t, server, core.CreatePaneCommand{
-		WindowID: 2, Pane: core.PaneSpec{Kind: core.PaneFixed},
+		WindowID: 2, Pane: core.PaneSpec{Kind: core.PaneTool},
 	})
 	if _, err := server.NewTerminal(context.Background(), ariadneprotocol.NewTerminalParams{
 		WindowID: 2, TargetPaneID: first.Pane.ID, Direction: core.SplitVertical,

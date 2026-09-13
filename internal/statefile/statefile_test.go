@@ -241,7 +241,7 @@ func TestRestoredCoreContinuesPaneIDSequence(t *testing.T) {
 	value, err := engine.Execute(context.Background(), core.SplitPaneCommand{
 		TargetPaneID: restored.Panes[0].ID,
 		Direction:    core.SplitHorizontal,
-		Pane:         core.PaneSpec{Kind: core.PaneFixed, Title: "new"},
+		Pane:         core.PaneSpec{Kind: core.PaneTool, Title: "new"},
 	})
 	if err != nil {
 		t.Fatalf("SplitPane after restore: %v", err)

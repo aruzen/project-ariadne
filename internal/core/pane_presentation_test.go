@@ -5,7 +5,7 @@ import "testing"
 func TestPanePresentationValidation(t *testing.T) {
 	snapshot := DefaultSnapshot()
 	snapshot.Panes = []Pane{{
-		ID: 1, WindowID: 1, Kind: PaneFixed,
+		ID: 1, WindowID: 1, Kind: PaneTool,
 		Presentation: PanePresentation{Chrome: PaneChromeNone},
 	}}
 	snapshot.Windows[0].Layout = &LayoutNode{Kind: LayoutPane, PaneID: 1}

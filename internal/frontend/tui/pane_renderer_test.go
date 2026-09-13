@@ -32,22 +32,22 @@ func TestNoChromeDoesNotModifySurface(t *testing.T) {
 	}
 }
 
-func TestRendererRegistrySeparatesTerminalAndFixedPanes(t *testing.T) {
+func TestRendererRegistrySeparatesTerminalAndToolPanes(t *testing.T) {
 	registry := defaultPaneRendererRegistry()
 	terminal, err := registry.renderer(core.Pane{Kind: core.PaneTerminal})
 	if err != nil || !terminal.UsesTerminal() {
 		t.Fatalf("terminal renderer = %T, %v", terminal, err)
 	}
-	fixed, err := registry.renderer(core.Pane{Kind: core.PaneFixed})
-	if err != nil || fixed.UsesTerminal() {
-		t.Fatalf("fixed renderer = %T, %v", fixed, err)
+	tool, err := registry.renderer(core.Pane{Kind: core.PaneTool})
+	if err != nil || tool.UsesTerminal() {
+		t.Fatalf("tool renderer = %T, %v", tool, err)
 	}
 }
 
-func TestSyncViewsCreatesBorderlessFixedContentWithoutTerminal(t *testing.T) {
+func TestSyncViewsCreatesBorderlessToolContentWithoutTerminal(t *testing.T) {
 	session := session{
 		snapshot: core.Snapshot{Panes: []core.Pane{{
-			ID: 1, Kind: core.PaneFixed,
+			ID: 1, Kind: core.PaneTool,
 			Presentation: core.PanePresentation{Chrome: core.PaneChromeNone},
 		}}},
 		placements: []Placement{{PaneID: 1, Rect: Rect{W: 20, H: 8}}},

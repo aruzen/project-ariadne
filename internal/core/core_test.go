@@ -89,7 +89,7 @@ func TestNamesAndTypedIDs(t *testing.T) {
 func TestSplitFlattensMatchingDirectionAndNestsOtherDirection(t *testing.T) {
 	core := newTestCore(t, 16)
 	one := execute[CreatePaneResult](t, core, CreatePaneCommand{WindowID: 1, Pane: PaneSpec{Kind: PaneTerminal, Title: "one"}})
-	two := execute[CreatePaneResult](t, core, SplitPaneCommand{TargetPaneID: one.Pane.ID, Direction: SplitHorizontal, Pane: PaneSpec{Kind: PaneFixed, Title: "two"}})
+	two := execute[CreatePaneResult](t, core, SplitPaneCommand{TargetPaneID: one.Pane.ID, Direction: SplitHorizontal, Pane: PaneSpec{Kind: PaneTool, Title: "two"}})
 	three := execute[CreatePaneResult](t, core, SplitPaneCommand{TargetPaneID: one.Pane.ID, Direction: SplitHorizontal, Pane: PaneSpec{Kind: PaneTerminal, Title: "three"}})
 
 	root := three.Window.Layout
@@ -291,7 +291,7 @@ func TestCannotForgetActiveTerminal(t *testing.T) {
 func TestSnapshotIsDeepCopyAndCanBeRestored(t *testing.T) {
 	core := newTestCore(t, 8)
 	one := execute[CreatePaneResult](t, core, CreatePaneCommand{WindowID: 1, Pane: PaneSpec{Kind: PaneTerminal}}).Pane
-	execute[CreatePaneResult](t, core, SplitPaneCommand{TargetPaneID: one.ID, Direction: SplitHorizontal, Pane: PaneSpec{Kind: PaneFixed}})
+	execute[CreatePaneResult](t, core, SplitPaneCommand{TargetPaneID: one.ID, Direction: SplitHorizontal, Pane: PaneSpec{Kind: PaneTool}})
 	state := snapshot(t, core)
 	state.Workspaces[0].Name = "mutated"
 	state.Workspaces[0].WindowIDs[0] = 999
@@ -554,7 +554,7 @@ func TestActivateTerminalRejectsDuplicateRuntimeID(t *testing.T) {
 func TestLabelLifecycleAndPaneCleanup(t *testing.T) {
 	engine := newTestCore(t, 16)
 	pane := execute[CreatePaneResult](t, engine, CreatePaneCommand{
-		WindowID: 1, Pane: PaneSpec{Kind: PaneFixed, Title: "labels"},
+		WindowID: 1, Pane: PaneSpec{Kind: PaneTool, Title: "labels"},
 	}).Pane
 	label := Label{TargetKind: LabelPane, TargetID: uint64(pane.ID), Source: "test-plugin", Name: "status", Value: "busy"}
 	set := execute[LabelResult](t, engine, SetLabelCommand{Label: label})
