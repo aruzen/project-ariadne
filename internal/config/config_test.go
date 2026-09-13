@@ -39,6 +39,7 @@ func TestParseIsStrict(t *testing.T) {
 		{name: "duplicate", data: "shell = \"a\"\nshell = \"b\"\n"},
 		{name: "blank detach", data: "detach_key = \"   \"\n"},
 		{name: "blank shell", data: "shell = \"   \"\n"},
+		{name: "unknown TUI frame", data: "[tui]\npane_frame = \"unknown\"\n"},
 		{name: "negative history", data: "[terminal]\nhistory_bytes = -1\n"},
 		{name: "partial history disable", data: "[terminal]\nhistory_bytes = 0\n"},
 		{name: "history exceeds total", data: "[terminal]\nhistory_bytes = 1024\nmax_total_history_bytes = 512\n"},
@@ -52,6 +53,16 @@ func TestParseIsStrict(t *testing.T) {
 				t.Fatalf("Parse error = %v", err)
 			}
 		})
+	}
+}
+
+func TestParseTUIFrameMode(t *testing.T) {
+	configuration, err := Parse([]byte("[tui]\npane_frame = \"split\"\n"))
+	if err != nil {
+		t.Fatalf("Parse TUI frame: %v", err)
+	}
+	if configuration.TUI.PaneFrame != TUIFrameSplit {
+		t.Fatalf("PaneFrame = %q", configuration.TUI.PaneFrame)
 	}
 }
 

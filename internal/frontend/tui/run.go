@@ -63,6 +63,8 @@ type session struct {
 	width       int
 	height      int
 	placements  []Placement
+	separators  []Separator
+	paneFrame   PaneFrameMode
 	views       map[core.PaneID]*paneView
 	renderers   paneRendererRegistry
 	ptyEvents   chan paneEvent
@@ -73,7 +75,10 @@ type session struct {
 }
 
 // Run enters the full-screen frontend using an already synchronized client.
-func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot, stdout io.Writer) (resultErr error) {
+func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot, stdout io.Writer, options Options) (resultErr error) {
+	if err := options.validate(); err != nil {
+		return err
+	}
 	output, ok := stdout.(*os.File)
 	if !ok || !platformterminal.IsTerminal(os.Stdin) || !platformterminal.IsTerminal(output) {
 		return platformterminal.ErrNotTerminal
@@ -110,7 +115,7 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 		ctx: ctx, cancel: cancel, client: frontend, pty: ptyClient, output: frameOutput,
 		snapshot: snapshot, width: cols, height: rows, views: make(map[core.PaneID]*paneView),
 		renderers: defaultPaneRendererRegistry(), ptyEvents: make(chan paneEvent, 256),
-		statusBar: DefaultStatusBar(), dirty: true,
+		statusBar: DefaultStatusBar(), paneFrame: options.PaneFrame, dirty: true,
 	}
 	value.selectInitialWindow()
 	value.relayout()
@@ -229,13 +234,22 @@ func (session *session) relayout() {
 	window, exists := session.currentWindow()
 	if !exists {
 		session.placements = nil
+		session.separators = nil
 		return
 	}
 	contentHeight := session.height - 1
 	if contentHeight < 0 {
 		contentHeight = 0
 	}
-	session.placements = CalculateLayout(window.Layout, Rect{W: session.width, H: contentHeight})
+	available := Rect{W: session.width, H: contentHeight}
+	if session.paneFrame == PaneFrameSplit {
+		layout := CalculateSplitLayout(window.Layout, available)
+		session.placements = layout.Placements
+		session.separators = layout.Separators
+	} else {
+		session.placements = CalculateLayout(window.Layout, available)
+		session.separators = nil
+	}
 	if _, exists := placementFor(session.placements, session.focus); !exists {
 		session.focus = session.preferredFocus()
 	}
@@ -306,7 +320,7 @@ func (session *session) syncViews() {
 			}
 			session.views[paneID] = view
 		}
-		content := chromeFor(pane, renderer).ContentRect(placement.Rect)
+		content := chromeForMode(pane, renderer, session.paneFrame).ContentRect(placement.Rect)
 		cols, rows := content.W, content.H
 		if cols < 1 || rows < 1 {
 			continue
@@ -499,7 +513,7 @@ func (session *session) render() ([]byte, error) {
 			session.setMessage(err.Error())
 			continue
 		}
-		chrome := chromeFor(pane, renderer)
+		chrome := chromeForMode(pane, renderer, session.paneFrame)
 		chrome.Draw(surface, placement.Rect, paneTitle(pane), focused)
 		content := chrome.ContentRect(placement.Rect)
 		view := session.views[pane.ID]
@@ -526,6 +540,9 @@ func (session *session) render() ([]byte, error) {
 			surface.Text(content.X, content.Y, content.W, fitText(view.errorMessage, content.W), warning)
 		}
 	}
+	if session.paneFrame == PaneFrameSplit {
+		drawSplitSeparators(surface, session.separators, session.placements, session.focus)
+	}
 	workspaceName, windowName := session.names()
 	pane, _ := session.pane(session.focus)
 	state := core.TerminalState("")
@@ -547,11 +564,7 @@ func drawPaneBorder(surface *Surface, rect Rect, title string, focused bool) {
 	if rect.W <= 0 || rect.H <= 0 {
 		return
 	}
-	style := Style{Foreground: Color{R: 85, G: 90, B: 100}, Background: Color{R: 18, G: 20, B: 24}}
-	if focused {
-		style.Foreground = Color{R: 110, G: 180, B: 255}
-		style.Bold = true
-	}
+	style := paneFrameStyle(focused)
 	for x := rect.X; x < rect.X+rect.W; x++ {
 		surface.Set(x, rect.Y, Cell{Text: "─", Width: 1, Style: style})
 		surface.Set(x, rect.Y+rect.H-1, Cell{Text: "─", Width: 1, Style: style})
@@ -567,6 +580,107 @@ func drawPaneBorder(surface *Surface, rect Rect, title string, focused bool) {
 	if rect.W > 4 {
 		surface.Text(rect.X+2, rect.Y, rect.W-4, fitText(" "+title+" ", rect.W-4), style)
 	}
+}
+
+type separatorPoint struct {
+	x int
+	y int
+}
+
+type separatorCell struct {
+	horizontal bool
+	vertical   bool
+	focused    bool
+}
+
+func drawSplitSeparators(surface *Surface, separators []Separator, placements []Placement, focus core.PaneID) {
+	cells := make(map[separatorPoint]separatorCell)
+	for _, separator := range separators {
+		focused := separatorTouchesPane(separator, placements, focus)
+		for y := separator.Rect.Y; y < separator.Rect.Y+separator.Rect.H; y++ {
+			for x := separator.Rect.X; x < separator.Rect.X+separator.Rect.W; x++ {
+				point := separatorPoint{x: x, y: y}
+				cell := cells[point]
+				if separator.Direction == core.SplitVertical {
+					cell.horizontal = true
+				} else {
+					cell.vertical = true
+				}
+				cell.focused = cell.focused || focused
+				cells[point] = cell
+			}
+		}
+	}
+	for point, cell := range cells {
+		left := cells[separatorPoint{x: point.x - 1, y: point.y}].horizontal
+		right := cells[separatorPoint{x: point.x + 1, y: point.y}].horizontal
+		up := cells[separatorPoint{x: point.x, y: point.y - 1}].vertical
+		down := cells[separatorPoint{x: point.x, y: point.y + 1}].vertical
+		surface.Set(point.x, point.y, Cell{Text: separatorGlyph(cell, left, right, up, down), Width: 1, Style: paneFrameStyle(cell.focused)})
+	}
+}
+
+func separatorTouchesPane(separator Separator, placements []Placement, focus core.PaneID) bool {
+	placement, exists := placementFor(placements, focus)
+	if !exists {
+		return false
+	}
+	pane := placement.Rect
+	line := separator.Rect
+	if separator.Direction == core.SplitVertical {
+		return intervalsOverlap(pane.X, pane.X+pane.W, line.X, line.X+line.W) &&
+			(pane.Y+pane.H == line.Y || pane.Y == line.Y+line.H)
+	}
+	return intervalsOverlap(pane.Y, pane.Y+pane.H, line.Y, line.Y+line.H) &&
+		(pane.X+pane.W == line.X || pane.X == line.X+line.W)
+}
+
+func intervalsOverlap(aStart, aEnd, bStart, bEnd int) bool {
+	return aStart < bEnd && bStart < aEnd
+}
+
+func separatorGlyph(cell separatorCell, left, right, up, down bool) string {
+	if cell.horizontal {
+		left = left || !right
+		right = right || !left
+	}
+	if cell.vertical {
+		up = up || !down
+		down = down || !up
+	}
+	switch {
+	case left && right && up && down:
+		return "┼"
+	case left && right && down:
+		return "┬"
+	case left && right && up:
+		return "┴"
+	case up && down && right:
+		return "├"
+	case up && down && left:
+		return "┤"
+	case right && down:
+		return "┌"
+	case left && down:
+		return "┐"
+	case right && up:
+		return "└"
+	case left && up:
+		return "┘"
+	case left || right:
+		return "─"
+	default:
+		return "│"
+	}
+}
+
+func paneFrameStyle(focused bool) Style {
+	style := Style{Foreground: Color{R: 85, G: 90, B: 100}, Background: Color{R: 18, G: 20, B: 24}}
+	if focused {
+		style.Foreground = Color{R: 110, G: 180, B: 255}
+		style.Bold = true
+	}
+	return style
 }
 
 func (session *session) currentWindow() (core.Window, bool) {

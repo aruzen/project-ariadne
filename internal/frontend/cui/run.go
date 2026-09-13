@@ -103,10 +103,11 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 
 	switch command {
 	case "tui":
-		if len(arguments) != 1 {
-			return errors.New("tui does not accept arguments")
+		options, err := parseTUIOptions(arguments[1:], fileConfiguration.TUI, stderr)
+		if err != nil {
+			return err
 		}
-		return tui.Run(operationCtx, frontend, synchronized.Snapshot, stdout)
+		return tui.Run(operationCtx, frontend, synchronized.Snapshot, stdout, options)
 	case "new":
 		return runNew(operationCtx, frontend, arguments[1:], stdout, stderr)
 	case "open":
@@ -125,6 +126,25 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 		return runDaemon(operationCtx, frontend, arguments[1:], stdout, stderr)
 	}
 	return nil
+}
+
+func parseTUIOptions(arguments []string, defaults ariadneconfig.TUIOptions, stderr io.Writer) (tui.Options, error) {
+	flags := flag.NewFlagSet("tui", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	paneFrame := flags.String("pane-frame", string(defaults.PaneFrame), "Pane frame: full, split, or none")
+	if err := flags.Parse(arguments); err != nil {
+		return tui.Options{}, err
+	}
+	if flags.NArg() != 0 {
+		return tui.Options{}, errors.New("tui does not accept positional arguments")
+	}
+	mode := tui.PaneFrameMode(*paneFrame)
+	switch mode {
+	case tui.PaneFrameFull, tui.PaneFrameSplit, tui.PaneFrameNone:
+		return tui.Options{PaneFrame: mode}, nil
+	default:
+		return tui.Options{}, fmt.Errorf("invalid TUI Pane frame mode %q", *paneFrame)
+	}
 }
 
 func knownCommand(command string) bool {

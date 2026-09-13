@@ -21,6 +21,18 @@ type Placement struct {
 	Rect   Rect
 }
 
+// Separator is one internal split line. It never occupies an outer screen
+// edge; its cell is reserved between sibling layout nodes.
+type Separator struct {
+	Rect      Rect
+	Direction core.SplitDirection
+}
+
+type SplitLayout struct {
+	Placements []Placement
+	Separators []Separator
+}
+
 func CalculateLayout(root *core.LayoutNode, available Rect) []Placement {
 	if root == nil || available.W <= 0 || available.H <= 0 {
 		return nil
@@ -28,6 +40,18 @@ func CalculateLayout(root *core.LayoutNode, available Rect) []Placement {
 	placements := make([]Placement, 0)
 	calculateNode(*root, available, &placements)
 	return placements
+}
+
+// CalculateSplitLayout gives Pane content all non-separator cells. Each split
+// reserves one cell between adjacent children and does not reserve an outer
+// frame, so a single Pane receives the complete available rectangle.
+func CalculateSplitLayout(root *core.LayoutNode, available Rect) SplitLayout {
+	if root == nil || available.W <= 0 || available.H <= 0 {
+		return SplitLayout{}
+	}
+	result := SplitLayout{}
+	calculateSplitNode(*root, available, &result)
+	return result
 }
 
 func calculateNode(node core.LayoutNode, rect Rect, placements *[]Placement) {
@@ -58,6 +82,49 @@ func calculateNode(node core.LayoutNode, rect Rect, placements *[]Placement) {
 		}
 		calculateNode(child, childRect, placements)
 		offset += lengths[index]
+	}
+}
+
+func calculateSplitNode(node core.LayoutNode, rect Rect, result *SplitLayout) {
+	if rect.W <= 0 || rect.H <= 0 {
+		return
+	}
+	if node.Kind == core.LayoutPane {
+		result.Placements = append(result.Placements, Placement{PaneID: node.PaneID, Rect: rect})
+		return
+	}
+	if len(node.Children) == 0 {
+		return
+	}
+	axis := rect.W
+	if node.Direction == core.SplitVertical {
+		axis = rect.H
+	}
+	separatorCount := min(len(node.Children)-1, max(0, axis-1))
+	lengths := weightedLengths(axis-separatorCount, node.Weights, len(node.Children))
+	offset := 0
+	for index, child := range node.Children {
+		childRect := rect
+		if node.Direction == core.SplitVertical {
+			childRect.Y += offset
+			childRect.H = lengths[index]
+		} else {
+			childRect.X += offset
+			childRect.W = lengths[index]
+		}
+		calculateSplitNode(child, childRect, result)
+		offset += lengths[index]
+		if index >= separatorCount {
+			continue
+		}
+		separator := Rect{X: rect.X, Y: rect.Y, W: rect.W, H: 1}
+		if node.Direction == core.SplitVertical {
+			separator.Y += offset
+		} else {
+			separator = Rect{X: rect.X + offset, Y: rect.Y, W: 1, H: rect.H}
+		}
+		result.Separators = append(result.Separators, Separator{Rect: separator, Direction: node.Direction})
+		offset++
 	}
 }
 

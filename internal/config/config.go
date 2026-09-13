@@ -17,8 +17,17 @@ import (
 )
 
 const (
-	DefaultDetachKey = "ctrl-a d"
-	DefaultMaxBytes  = 1 << 20
+	DefaultDetachKey    = "ctrl-a d"
+	DefaultMaxBytes     = 1 << 20
+	DefaultTUIFrameMode = TUIFrameFull
+)
+
+type TUIFrameMode string
+
+const (
+	TUIFrameFull  TUIFrameMode = "full"
+	TUIFrameSplit TUIFrameMode = "split"
+	TUIFrameNone  TUIFrameMode = "none"
 )
 
 var (
@@ -32,8 +41,14 @@ var (
 type Config struct {
 	Shell     string          `toml:"shell"`
 	DetachKey string          `toml:"detach_key"`
+	TUI       TUIOptions      `toml:"tui"`
 	Terminal  TerminalLimits  `toml:"terminal"`
 	Transport TransportLimits `toml:"transport"`
+}
+
+// TUIOptions controls local presentation and is not sent to the daemon.
+type TUIOptions struct {
+	PaneFrame TUIFrameMode `toml:"pane_frame"`
 }
 
 // TerminalLimits bounds PTY output retained or queued by the daemon.
@@ -62,6 +77,7 @@ func Default() Config {
 	peer := streammux.DefaultPeerConfig()
 	return Config{
 		DetachKey: DefaultDetachKey,
+		TUI:       TUIOptions{PaneFrame: DefaultTUIFrameMode},
 		Terminal: TerminalLimits{
 			HistoryBytes: manager.HistoryBytes, MaxTotalHistoryBytes: manager.MaxTotalHistoryBytes,
 			ReadBufferBytes: manager.ReadBufferBytes, AttachmentQueueBytes: manager.AttachmentQueueBytes,
@@ -154,6 +170,11 @@ func (configuration Config) validate() error {
 		if strings.ContainsRune(configuration.Shell, 0) {
 			return fmt.Errorf("%w: shell contains NUL", ErrInvalid)
 		}
+	}
+	switch configuration.TUI.PaneFrame {
+	case TUIFrameFull, TUIFrameSplit, TUIFrameNone:
+	default:
+		return fmt.Errorf("%w: tui.pane_frame must be full, split, or none", ErrInvalid)
 	}
 	terminal := configuration.Terminal
 	if terminal.HistoryBytes < 0 || terminal.MaxTotalHistoryBytes < 0 {

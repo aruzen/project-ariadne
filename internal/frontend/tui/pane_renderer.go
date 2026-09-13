@@ -7,6 +7,31 @@ import (
 	"github.com/aruzen/ariadne/internal/vt/libghostty"
 )
 
+type PaneFrameMode string
+
+const (
+	PaneFrameFull  PaneFrameMode = "full"
+	PaneFrameSplit PaneFrameMode = "split"
+	PaneFrameNone  PaneFrameMode = "none"
+)
+
+type Options struct {
+	PaneFrame PaneFrameMode
+}
+
+func DefaultOptions() Options {
+	return Options{PaneFrame: PaneFrameFull}
+}
+
+func (options Options) validate() error {
+	switch options.PaneFrame {
+	case PaneFrameFull, PaneFrameSplit, PaneFrameNone:
+		return nil
+	default:
+		return fmt.Errorf("invalid TUI Pane frame mode %q", options.PaneFrame)
+	}
+}
+
 // paneChrome owns decoration and determines the content viewport. Pane content
 // never needs to know whether a border, title, or no chrome is used.
 type paneChrome interface {
@@ -176,9 +201,20 @@ func (registry paneRendererRegistry) renderer(pane core.Pane) (paneRenderer, err
 }
 
 func chromeFor(pane core.Pane, renderer paneRenderer) paneChrome {
+	return chromeForMode(pane, renderer, PaneFrameFull)
+}
+
+func chromeForMode(pane core.Pane, renderer paneRenderer, mode PaneFrameMode) paneChrome {
+	if mode == "" {
+		mode = PaneFrameFull
+	}
 	chrome := pane.Presentation.Chrome
 	if chrome == core.PaneChromeAuto {
-		chrome = renderer.DefaultChrome()
+		if mode == PaneFrameFull {
+			chrome = renderer.DefaultChrome()
+		} else {
+			chrome = core.PaneChromeNone
+		}
 	}
 	if chrome == core.PaneChromeNone {
 		return noChrome{}
