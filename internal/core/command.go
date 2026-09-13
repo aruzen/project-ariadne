@@ -7,9 +7,10 @@ type Command interface {
 }
 
 type PaneSpec struct {
-	Kind     PaneKind
-	Title    string
-	Terminal *TerminalInstance
+	Kind         PaneKind
+	Title        string
+	Presentation PanePresentation
+	Terminal     *TerminalInstance
 }
 
 type CreateWorkspaceCommand struct {

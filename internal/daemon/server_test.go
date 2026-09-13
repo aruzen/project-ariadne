@@ -319,13 +319,15 @@ func TestTerminalOperationsNewListRestartKillAndDismiss(t *testing.T) {
 	server, _ := openTestServer(t, &testFactory{processes: []*testManagedProcess{first, second, third}})
 	params := ariadneprotocol.NewTerminalParams{
 		Argv: []string{"test-command", "arg"}, CWD: "/tmp", Env: []string{"TEST=value"},
-		InitialSize: pty.Size{Cols: 100, Rows: 30},
+		InitialSize:  pty.Size{Cols: 100, Rows: 30},
+		Presentation: core.PanePresentation{Chrome: core.PaneChromeNone},
 	}
 	created, err := server.NewTerminal(context.Background(), params)
 	if err != nil {
 		t.Fatalf("NewTerminal: %v", err)
 	}
-	if created.Pane.Terminal == nil || created.Pane.Terminal.State != core.TerminalRunning || created.Pane.Terminal.ID == nil {
+	if created.Pane.Terminal == nil || created.Pane.Terminal.State != core.TerminalRunning || created.Pane.Terminal.ID == nil ||
+		created.Pane.Presentation.Chrome != core.PaneChromeNone {
 		t.Fatalf("created Pane = %+v", created.Pane)
 	}
 	firstID := *created.Pane.Terminal.ID
@@ -344,7 +346,8 @@ func TestTerminalOperationsNewListRestartKillAndDismiss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RestartTerminal: %v", err)
 	}
-	if restarted.Pane.Terminal.ID == nil || *restarted.Pane.Terminal.ID == firstID || restarted.Pane.Terminal.State != core.TerminalRunning {
+	if restarted.Pane.Terminal.ID == nil || *restarted.Pane.Terminal.ID == firstID || restarted.Pane.Terminal.State != core.TerminalRunning ||
+		restarted.Pane.Presentation.Chrome != core.PaneChromeNone {
 		t.Fatalf("restarted Pane = %+v", restarted.Pane)
 	}
 	if _, err := server.KillTerminal(context.Background(), ariadneprotocol.PaneParams{PaneID: created.Pane.ID}); err != nil {

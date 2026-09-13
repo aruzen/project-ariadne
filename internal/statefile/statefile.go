@@ -108,11 +108,12 @@ type persistentLayout struct {
 }
 
 type persistentPane struct {
-	ID       core.PaneID         `json:"id"`
-	WindowID core.WindowID       `json:"window_id"`
-	Kind     core.PaneKind       `json:"kind"`
-	Title    string              `json:"title,omitempty"`
-	Terminal *persistentTerminal `json:"terminal,omitempty"`
+	ID           core.PaneID            `json:"id"`
+	WindowID     core.WindowID          `json:"window_id"`
+	Kind         core.PaneKind          `json:"kind"`
+	Title        string                 `json:"title,omitempty"`
+	Presentation *core.PanePresentation `json:"presentation,omitempty"`
+	Terminal     *persistentTerminal    `json:"terminal,omitempty"`
 }
 
 type persistentTerminal struct {
@@ -250,7 +251,13 @@ func persistentFromSnapshot(snapshot core.Snapshot) persistentSnapshot {
 		}
 	}
 	for index, pane := range snapshot.Panes {
-		persistentPane := persistentPane{ID: pane.ID, WindowID: pane.WindowID, Kind: pane.Kind, Title: pane.Title}
+		persistentPane := persistentPane{
+			ID: pane.ID, WindowID: pane.WindowID, Kind: pane.Kind, Title: pane.Title,
+		}
+		if pane.Presentation != (core.PanePresentation{}) {
+			presentation := pane.Presentation
+			persistentPane.Presentation = &presentation
+		}
 		if pane.Terminal != nil {
 			terminal := persistentTerminal{State: pane.Terminal.State, Launch: cloneLaunch(pane.Terminal.Launch)}
 			if pane.Terminal.Exit != nil {
@@ -289,7 +296,12 @@ func snapshotFromPersistent(persistent persistentSnapshot) core.Snapshot {
 		}
 	}
 	for index, pane := range persistent.Panes {
-		corePane := core.Pane{ID: pane.ID, WindowID: pane.WindowID, Kind: pane.Kind, Title: pane.Title}
+		corePane := core.Pane{
+			ID: pane.ID, WindowID: pane.WindowID, Kind: pane.Kind, Title: pane.Title,
+		}
+		if pane.Presentation != nil {
+			corePane.Presentation = *pane.Presentation
+		}
 		if pane.Terminal != nil {
 			terminal := core.TerminalInstance{State: pane.Terminal.State, Launch: cloneLaunch(pane.Terminal.Launch)}
 			if pane.Terminal.Exit != nil {

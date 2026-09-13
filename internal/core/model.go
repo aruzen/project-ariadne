@@ -24,6 +24,20 @@ const (
 	PaneFixed    PaneKind = "fixed"
 )
 
+// PaneChrome is a frontend-neutral presentation hint. Auto lets each frontend
+// and Pane renderer choose its default chrome.
+type PaneChrome string
+
+const (
+	PaneChromeAuto   PaneChrome = ""
+	PaneChromeBorder PaneChrome = "border"
+	PaneChromeNone   PaneChrome = "none"
+)
+
+type PanePresentation struct {
+	Chrome PaneChrome `json:"chrome,omitempty"`
+}
+
 type TerminalState string
 
 const (
@@ -105,11 +119,12 @@ type Window struct {
 }
 
 type Pane struct {
-	ID       PaneID            `json:"id"`
-	WindowID WindowID          `json:"window_id"`
-	Kind     PaneKind          `json:"kind"`
-	Title    string            `json:"title,omitempty"`
-	Terminal *TerminalInstance `json:"terminal,omitempty"`
+	ID           PaneID            `json:"id"`
+	WindowID     WindowID          `json:"window_id"`
+	Kind         PaneKind          `json:"kind"`
+	Title        string            `json:"title,omitempty"`
+	Presentation PanePresentation  `json:"presentation,omitempty"`
+	Terminal     *TerminalInstance `json:"terminal,omitempty"`
 }
 
 type LabelTargetKind string
@@ -497,11 +512,23 @@ func validDirection(direction SplitDirection) bool {
 }
 
 func validPane(pane Pane) bool {
+	if !validPanePresentation(pane.Presentation) {
+		return false
+	}
 	switch pane.Kind {
 	case PaneTerminal:
 		return pane.Terminal == nil || validTerminal(*pane.Terminal)
 	case PaneFixed:
 		return pane.Terminal == nil
+	default:
+		return false
+	}
+}
+
+func validPanePresentation(presentation PanePresentation) bool {
+	switch presentation.Chrome {
+	case PaneChromeAuto, PaneChromeBorder, PaneChromeNone:
+		return true
 	default:
 		return false
 	}

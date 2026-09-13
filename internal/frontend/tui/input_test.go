@@ -24,8 +24,8 @@ func TestPreferredFocusChoosesRunningPane(t *testing.T) {
 	session := session{
 		placements: []Placement{{PaneID: 1}, {PaneID: 2}},
 		snapshot: core.Snapshot{Panes: []core.Pane{
-			{ID: 1, Terminal: &core.TerminalInstance{State: core.TerminalExited}},
-			{ID: 2, Terminal: &core.TerminalInstance{ID: &runningID, State: core.TerminalRunning}},
+			{ID: 1, Kind: core.PaneTerminal, Terminal: &core.TerminalInstance{State: core.TerminalExited}},
+			{ID: 2, Kind: core.PaneTerminal, Terminal: &core.TerminalInstance{ID: &runningID, State: core.TerminalRunning}},
 		}},
 	}
 	if got := session.preferredFocus(); got != 2 {

@@ -17,7 +17,6 @@ import (
 	"github.com/aruzen/ariadne/internal/daemon"
 	platformterminal "github.com/aruzen/ariadne/internal/platform/terminal"
 	"github.com/aruzen/ariadne/internal/protocol"
-	"github.com/aruzen/ariadne/internal/vt/libghostty"
 	"github.com/aruzen/streammux/pty"
 )
 
@@ -28,8 +27,9 @@ const (
 
 type paneView struct {
 	paneID       core.PaneID
+	kind         core.PaneKind
 	terminalID   core.TerminalID
-	terminal     *libghostty.Terminal
+	content      paneContent
 	attachment   *client.PTYAttachment
 	attachCancel context.CancelFunc
 	cols         int
@@ -64,6 +64,7 @@ type session struct {
 	height      int
 	placements  []Placement
 	views       map[core.PaneID]*paneView
+	renderers   paneRendererRegistry
 	ptyEvents   chan paneEvent
 	statusBar   StatusBar
 	message     string
@@ -108,7 +109,8 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 	value := &session{
 		ctx: ctx, cancel: cancel, client: frontend, pty: ptyClient, output: frameOutput,
 		snapshot: snapshot, width: cols, height: rows, views: make(map[core.PaneID]*paneView),
-		ptyEvents: make(chan paneEvent, 256), statusBar: DefaultStatusBar(), dirty: true,
+		renderers: defaultPaneRendererRegistry(), ptyEvents: make(chan paneEvent, 256),
+		statusBar: DefaultStatusBar(), dirty: true,
 	}
 	value.selectInitialWindow()
 	value.relayout()
@@ -242,12 +244,23 @@ func (session *session) relayout() {
 func (session *session) preferredFocus() core.PaneID {
 	for _, placement := range session.placements {
 		pane, exists := session.pane(placement.PaneID)
-		if exists && pane.Terminal != nil && pane.Terminal.State == core.TerminalRunning {
+		if !exists {
+			continue
+		}
+		renderer, err := session.paneRenderer(pane)
+		if err == nil && renderer.Focusable(pane) && pane.Terminal != nil && pane.Terminal.State == core.TerminalRunning {
 			return placement.PaneID
 		}
 	}
-	if len(session.placements) != 0 {
-		return session.placements[0].PaneID
+	for _, placement := range session.placements {
+		pane, exists := session.pane(placement.PaneID)
+		if !exists {
+			continue
+		}
+		renderer, err := session.paneRenderer(pane)
+		if err == nil && renderer.Focusable(pane) {
+			return placement.PaneID
+		}
 	}
 	return 0
 }
@@ -255,7 +268,14 @@ func (session *session) preferredFocus() core.PaneID {
 func (session *session) syncViews() {
 	wanted := make(map[core.PaneID]Placement, len(session.placements))
 	for _, placement := range session.placements {
-		wanted[placement.PaneID] = placement
+		pane, exists := session.pane(placement.PaneID)
+		if !exists {
+			continue
+		}
+		_, err := session.paneRenderer(pane)
+		if err == nil {
+			wanted[placement.PaneID] = placement
+		}
 	}
 	for paneID, view := range session.views {
 		if _, exists := wanted[paneID]; !exists {
@@ -268,43 +288,41 @@ func (session *session) syncViews() {
 		if !exists {
 			continue
 		}
+		renderer, err := session.paneRenderer(pane)
+		if err != nil {
+			continue
+		}
 		var terminalID core.TerminalID
 		if pane.Terminal != nil && pane.Terminal.ID != nil {
 			terminalID = *pane.Terminal.ID
 		}
 		view := session.views[paneID]
-		if view == nil {
-			view = &paneView{paneID: paneID, terminalID: terminalID}
-			session.views[paneID] = view
-		} else if view.terminalID != terminalID {
-			session.detachView(view)
-			if view.terminal != nil {
-				view.terminal.Close()
-				view.terminal = nil
+		if view == nil || view.kind != pane.Kind || view.terminalID != terminalID {
+			if view != nil {
+				session.closeView(view)
 			}
-			view.terminalID = terminalID
-			view.errorMessage = ""
+			view = &paneView{
+				paneID: paneID, kind: pane.Kind, terminalID: terminalID, content: renderer.NewContent(pane),
+			}
+			session.views[paneID] = view
 		}
-		interior := placement.Rect.Interior()
-		cols, rows := interior.W, interior.H
+		content := chromeFor(pane, renderer).ContentRect(placement.Rect)
+		cols, rows := content.W, content.H
 		if cols < 1 || rows < 1 {
 			continue
 		}
-		if view.terminal == nil {
-			terminal, err := libghostty.NewTerminal(cols, rows)
-			if err != nil {
-				view.errorMessage = err.Error()
-				continue
-			}
-			view.terminal = terminal
-		} else if view.cols != cols || view.rows != rows {
-			if err := view.terminal.Resize(cols, rows); err != nil {
+		if view.content == nil {
+			view.errorMessage = "TUI Pane content is unavailable"
+			continue
+		}
+		if view.cols != cols || view.rows != rows {
+			if err := view.content.Resize(cols, rows); err != nil {
 				view.errorMessage = err.Error()
 				continue
 			}
 		}
 		view.cols, view.rows = cols, rows
-		if terminalID != 0 && view.attachment == nil {
+		if renderer.UsesTerminal() && terminalID != 0 && view.attachment == nil {
 			attachment, _, err := session.pty.Attach(session.ctx, terminalID, pty.ReplayHistory)
 			if err != nil {
 				view.errorMessage = err.Error()
@@ -316,7 +334,7 @@ func (session *session) syncViews() {
 			view.ptyCols, view.ptyRows = 0, 0
 			go session.forwardPTY(attachmentCtx, view.paneID, attachment)
 		}
-		if view.attachment != nil && pane.Terminal != nil && pane.Terminal.State == core.TerminalRunning &&
+		if renderer.UsesTerminal() && view.attachment != nil && pane.Terminal != nil && pane.Terminal.State == core.TerminalRunning &&
 			(view.ptyCols != cols || view.ptyRows != rows) {
 			ctx, cancel := context.WithTimeout(session.ctx, commandTimeout)
 			err := session.pty.Resize(ctx, terminalID, pty.Size{Cols: cols, Rows: rows})
@@ -355,10 +373,11 @@ func (session *session) handlePTYEvent(message paneEvent) error {
 	}
 	switch message.event.Kind {
 	case client.PTYOutput:
-		if view.terminal == nil {
+		content, ok := view.content.(ptyPaneContent)
+		if !ok {
 			return errors.New("TUI terminal view is unavailable")
 		}
-		response, err := view.terminal.WriteWithResponse(message.event.Data)
+		response, err := content.WritePTY(message.event.Data)
 		if err != nil {
 			return err
 		}
@@ -378,7 +397,20 @@ func (session *session) handlePTYEvent(message paneEvent) error {
 func (session *session) sendInput(data []byte) {
 	view := session.views[session.focus]
 	pane, exists := session.pane(session.focus)
-	if view == nil || view.attachment == nil || !exists || pane.Terminal == nil || pane.Terminal.State != core.TerminalRunning {
+	if view == nil || view.content == nil || !exists {
+		session.setMessage("focused pane does not accept input")
+		return
+	}
+	handled, err := view.content.HandleInput(data)
+	if err != nil {
+		session.setMessage(err.Error())
+		return
+	}
+	if handled {
+		session.dirty = true
+		return
+	}
+	if view.attachment == nil || pane.Terminal == nil || pane.Terminal.State != core.TerminalRunning {
 		session.setMessage("focused pane is not running")
 		return
 	}
@@ -404,6 +436,11 @@ func (session *session) moveFocus(action inputAction) {
 	bestScore := int(^uint(0) >> 1)
 	for _, candidate := range session.placements {
 		if candidate.PaneID == current.PaneID {
+			continue
+		}
+		pane, exists := session.pane(candidate.PaneID)
+		renderer, err := session.paneRenderer(pane)
+		if !exists || err != nil || !renderer.Focusable(pane) {
 			continue
 		}
 		x, y := center(candidate.Rect)
@@ -457,37 +494,36 @@ func (session *session) render() ([]byte, error) {
 			continue
 		}
 		focused := pane.ID == session.focus
-		drawPaneBorder(surface, placement.Rect, paneTitle(pane), focused)
-		interior := placement.Rect.Interior()
-		view := session.views[pane.ID]
-		if view == nil || view.terminal == nil || interior.W == 0 || interior.H == 0 {
-			continue
-		}
-		screen, err := view.terminal.Screen()
+		renderer, err := session.paneRenderer(pane)
 		if err != nil {
-			view.errorMessage = err.Error()
+			session.setMessage(err.Error())
 			continue
 		}
-		for y := 0; y < interior.H && y < screen.Rows; y++ {
-			for x := 0; x < interior.W && x < screen.Cols; x++ {
-				source := screen.At(x, y)
-				style := Style{
-					Foreground: colorFromGhostty(source.Style.Foreground), Background: colorFromGhostty(source.Style.Background),
-					Bold: source.Style.Bold, Italic: source.Style.Italic, Underline: source.Style.Underline,
-					Strikethrough: source.Style.Strikethrough, Faint: source.Style.Faint, Blink: source.Style.Blink,
-				}
-				target := (interior.Y+y)*surface.Width + interior.X + x
-				if target >= 0 && target < len(surface.Cells) {
-					surface.Cells[target] = Cell{Text: source.Text, Width: source.Width, Style: style}
-				}
+		chrome := chromeFor(pane, renderer)
+		chrome.Draw(surface, placement.Rect, paneTitle(pane), focused)
+		content := chrome.ContentRect(placement.Rect)
+		view := session.views[pane.ID]
+		if content.W <= 0 || content.H <= 0 {
+			continue
+		}
+		if view == nil || view.content == nil {
+			continue
+		}
+		paneCursor, err := view.content.Draw(surface, content, pane, focused, base)
+		if err != nil {
+			if view != nil {
+				view.errorMessage = err.Error()
+			} else {
+				session.setMessage(err.Error())
 			}
+			continue
 		}
-		if focused && screen.Cursor.Visible && screen.Cursor.X < interior.W && screen.Cursor.Y < interior.H {
-			cursor = Cursor{X: interior.X + screen.Cursor.X, Y: interior.Y + screen.Cursor.Y, Visible: true}
+		if paneCursor.Visible {
+			cursor = paneCursor
 		}
-		if view.errorMessage != "" && interior.H != 0 {
+		if view.errorMessage != "" {
 			warning := Style{Foreground: Color{R: 255, G: 210, B: 120}, Background: base.Background}
-			surface.Text(interior.X, interior.Y, interior.W, fitText(view.errorMessage, interior.W), warning)
+			surface.Text(content.X, content.Y, content.W, fitText(view.errorMessage, content.W), warning)
 		}
 	}
 	workspaceName, windowName := session.names()
@@ -598,9 +634,9 @@ func (session *session) detachView(view *paneView) {
 
 func (session *session) closeView(view *paneView) {
 	session.detachView(view)
-	if view.terminal != nil {
-		view.terminal.Close()
-		view.terminal = nil
+	if view.content != nil {
+		view.content.Close()
+		view.content = nil
 	}
 }
 
@@ -658,8 +694,4 @@ func max(left, right int) int {
 		return left
 	}
 	return right
-}
-
-func colorFromGhostty(color libghostty.Color) Color {
-	return Color{R: color.R, G: color.G, B: color.B}
 }

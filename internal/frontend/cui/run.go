@@ -155,6 +155,7 @@ func parseNewParams(arguments []string, stderr io.Writer) (protocol.NewTerminalP
 	targetID := flags.Uint64("target", 0, "split target Pane ID")
 	direction := flags.String("direction", "", "horizontal or vertical")
 	title := flags.String("title", "", "Pane title")
+	chrome := flags.String("chrome", "auto", "Pane chrome: auto, border, or none")
 	cwd, err := os.Getwd()
 	if err != nil {
 		return protocol.NewTerminalParams{}, err
@@ -167,11 +168,28 @@ func parseNewParams(arguments []string, stderr io.Writer) (protocol.NewTerminalP
 	if err != nil {
 		return protocol.NewTerminalParams{}, err
 	}
+	presentation, err := parsePanePresentation(*chrome)
+	if err != nil {
+		return protocol.NewTerminalParams{}, err
+	}
 	return protocol.NewTerminalParams{
 		WindowID: core.WindowID(*windowID), TargetPaneID: core.PaneID(*targetID),
-		Direction: core.SplitDirection(*direction), Title: *title,
+		Direction: core.SplitDirection(*direction), Title: *title, Presentation: presentation,
 		Argv: argv, CWD: *workingDirectory, Env: os.Environ(), InitialSize: terminalSize(os.Stdin),
 	}, nil
+}
+
+func parsePanePresentation(chrome string) (core.PanePresentation, error) {
+	value := core.PaneChrome(chrome)
+	if value == "auto" {
+		value = core.PaneChromeAuto
+	}
+	switch value {
+	case core.PaneChromeAuto, core.PaneChromeBorder, core.PaneChromeNone:
+		return core.PanePresentation{Chrome: value}, nil
+	default:
+		return core.PanePresentation{}, fmt.Errorf("invalid Pane chrome %q", chrome)
+	}
 }
 
 func runOpen(ctx context.Context, frontend *client.Client, arguments []string, stdout, stderr io.Writer) error {

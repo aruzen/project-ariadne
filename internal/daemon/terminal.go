@@ -310,7 +310,9 @@ func newTerminalPaneCommand(snapshot core.Snapshot, params ariadneprotocol.NewTe
 		State:  core.TerminalStarting,
 		Launch: core.LaunchSpec{Argv: append([]string(nil), params.Argv...), CWD: params.CWD},
 	}
-	spec := core.PaneSpec{Kind: core.PaneTerminal, Title: params.Title, Terminal: terminal}
+	spec := core.PaneSpec{
+		Kind: core.PaneTerminal, Title: params.Title, Presentation: params.Presentation, Terminal: terminal,
+	}
 	if window.Layout == nil {
 		if params.TargetPaneID != 0 || params.Direction != "" {
 			return nil, fmt.Errorf("%w: empty window does not accept split placement", core.ErrInvalidArgument)

@@ -180,6 +180,26 @@ func TestUnknownOperationAndCoreErrorsUseStableCodes(t *testing.T) {
 	}
 }
 
+func TestCreatePaneCommandPreservesPresentation(t *testing.T) {
+	params, err := json.Marshal(CreatePaneParams{
+		WindowID: 1, Kind: core.PaneFixed,
+		Presentation: core.PanePresentation{Chrome: core.PaneChromeNone},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, err := commandFromRequest(Request{
+		Version: Version, Operation: OperationCreatePane, Params: params,
+	}, 1)
+	if err != nil {
+		t.Fatalf("commandFromRequest: %v", err)
+	}
+	created, ok := command.(core.CreatePaneCommand)
+	if !ok || created.Pane.Presentation.Chrome != core.PaneChromeNone {
+		t.Fatalf("command = %#v", command)
+	}
+}
+
 func TestMalformedCommandDoesNotClosePeer(t *testing.T) {
 	pair := newPeerPair(t, newProtocolCore(t))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

@@ -476,7 +476,7 @@ func (c *Core) setFocus(command SetFocusCommand, frontends map[FrontendID]*front
 }
 
 func paneFromSpec(id PaneID, windowID WindowID, spec PaneSpec) Pane {
-	pane := Pane{ID: id, WindowID: windowID, Kind: spec.Kind, Title: spec.Title}
+	pane := Pane{ID: id, WindowID: windowID, Kind: spec.Kind, Title: spec.Title, Presentation: spec.Presentation}
 	if spec.Terminal != nil {
 		terminal := cloneTerminal(*spec.Terminal)
 		pane.Terminal = &terminal
@@ -485,7 +485,7 @@ func paneFromSpec(id PaneID, windowID WindowID, spec PaneSpec) Pane {
 }
 
 func (s *state) validatePaneSpec(spec PaneSpec) error {
-	pane := Pane{Kind: spec.Kind, Terminal: spec.Terminal}
+	pane := Pane{Kind: spec.Kind, Presentation: spec.Presentation, Terminal: spec.Terminal}
 	if !validPane(pane) {
 		return fmt.Errorf("%w: invalid pane specification", ErrInvalidArgument)
 	}

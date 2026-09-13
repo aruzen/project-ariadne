@@ -215,16 +215,18 @@ type CreateWindowParams struct {
 }
 
 type CreatePaneParams struct {
-	WindowID core.WindowID `json:"window_id"`
-	Kind     core.PaneKind `json:"kind"`
-	Title    string        `json:"title,omitempty"`
+	WindowID     core.WindowID         `json:"window_id"`
+	Kind         core.PaneKind         `json:"kind"`
+	Title        string                `json:"title,omitempty"`
+	Presentation core.PanePresentation `json:"presentation,omitempty"`
 }
 
 type SplitPaneParams struct {
-	TargetPaneID core.PaneID         `json:"target_pane_id"`
-	Direction    core.SplitDirection `json:"direction"`
-	Kind         core.PaneKind       `json:"kind"`
-	Title        string              `json:"title,omitempty"`
+	TargetPaneID core.PaneID           `json:"target_pane_id"`
+	Direction    core.SplitDirection   `json:"direction"`
+	Kind         core.PaneKind         `json:"kind"`
+	Title        string                `json:"title,omitempty"`
+	Presentation core.PanePresentation `json:"presentation,omitempty"`
 }
 
 type MovePaneParams struct {
@@ -239,14 +241,15 @@ type SetFocusParams struct {
 }
 
 type NewTerminalParams struct {
-	WindowID     core.WindowID       `json:"window_id,omitempty"`
-	TargetPaneID core.PaneID         `json:"target_pane_id,omitempty"`
-	Direction    core.SplitDirection `json:"direction,omitempty"`
-	Title        string              `json:"title,omitempty"`
-	Argv         []string            `json:"argv"`
-	CWD          string              `json:"cwd"`
-	Env          []string            `json:"env"`
-	InitialSize  pty.Size            `json:"initial_size"`
+	WindowID     core.WindowID         `json:"window_id,omitempty"`
+	TargetPaneID core.PaneID           `json:"target_pane_id,omitempty"`
+	Direction    core.SplitDirection   `json:"direction,omitempty"`
+	Title        string                `json:"title,omitempty"`
+	Presentation core.PanePresentation `json:"presentation,omitempty"`
+	Argv         []string              `json:"argv"`
+	CWD          string                `json:"cwd"`
+	Env          []string              `json:"env"`
+	InitialSize  pty.Size              `json:"initial_size"`
 }
 
 type RestartTerminalParams struct {
@@ -536,13 +539,13 @@ func commandFromRequest(request Request, frontendID core.FrontendID) (core.Comma
 		if err := decodeParams(request.Params, &params); err != nil {
 			return nil, err
 		}
-		return core.CreatePaneCommand{WindowID: params.WindowID, Pane: core.PaneSpec{Kind: params.Kind, Title: params.Title}}, nil
+		return core.CreatePaneCommand{WindowID: params.WindowID, Pane: core.PaneSpec{Kind: params.Kind, Title: params.Title, Presentation: params.Presentation}}, nil
 	case OperationSplitPane:
 		var params SplitPaneParams
 		if err := decodeParams(request.Params, &params); err != nil {
 			return nil, err
 		}
-		return core.SplitPaneCommand{TargetPaneID: params.TargetPaneID, Direction: params.Direction, Pane: core.PaneSpec{Kind: params.Kind, Title: params.Title}}, nil
+		return core.SplitPaneCommand{TargetPaneID: params.TargetPaneID, Direction: params.Direction, Pane: core.PaneSpec{Kind: params.Kind, Title: params.Title, Presentation: params.Presentation}}, nil
 	case OperationMovePane:
 		var params MovePaneParams
 		if err := decodeParams(request.Params, &params); err != nil {
