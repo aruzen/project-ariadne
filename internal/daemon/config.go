@@ -47,6 +47,7 @@ type Config struct {
 	Plugin                    plugin.Config
 	ClosePaneOnSuccessfulExit bool
 	Clipboard                 ClipboardConfig
+	AgentMarkerBytes          int
 }
 
 func DefaultConfig(statePath string) Config {
@@ -72,6 +73,7 @@ func DefaultConfig(statePath string) Config {
 			Timeout:      time.Duration(ariadneconfig.DefaultClipboardTimeoutMS) * time.Millisecond,
 			Backend:      platformclipboard.NewSystemBackend(),
 		},
+		AgentMarkerBytes: plugin.DefaultAgentMarkerBytes,
 	}
 }
 
@@ -106,6 +108,12 @@ func (configuration Config) withDefaults() (Config, error) {
 	}
 	if configuration.Core.EventQueueCapacity == 0 {
 		configuration.Core = core.DefaultConfig()
+	}
+	if configuration.AgentMarkerBytes == 0 {
+		configuration.AgentMarkerBytes = plugin.DefaultAgentMarkerBytes
+	}
+	if configuration.AgentMarkerBytes < 1 {
+		return Config{}, fmt.Errorf("%w: AgentMarkerBytes must be positive", ErrInvalidConfig)
 	}
 	if configuration.Manager.MaxSessions == 0 {
 		defaults := DefaultConfig(configuration.StatePath)

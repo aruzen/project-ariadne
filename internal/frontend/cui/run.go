@@ -132,6 +132,10 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 		return runStash(operationCtx, frontend, arguments[1:], stdout)
 	case "restore":
 		return runRestore(operationCtx, frontend, arguments[1:], stdout, stderr)
+	case "tool":
+		return runTool(operationCtx, frontend, synchronized.Snapshot, arguments[1:], stdout, stderr)
+	case "attention":
+		return runAttention(operationCtx, frontend, synchronized.Snapshot, arguments[1:], stdout)
 	case "daemon":
 		return runDaemon(operationCtx, frontend, arguments[1:], stdout, stderr)
 	}
@@ -173,11 +177,133 @@ func defaultsShell() string {
 
 func knownCommand(command string) bool {
 	switch command {
-	case "tui", "new", "open", "attach", "list", "restart", "run", "kill", "dismiss", "stash", "restore", "daemon":
+	case "tui", "new", "open", "attach", "list", "restart", "run", "kill", "dismiss", "stash", "restore", "tool", "attention", "daemon":
 		return true
 	default:
 		return false
 	}
+}
+
+func runTool(ctx context.Context, frontend *client.Client, snapshot core.Snapshot, arguments []string, stdout, stderr io.Writer) error {
+	if len(arguments) == 1 && arguments[0] == "list" {
+		writer := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+		_, _ = fmt.Fprintln(writer, "PANE\tPROVIDER\tTYPE\tINSTANCE\tGENERATION")
+		for _, pane := range snapshot.Panes {
+			if pane.Tool == nil {
+				continue
+			}
+			generation := uint64(0)
+			for _, tool := range snapshot.ToolInstances {
+				if tool.Descriptor == *pane.Tool {
+					generation = tool.Generation
+					break
+				}
+			}
+			_, _ = fmt.Fprintf(writer, "%d\t%s\t%s\t%s\t%d\n", pane.ID, pane.Tool.Provider, pane.Tool.Type, pane.Tool.Instance, generation)
+		}
+		return writer.Flush()
+	}
+	if len(arguments) == 0 || arguments[0] != "new" {
+		return errors.New("usage: tool new [options] TYPE | tool list")
+	}
+	flags := flag.NewFlagSet("tool new", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	provider := flags.String("provider", "ariadne", "Tool provider")
+	instance := flags.String("instance", "default", "Tool instance")
+	windowID := flags.Uint64("window", 0, "destination Window ID")
+	targetID := flags.Uint64("target", 0, "split target Pane ID")
+	direction := flags.String("direction", "horizontal", "horizontal or vertical")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
+		return errors.New("usage: tool new [options] TYPE")
+	}
+	window := core.WindowID(*windowID)
+	target := core.PaneID(*targetID)
+	if window == 0 {
+		if len(snapshot.Workspaces) == 0 || len(snapshot.Workspaces[0].WindowIDs) == 0 {
+			return errors.New("no destination Window")
+		}
+		window = snapshot.Workspaces[0].WindowIDs[0]
+	}
+	var destination core.Window
+	for _, candidate := range snapshot.Windows {
+		if candidate.ID == window {
+			destination = candidate
+			break
+		}
+	}
+	if destination.ID == 0 {
+		return fmt.Errorf("window %d not found", window)
+	}
+	if destination.Layout != nil && target == 0 {
+		target = firstPaneID(*destination.Layout)
+	}
+	descriptor := core.ToolDescriptor{Provider: *provider, Type: flags.Arg(0), Instance: *instance}
+	tool := core.ToolInstance{Descriptor: descriptor, StateVersion: 1, Generation: 1, State: json.RawMessage(`{}`)}
+	for _, existing := range snapshot.ToolInstances {
+		if existing.Descriptor == descriptor {
+			tool = existing
+			break
+		}
+	}
+	var pane core.Pane
+	if destination.Layout == nil {
+		result, err := client.Call[core.CreatePaneResult](ctx, frontend, protocol.OperationCreatePane, protocol.CreatePaneParams{WindowID: window, Kind: core.PaneTool, Title: descriptor.Type, Tool: &tool})
+		if err != nil {
+			return err
+		}
+		pane = result.Pane
+	} else {
+		value := core.SplitDirection(*direction)
+		if value != core.SplitHorizontal && value != core.SplitVertical {
+			return errors.New("direction must be horizontal or vertical")
+		}
+		result, err := client.Call[core.CreatePaneResult](ctx, frontend, protocol.OperationSplitPane, protocol.SplitPaneParams{TargetPaneID: target, Direction: value, Kind: core.PaneTool, Title: descriptor.Type, Tool: &tool})
+		if err != nil {
+			return err
+		}
+		pane = result.Pane
+	}
+	_, err := fmt.Fprintf(stdout, "tool pane %d created\n", pane.ID)
+	return err
+}
+
+func runAttention(ctx context.Context, frontend *client.Client, snapshot core.Snapshot, arguments []string, stdout io.Writer) error {
+	if len(arguments) == 1 && arguments[0] == "list" {
+		writer := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+		_, _ = fmt.Fprintln(writer, "ID\tPANE\tCLASS\tSEVERITY\tACK\tMESSAGE")
+		for _, value := range snapshot.Attentions {
+			_, _ = fmt.Fprintf(writer, "%d\t%d\t%s\t%s\t%t\t%s\n", value.ID, value.PaneID, value.Class, value.Severity, value.AcknowledgedAt != nil, value.Message)
+		}
+		return writer.Flush()
+	}
+	if len(arguments) == 2 && arguments[0] == "ack" {
+		id, err := strconv.ParseUint(arguments[1], 10, 64)
+		if err != nil || id == 0 {
+			return errors.New("attention ack requires a positive ID")
+		}
+		_, err = client.Call[core.AttentionResult](ctx, frontend, protocol.OperationAcknowledgeAttention, protocol.AcknowledgeAttentionParams{ID: id, At: time.Now()})
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "attention %d acknowledged\n", id)
+		return err
+	}
+	return errors.New("usage: attention list | attention ack ID")
+}
+
+func firstPaneID(node core.LayoutNode) core.PaneID {
+	if node.Kind == core.LayoutPane {
+		return node.PaneID
+	}
+	for _, child := range node.Children {
+		if id := firstPaneID(child); id != 0 {
+			return id
+		}
+	}
+	return 0
 }
 
 func runStash(ctx context.Context, frontend *client.Client, arguments []string, stdout io.Writer) error {

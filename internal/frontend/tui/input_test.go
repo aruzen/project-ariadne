@@ -111,6 +111,20 @@ func TestInputDecoderRecognizesPhaseNineBindings(t *testing.T) {
 	}
 }
 
+func TestInputDecoderRecognizesToolAndAttentionBindings(t *testing.T) {
+	decoder := inputDecoder{}
+	data, actions := decoder.Feed([]byte{
+		0x01, 'a', 0x01, 'A', 0x01, 'm', 0x01, '?',
+	})
+	want := []inputAction{
+		actionNextAttention, actionPreviousAttention,
+		actionAcknowledgeAttention, actionHelp,
+	}
+	if len(data) != 0 || !reflect.DeepEqual(actions, want) {
+		t.Fatalf("Feed = %q, %v, want no data and %v", data, actions, want)
+	}
+}
+
 func TestModalPromptEditingAndCancel(t *testing.T) {
 	session := session{inputMode: inputModePrompt, promptLead: ":", prompt: "abc"}
 	session.handleModalInput([]byte{0x7f, 'd'})

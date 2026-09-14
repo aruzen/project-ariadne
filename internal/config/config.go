@@ -64,6 +64,13 @@ type Config struct {
 	Terminal  TerminalLimits   `toml:"terminal"`
 	Clipboard ClipboardOptions `toml:"clipboard"`
 	Transport TransportLimits  `toml:"transport"`
+	Attention AttentionLimits  `toml:"attention"`
+}
+
+type AttentionLimits struct {
+	MaxEntries       int   `toml:"max_entries"`
+	MarkerBytes      int   `toml:"marker_bytes"`
+	PluginQueueBytes int64 `toml:"plugin_queue_bytes"`
 }
 
 type ClipboardOptions struct {
@@ -121,6 +128,7 @@ func Default() Config {
 			OutboundQueueBytes: peer.OutboundQueueBytes, OutboundQueueFrames: peer.OutboundQueueFrames,
 			PerStreamQueueBytes: peer.PerStreamQueueBytes, PerStreamQueueFrames: peer.PerStreamQueueFrames,
 		},
+		Attention: AttentionLimits{MaxEntries: 1024, MarkerBytes: 8 << 10, PluginQueueBytes: 1 << 20},
 	}
 }
 
@@ -250,6 +258,9 @@ func (configuration Config) validate() error {
 	}
 	if transport.PerStreamQueueFrames > transport.OutboundQueueFrames {
 		return fmt.Errorf("%w: transport.per_stream_queue_frames exceeds transport.outbound_queue_frames", ErrInvalid)
+	}
+	if configuration.Attention.MaxEntries <= 0 || configuration.Attention.MarkerBytes <= 0 || configuration.Attention.PluginQueueBytes <= 0 {
+		return fmt.Errorf("%w: attention limits must be positive", ErrInvalid)
 	}
 	return nil
 }

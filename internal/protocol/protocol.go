@@ -28,35 +28,37 @@ const (
 type Operation string
 
 const (
-	OperationSync            Operation = "sync"
-	OperationCreateWorkspace Operation = "create_workspace"
-	OperationRenameWorkspace Operation = "rename_workspace"
-	OperationDeleteWorkspace Operation = "delete_workspace"
-	OperationCreateWindow    Operation = "create_window"
-	OperationRenameWindow    Operation = "rename_window"
-	OperationDeleteWindow    Operation = "delete_window"
-	OperationCreatePane      Operation = "create_pane"
-	OperationSplitPane       Operation = "split_pane"
-	OperationMovePane        Operation = "move_pane"
-	OperationClosePane       Operation = "close_pane"
-	OperationResizeSplit     Operation = "resize_split"
-	OperationStashPane       Operation = "stash_pane"
-	OperationRestorePane     Operation = "restore_pane"
-	OperationStashWindow     Operation = "stash_window"
-	OperationRestoreWindow   Operation = "restore_window"
-	OperationListStash       Operation = "list_stash"
-	OperationSetFocus        Operation = "set_focus"
-	OperationSelectWindow    Operation = "select_window"
-	OperationNewTerminal     Operation = "new_terminal"
-	OperationListTerminals   Operation = "list_terminals"
-	OperationRestartTerminal Operation = "restart_terminal"
-	OperationRunTerminal     Operation = "run_terminal"
-	OperationKillTerminal    Operation = "kill_terminal"
-	OperationDismissTerminal Operation = "dismiss_terminal"
-	OperationDaemonStatus    Operation = "daemon_status"
-	OperationDaemonStop      Operation = "daemon_stop"
-	OperationClipboardRead   Operation = "clipboard_read"
-	OperationClipboardWrite  Operation = "clipboard_write"
+	OperationSync                 Operation = "sync"
+	OperationCreateWorkspace      Operation = "create_workspace"
+	OperationRenameWorkspace      Operation = "rename_workspace"
+	OperationDeleteWorkspace      Operation = "delete_workspace"
+	OperationCreateWindow         Operation = "create_window"
+	OperationRenameWindow         Operation = "rename_window"
+	OperationDeleteWindow         Operation = "delete_window"
+	OperationCreatePane           Operation = "create_pane"
+	OperationSplitPane            Operation = "split_pane"
+	OperationMovePane             Operation = "move_pane"
+	OperationClosePane            Operation = "close_pane"
+	OperationResizeSplit          Operation = "resize_split"
+	OperationStashPane            Operation = "stash_pane"
+	OperationRestorePane          Operation = "restore_pane"
+	OperationStashWindow          Operation = "stash_window"
+	OperationRestoreWindow        Operation = "restore_window"
+	OperationListStash            Operation = "list_stash"
+	OperationSetFocus             Operation = "set_focus"
+	OperationSelectWindow         Operation = "select_window"
+	OperationNewTerminal          Operation = "new_terminal"
+	OperationListTerminals        Operation = "list_terminals"
+	OperationRestartTerminal      Operation = "restart_terminal"
+	OperationRunTerminal          Operation = "run_terminal"
+	OperationKillTerminal         Operation = "kill_terminal"
+	OperationDismissTerminal      Operation = "dismiss_terminal"
+	OperationDaemonStatus         Operation = "daemon_status"
+	OperationDaemonStop           Operation = "daemon_stop"
+	OperationClipboardRead        Operation = "clipboard_read"
+	OperationClipboardWrite       Operation = "clipboard_write"
+	OperationUpdateToolState      Operation = "update_tool_state"
+	OperationAcknowledgeAttention Operation = "acknowledge_attention"
 )
 
 type ErrorCode string
@@ -209,6 +211,12 @@ func DecodeEvent(data []byte) (core.Event, error) {
 		payload = &core.LabelEvent{}
 	case core.EventLabelSourceCleared:
 		payload = &core.LabelsEvent{}
+	case core.EventToolStateUpdated:
+		payload = &core.ToolEvent{}
+	case core.EventAttentionRaised, core.EventAttentionAcknowledged:
+		payload = &core.AttentionEvent{}
+	case core.EventAttentionSourceCleared:
+		payload = &core.AttentionsEvent{}
 	default:
 		return core.Event{}, fmt.Errorf("%w: unknown event kind %q", ErrInvalidPayload, envelope.Event.Kind)
 	}
@@ -243,6 +251,12 @@ func DecodeEvent(data []byte) (core.Event, error) {
 	case *core.LabelEvent:
 		payload = *value
 	case *core.LabelsEvent:
+		payload = *value
+	case *core.ToolEvent:
+		payload = *value
+	case *core.AttentionEvent:
+		payload = *value
+	case *core.AttentionsEvent:
 		payload = *value
 	}
 	return core.Event{Revision: envelope.Event.Revision, Kind: envelope.Event.Kind, Payload: payload}, nil
@@ -280,6 +294,7 @@ type CreatePaneParams struct {
 	Kind         core.PaneKind         `json:"kind"`
 	Title        string                `json:"title,omitempty"`
 	Presentation core.PanePresentation `json:"presentation,omitempty"`
+	Tool         *core.ToolInstance    `json:"tool,omitempty"`
 }
 
 type SplitPaneParams struct {
@@ -288,6 +303,19 @@ type SplitPaneParams struct {
 	Kind         core.PaneKind         `json:"kind"`
 	Title        string                `json:"title,omitempty"`
 	Presentation core.PanePresentation `json:"presentation,omitempty"`
+	Tool         *core.ToolInstance    `json:"tool,omitempty"`
+}
+
+type UpdateToolStateParams struct {
+	Descriptor         core.ToolDescriptor `json:"descriptor"`
+	ExpectedGeneration uint64              `json:"expected_generation"`
+	StateVersion       uint32              `json:"state_version"`
+	State              json.RawMessage     `json:"state"`
+}
+
+type AcknowledgeAttentionParams struct {
+	ID uint64    `json:"id"`
+	At time.Time `json:"at"`
 }
 
 type MovePaneParams struct {
@@ -384,11 +412,18 @@ type ListTerminalsResult struct {
 }
 
 type DaemonStatusResult struct {
-	Stopping          bool `json:"stopping"`
-	Connections       int  `json:"connections"`
-	Sessions          int  `json:"sessions"`
-	ActiveTerminals   int  `json:"active_terminals"`
-	RetainedTerminals int  `json:"retained_terminals"`
+	Stopping          bool           `json:"stopping"`
+	Connections       int            `json:"connections"`
+	Sessions          int            `json:"sessions"`
+	ActiveTerminals   int            `json:"active_terminals"`
+	RetainedTerminals int            `json:"retained_terminals"`
+	Plugins           []PluginStatus `json:"plugins,omitempty"`
+}
+
+type PluginStatus struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+	Error   string `json:"error,omitempty"`
 }
 
 type DaemonStopParams struct {
@@ -749,13 +784,25 @@ func commandFromRequest(request Request, frontendID core.FrontendID) (core.Comma
 		if err := decodeParams(request.Params, &params); err != nil {
 			return nil, err
 		}
-		return core.CreatePaneCommand{WindowID: params.WindowID, Pane: core.PaneSpec{Kind: params.Kind, Title: params.Title, Presentation: params.Presentation}}, nil
+		return core.CreatePaneCommand{WindowID: params.WindowID, Pane: core.PaneSpec{Kind: params.Kind, Title: params.Title, Presentation: params.Presentation, Tool: params.Tool}}, nil
 	case OperationSplitPane:
 		var params SplitPaneParams
 		if err := decodeParams(request.Params, &params); err != nil {
 			return nil, err
 		}
-		return core.SplitPaneCommand{TargetPaneID: params.TargetPaneID, Direction: params.Direction, Pane: core.PaneSpec{Kind: params.Kind, Title: params.Title, Presentation: params.Presentation}}, nil
+		return core.SplitPaneCommand{TargetPaneID: params.TargetPaneID, Direction: params.Direction, Pane: core.PaneSpec{Kind: params.Kind, Title: params.Title, Presentation: params.Presentation, Tool: params.Tool}}, nil
+	case OperationUpdateToolState:
+		var params UpdateToolStateParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return core.UpdateToolStateCommand{Descriptor: params.Descriptor, ExpectedGeneration: params.ExpectedGeneration, StateVersion: params.StateVersion, State: params.State}, nil
+	case OperationAcknowledgeAttention:
+		var params AcknowledgeAttentionParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return core.AcknowledgeAttentionCommand{ID: params.ID, At: params.At}, nil
 	case OperationMovePane:
 		var params MovePaneParams
 		if err := decodeParams(request.Params, &params); err != nil {

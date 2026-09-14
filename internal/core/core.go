@@ -11,13 +11,15 @@ import (
 )
 
 const DefaultEventQueueCapacity = 256
+const DefaultMaxAttentionEntries = 1024
 
 type Config struct {
-	EventQueueCapacity int
+	EventQueueCapacity  int
+	MaxAttentionEntries int
 }
 
 func DefaultConfig() Config {
-	return Config{EventQueueCapacity: DefaultEventQueueCapacity}
+	return Config{EventQueueCapacity: DefaultEventQueueCapacity, MaxAttentionEntries: DefaultMaxAttentionEntries}
 }
 
 type requestKind uint8
@@ -76,8 +78,14 @@ func NewFromSnapshot(config Config, snapshot Snapshot) (*Core, error) {
 }
 
 func newCore(config Config, state *state) (*Core, error) {
+	if config.MaxAttentionEntries == 0 {
+		config.MaxAttentionEntries = DefaultMaxAttentionEntries
+	}
 	if config.EventQueueCapacity <= 0 {
 		return nil, fmt.Errorf("%w: EventQueueCapacity must be positive", ErrInvalidConfig)
+	}
+	if config.MaxAttentionEntries < 1 {
+		return nil, fmt.Errorf("%w: MaxAttentionEntries must be positive", ErrInvalidConfig)
 	}
 	core := &Core{
 		config:   config,

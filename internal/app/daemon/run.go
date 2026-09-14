@@ -60,6 +60,9 @@ func Run(arguments []string) error {
 	configuration.Clipboard.WritePolicy = fileConfiguration.Clipboard.Write
 	configuration.Clipboard.MaxTextBytes = fileConfiguration.Clipboard.MaxTextBytes
 	configuration.Clipboard.Timeout = time.Duration(fileConfiguration.Clipboard.CommandTimeoutMS) * time.Millisecond
+	configuration.Core.MaxAttentionEntries = fileConfiguration.Attention.MaxEntries
+	configuration.Plugin.TerminalQueueBytes = fileConfiguration.Attention.PluginQueueBytes
+	configuration.AgentMarkerBytes = fileConfiguration.Attention.MarkerBytes
 	fileConfiguration.ApplyManager(&configuration.Manager)
 	fileConfiguration.ApplyStream(&configuration.Stream)
 	fileConfiguration.ApplyPeer(&configuration.Peer)

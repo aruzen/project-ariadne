@@ -1,5 +1,7 @@
 package core
 
+import "time"
+
 // Command is the mutation boundary of Core. Concrete commands are values so
 // they can be copied before crossing the executor boundary.
 type Command interface {
@@ -11,7 +13,32 @@ type PaneSpec struct {
 	Title        string
 	Presentation PanePresentation
 	Terminal     *TerminalInstance
+	Tool         *ToolInstance
 }
+
+type UpdateToolStateCommand struct {
+	Descriptor         ToolDescriptor
+	ExpectedGeneration uint64
+	StateVersion       uint32
+	State              []byte
+}
+
+type RaiseAttentionCommand struct {
+	PaneID     PaneID
+	Source     string
+	Key        string
+	Class      AttentionClass
+	Severity   AttentionSeverity
+	Message    string
+	OccurredAt time.Time
+}
+
+type AcknowledgeAttentionCommand struct {
+	ID uint64
+	At time.Time
+}
+
+type RemoveAttentionsBySourceCommand struct{ Source string }
 
 type CreateWorkspaceCommand struct {
 	Name string
@@ -173,33 +200,37 @@ type RemoveLabelsBySourceCommand struct {
 	Source string
 }
 
-func (CreateWorkspaceCommand) isCommand()        {}
-func (CreateWindowCommand) isCommand()           {}
-func (RenameWorkspaceCommand) isCommand()        {}
-func (DeleteWorkspaceCommand) isCommand()        {}
-func (RenameWindowCommand) isCommand()           {}
-func (DeleteWindowCommand) isCommand()           {}
-func (CreatePaneCommand) isCommand()             {}
-func (SplitPaneCommand) isCommand()              {}
-func (MovePaneCommand) isCommand()               {}
-func (ClosePaneCommand) isCommand()              {}
-func (ResizeSplitCommand) isCommand()            {}
-func (StashPaneCommand) isCommand()              {}
-func (RestorePaneCommand) isCommand()            {}
-func (StashWindowCommand) isCommand()            {}
-func (RestoreWindowCommand) isCommand()          {}
-func (SetFocusCommand) isCommand()               {}
-func (SelectWindowCommand) isCommand()           {}
-func (RecordTerminalExitCommand) isCommand()     {}
-func (ForgetTerminalSessionCommand) isCommand()  {}
-func (ActivateTerminalCommand) isCommand()       {}
-func (FailTerminalStartCommand) isCommand()      {}
-func (PrepareTerminalRestartCommand) isCommand() {}
-func (PrepareTerminalRunCommand) isCommand()     {}
-func (BeginTerminalStopCommand) isCommand()      {}
-func (SetLabelCommand) isCommand()               {}
-func (RemoveLabelCommand) isCommand()            {}
-func (RemoveLabelsBySourceCommand) isCommand()   {}
+func (CreateWorkspaceCommand) isCommand()          {}
+func (CreateWindowCommand) isCommand()             {}
+func (RenameWorkspaceCommand) isCommand()          {}
+func (DeleteWorkspaceCommand) isCommand()          {}
+func (RenameWindowCommand) isCommand()             {}
+func (DeleteWindowCommand) isCommand()             {}
+func (CreatePaneCommand) isCommand()               {}
+func (SplitPaneCommand) isCommand()                {}
+func (MovePaneCommand) isCommand()                 {}
+func (ClosePaneCommand) isCommand()                {}
+func (ResizeSplitCommand) isCommand()              {}
+func (StashPaneCommand) isCommand()                {}
+func (RestorePaneCommand) isCommand()              {}
+func (StashWindowCommand) isCommand()              {}
+func (RestoreWindowCommand) isCommand()            {}
+func (SetFocusCommand) isCommand()                 {}
+func (SelectWindowCommand) isCommand()             {}
+func (RecordTerminalExitCommand) isCommand()       {}
+func (ForgetTerminalSessionCommand) isCommand()    {}
+func (ActivateTerminalCommand) isCommand()         {}
+func (FailTerminalStartCommand) isCommand()        {}
+func (PrepareTerminalRestartCommand) isCommand()   {}
+func (PrepareTerminalRunCommand) isCommand()       {}
+func (BeginTerminalStopCommand) isCommand()        {}
+func (SetLabelCommand) isCommand()                 {}
+func (RemoveLabelCommand) isCommand()              {}
+func (RemoveLabelsBySourceCommand) isCommand()     {}
+func (UpdateToolStateCommand) isCommand()          {}
+func (RaiseAttentionCommand) isCommand()           {}
+func (AcknowledgeAttentionCommand) isCommand()     {}
+func (RemoveAttentionsBySourceCommand) isCommand() {}
 
 type CreateWorkspaceResult struct {
 	Workspace Workspace `json:"workspace"`
@@ -287,6 +318,19 @@ type LabelResult struct {
 
 type RemoveLabelsResult struct {
 	Labels []Label `json:"labels"`
+}
+
+type ToolStateResult struct {
+	Tool ToolInstance `json:"tool"`
+}
+
+type AttentionResult struct {
+	Attention Attention `json:"attention"`
+	Changed   bool      `json:"changed"`
+}
+
+type RemoveAttentionsResult struct {
+	Attentions []Attention `json:"attentions"`
 }
 
 func cloneCommand(command Command) (Command, error) {
@@ -492,6 +536,37 @@ func cloneCommand(command Command) (Command, error) {
 			return nil, ErrInvalidCommand
 		}
 		return *value, nil
+	case UpdateToolStateCommand:
+		value.State = append([]byte(nil), value.State...)
+		return value, nil
+	case *UpdateToolStateCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		copy := *value
+		copy.State = append([]byte(nil), value.State...)
+		return copy, nil
+	case RaiseAttentionCommand:
+		return value, nil
+	case *RaiseAttentionCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case AcknowledgeAttentionCommand:
+		return value, nil
+	case *AcknowledgeAttentionCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case RemoveAttentionsBySourceCommand:
+		return value, nil
+	case *RemoveAttentionsBySourceCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
 	default:
 		return nil, ErrInvalidCommand
 	}
@@ -501,6 +576,10 @@ func clonePaneSpec(spec PaneSpec) PaneSpec {
 	if spec.Terminal != nil {
 		terminal := cloneTerminal(*spec.Terminal)
 		spec.Terminal = &terminal
+	}
+	if spec.Tool != nil {
+		tool := cloneToolInstance(*spec.Tool)
+		spec.Tool = &tool
 	}
 	return spec
 }

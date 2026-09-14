@@ -30,6 +30,10 @@ const (
 	actionPaste
 	actionStashPane
 	actionListStash
+	actionNextAttention
+	actionPreviousAttention
+	actionAcknowledgeAttention
+	actionHelp
 )
 
 type inputDecoder struct {
@@ -95,6 +99,14 @@ func (decoder *inputDecoder) Feed(input []byte) ([]byte, []inputAction) {
 				actions = append(actions, actionStashPane)
 			case 'S':
 				actions = append(actions, actionListStash)
+			case 'a':
+				actions = append(actions, actionNextAttention)
+			case 'A':
+				actions = append(actions, actionPreviousAttention)
+			case 'm':
+				actions = append(actions, actionAcknowledgeAttention)
+			case '?':
+				actions = append(actions, actionHelp)
 			case 0x01:
 				data = append(data, value)
 			default:

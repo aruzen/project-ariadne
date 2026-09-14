@@ -29,6 +29,10 @@ func (session *session) handleAction(action inputAction) {
 	case actionResizeLeft, actionResizeDown, actionResizeUp, actionResizeRight:
 		session.resizeFocusedPane(action)
 	case actionZoom:
+		if session.previewPane != 0 {
+			session.exitPreview()
+			return
+		}
 		if session.focus != 0 {
 			session.zoom = !session.zoom
 			session.relayout()
@@ -72,7 +76,15 @@ func (session *session) handleAction(action inputAction) {
 	case actionStashPane:
 		session.stashFocusedPane()
 	case actionListStash:
-		session.showStash()
+		session.openBuiltinTool("stash-list")
+	case actionNextAttention:
+		session.navigateAttention(1)
+	case actionPreviousAttention:
+		session.navigateAttention(-1)
+	case actionAcknowledgeAttention:
+		session.ackCurrentAttention()
+	case actionHelp:
+		session.openBuiltinTool("help")
 	}
 }
 
@@ -283,6 +295,21 @@ func (session *session) executePrompt(command string) {
 		session.restorePane(fields[1:])
 	case "restore-window":
 		session.restoreWindow(fields[1:])
+	case "tool":
+		session.createTool(fields[1:])
+	case "preview-pane":
+		id, ok := parseID(fields)
+		if !ok {
+			session.setMessage("usage: preview-pane PANE")
+			return
+		}
+		session.previewPaneByID(core.PaneID(id))
+	case "attention-next":
+		session.navigateAttention(1)
+	case "attention-prev", "attention-previous":
+		session.navigateAttention(-1)
+	case "attention-ack":
+		session.ackCurrentAttention()
 	default:
 		session.setMessage("unknown command: " + fields[0])
 	}

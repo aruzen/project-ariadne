@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"sort"
@@ -63,9 +64,123 @@ func (c *Core) execute(command Command, frontends map[FrontendID]*frontend) (any
 		return c.removeLabel(value)
 	case RemoveLabelsBySourceCommand:
 		return c.removeLabelsBySource(value)
+	case UpdateToolStateCommand:
+		return c.updateToolState(value)
+	case RaiseAttentionCommand:
+		return c.raiseAttention(value)
+	case AcknowledgeAttentionCommand:
+		return c.acknowledgeAttention(value)
+	case RemoveAttentionsBySourceCommand:
+		return c.removeAttentionsBySource(value)
 	default:
 		return nil, nil, ErrInvalidCommand
 	}
+}
+
+func (c *Core) updateToolState(command UpdateToolStateCommand) (any, *Event, error) {
+	key := keyForTool(command.Descriptor)
+	tool, exists := c.state.toolInstances[key]
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: tool instance", ErrNotFound)
+	}
+	if command.ExpectedGeneration != tool.Generation {
+		return nil, nil, fmt.Errorf("%w: tool generation is %d", ErrInvalidState, tool.Generation)
+	}
+	next := ToolInstance{Descriptor: command.Descriptor, StateVersion: command.StateVersion, Generation: tool.Generation + 1, State: append([]byte(nil), command.State...)}
+	if next.Generation == 0 || !validToolInstance(next) {
+		return nil, nil, fmt.Errorf("%w: invalid tool state", ErrInvalidArgument)
+	}
+	c.state.toolInstances[key] = next
+	return ToolStateResult{Tool: cloneToolInstance(next)}, &Event{Kind: EventToolStateUpdated, Payload: ToolEvent{Tool: cloneToolInstance(next)}}, nil
+}
+
+func (c *Core) raiseAttention(command RaiseAttentionCommand) (any, *Event, error) {
+	if command.OccurredAt.IsZero() {
+		return nil, nil, fmt.Errorf("%w: attention time", ErrInvalidArgument)
+	}
+	probe := Attention{ID: 1, PaneID: command.PaneID, Source: command.Source, Key: command.Key, Class: command.Class,
+		Severity: command.Severity, Message: command.Message, OccurredAt: command.OccurredAt, UpdatedAt: command.OccurredAt}
+	if _, exists := c.state.panes[command.PaneID]; !exists || !validAttention(probe) {
+		return nil, nil, fmt.Errorf("%w: invalid attention", ErrInvalidArgument)
+	}
+	key := keyForAttention(probe)
+	if id, exists := c.state.attentionKeys[key]; exists {
+		existing := c.state.attentions[id]
+		if command.OccurredAt.Before(existing.UpdatedAt) {
+			return nil, nil, fmt.Errorf("%w: attention time precedes current state", ErrInvalidArgument)
+		}
+		if existing.Class == command.Class && existing.Severity == command.Severity && existing.Message == command.Message && existing.AcknowledgedAt == nil {
+			return AttentionResult{Attention: cloneAttention(existing), Changed: false}, nil, nil
+		}
+		existing.Class, existing.Severity, existing.Message = command.Class, command.Severity, command.Message
+		existing.UpdatedAt, existing.AcknowledgedAt = command.OccurredAt, nil
+		c.state.attentions[id] = existing
+		return AttentionResult{Attention: cloneAttention(existing), Changed: true}, &Event{Kind: EventAttentionRaised, Payload: AttentionEvent{Attention: cloneAttention(existing)}}, nil
+	}
+	if c.state.nextAttentionID == 0 {
+		return nil, nil, fmt.Errorf("%w: attention ID exhausted", ErrInvalidState)
+	}
+	probe.ID = c.state.nextAttentionID
+	c.state.nextAttentionID++
+	c.state.attentions[probe.ID] = probe
+	c.state.attentionKeys[key] = probe.ID
+	removed := c.state.evictAttentions(c.config.MaxAttentionEntries)
+	return AttentionResult{Attention: cloneAttention(probe), Changed: true}, &Event{Kind: EventAttentionRaised, Payload: AttentionEvent{Attention: cloneAttention(probe), Removed: removed}}, nil
+}
+
+func (c *Core) acknowledgeAttention(command AcknowledgeAttentionCommand) (any, *Event, error) {
+	attention, exists := c.state.attentions[command.ID]
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: attention %d", ErrNotFound, command.ID)
+	}
+	if command.At.IsZero() || command.At.Before(attention.UpdatedAt) {
+		return nil, nil, fmt.Errorf("%w: acknowledgement time", ErrInvalidArgument)
+	}
+	if attention.AcknowledgedAt != nil {
+		return AttentionResult{Attention: cloneAttention(attention), Changed: false}, nil, nil
+	}
+	value := command.At
+	attention.AcknowledgedAt = &value
+	c.state.attentions[attention.ID] = attention
+	return AttentionResult{Attention: cloneAttention(attention), Changed: true}, &Event{Kind: EventAttentionAcknowledged, Payload: AttentionEvent{Attention: cloneAttention(attention)}}, nil
+}
+
+func (c *Core) removeAttentionsBySource(command RemoveAttentionsBySourceCommand) (any, *Event, error) {
+	if strings.TrimSpace(command.Source) == "" || len(command.Source) > 128 || strings.ContainsRune(command.Source, 0) {
+		return nil, nil, fmt.Errorf("%w: invalid attention source", ErrInvalidArgument)
+	}
+	removed := make([]Attention, 0)
+	for id, attention := range c.state.attentions {
+		if attention.Source == command.Source {
+			removed = append(removed, cloneAttention(attention))
+			delete(c.state.attentionKeys, keyForAttention(attention))
+			delete(c.state.attentions, id)
+		}
+	}
+	sort.Slice(removed, func(left, right int) bool { return removed[left].ID < removed[right].ID })
+	result := RemoveAttentionsResult{Attentions: removed}
+	if len(removed) == 0 {
+		return result, nil, nil
+	}
+	return result, &Event{Kind: EventAttentionSourceCleared, Payload: AttentionsEvent{Attentions: removed}}, nil
+}
+
+func (s *state) evictAttentions(limit int) []Attention {
+	var removed []Attention
+	for len(s.attentions) > limit {
+		var selected Attention
+		for _, candidate := range s.attentions {
+			if selected.ID == 0 || (selected.AcknowledgedAt == nil && candidate.AcknowledgedAt != nil) ||
+				((selected.AcknowledgedAt == nil) == (candidate.AcknowledgedAt == nil) &&
+					(candidate.UpdatedAt.Before(selected.UpdatedAt) || (candidate.UpdatedAt.Equal(selected.UpdatedAt) && candidate.ID < selected.ID))) {
+				selected = candidate
+			}
+		}
+		delete(s.attentions, selected.ID)
+		delete(s.attentionKeys, keyForAttention(selected))
+		removed = append(removed, cloneAttention(selected))
+	}
+	return removed
 }
 
 func (c *Core) setLabel(command SetLabelCommand) (any, *Event, error) {
@@ -440,13 +555,14 @@ func (c *Core) createPane(command CreatePaneCommand) (any, *Event, error) {
 		return nil, nil, err
 	}
 	pane := paneFromSpec(id, window.ID, command.Pane)
+	c.state.registerTool(command.Pane.Tool)
 	layout := paneLeaf(id)
 	window.Layout = &layout
 	c.state.windows[window.ID] = window
 	c.state.panes[id] = pane
 	c.state.paneOrder = append(c.state.paneOrder, id)
 	result := CreatePaneResult{Pane: clonePane(pane), Window: cloneWindow(window)}
-	event := Event{Kind: EventPaneCreated, Payload: PaneCreatedEvent{Pane: clonePane(pane), Window: cloneWindow(window)}}
+	event := Event{Kind: EventPaneCreated, Payload: PaneCreatedEvent{Pane: clonePane(pane), Window: cloneWindow(window), Tool: cloneOptionalTool(command.Pane.Tool)}}
 	return result, &event, nil
 }
 
@@ -481,13 +597,14 @@ func (c *Core) splitPane(command SplitPaneCommand) (any, *Event, error) {
 		return nil, nil, fmt.Errorf("%w: pane %d missing from layout", ErrInvalidState, target.ID)
 	}
 	pane := paneFromSpec(id, window.ID, command.Pane)
+	c.state.registerTool(command.Pane.Tool)
 	window.Layout = &layout
 	c.state.windows[window.ID] = window
 	c.state.panes[id] = pane
 	c.state.paneOrder = append(c.state.paneOrder, id)
 	result := CreatePaneResult{Pane: clonePane(pane), Window: cloneWindow(window)}
 	event := Event{Kind: EventPaneCreated, Payload: PaneCreatedEvent{
-		Pane: clonePane(pane), Window: cloneWindow(window), TargetPaneID: target.ID, Direction: command.Direction,
+		Pane: clonePane(pane), Window: cloneWindow(window), TargetPaneID: target.ID, Direction: command.Direction, Tool: cloneOptionalTool(command.Pane.Tool),
 	}}
 	return result, &event, nil
 }
@@ -610,10 +727,35 @@ func (c *Core) closePane(command ClosePaneCommand, frontends map[FrontendID]*fro
 	}
 	delete(c.state.panes, pane.ID)
 	removedLabels := make([]Label, 0)
+	removedAttentions := make([]Attention, 0)
 	for key, label := range c.state.labels {
 		if label.TargetKind == LabelPane && label.TargetID == uint64(pane.ID) {
 			removedLabels = append(removedLabels, label)
 			delete(c.state.labels, key)
+		}
+	}
+	for id, attention := range c.state.attentions {
+		if attention.PaneID == pane.ID {
+			removedAttentions = append(removedAttentions, cloneAttention(attention))
+			delete(c.state.attentionKeys, keyForAttention(attention))
+			delete(c.state.attentions, id)
+		}
+	}
+	sort.Slice(removedAttentions, func(left, right int) bool { return removedAttentions[left].ID < removedAttentions[right].ID })
+	var removedTool *ToolInstance
+	if pane.Tool != nil {
+		used := false
+		for _, other := range c.state.panes {
+			if other.Tool != nil && keyForTool(*other.Tool) == keyForTool(*pane.Tool) {
+				used = true
+				break
+			}
+		}
+		if !used {
+			tool := c.state.toolInstances[keyForTool(*pane.Tool)]
+			delete(c.state.toolInstances, keyForTool(*pane.Tool))
+			copy := cloneToolInstance(tool)
+			removedTool = &copy
 		}
 	}
 	c.state.paneOrder = removePaneID(c.state.paneOrder, pane.ID)
@@ -626,7 +768,7 @@ func (c *Core) closePane(command ClosePaneCommand, frontends map[FrontendID]*fro
 		}
 	}
 	result := ClosePaneResult{Pane: clonePane(pane), Window: cloneWindow(window)}
-	event := Event{Kind: EventPaneClosed, Payload: PaneClosedEvent{Pane: clonePane(pane), Window: cloneWindow(window), RemovedLabels: removedLabels}}
+	event := Event{Kind: EventPaneClosed, Payload: PaneClosedEvent{Pane: clonePane(pane), Window: cloneWindow(window), RemovedLabels: removedLabels, RemovedTool: removedTool, RemovedAttentions: removedAttentions}}
 	return result, &event, nil
 }
 
@@ -710,11 +852,20 @@ func paneFromSpec(id PaneID, windowID WindowID, spec PaneSpec) Pane {
 		terminal := cloneTerminal(*spec.Terminal)
 		pane.Terminal = &terminal
 	}
+	if spec.Tool != nil {
+		descriptor := spec.Tool.Descriptor
+		pane.Tool = &descriptor
+	}
 	return pane
 }
 
 func (s *state) validatePaneSpec(spec PaneSpec) error {
-	pane := Pane{Kind: spec.Kind, Presentation: spec.Presentation, Terminal: spec.Terminal}
+	var descriptor *ToolDescriptor
+	if spec.Tool != nil {
+		value := spec.Tool.Descriptor
+		descriptor = &value
+	}
+	pane := Pane{Kind: spec.Kind, Presentation: spec.Presentation, Terminal: spec.Terminal, Tool: descriptor}
 	if !validPane(pane) {
 		return fmt.Errorf("%w: invalid pane specification", ErrInvalidArgument)
 	}
@@ -725,7 +876,34 @@ func (s *state) validatePaneSpec(spec PaneSpec) error {
 			}
 		}
 	}
+	if spec.Tool != nil {
+		if !validToolInstance(*spec.Tool) {
+			return fmt.Errorf("%w: invalid tool instance", ErrInvalidArgument)
+		}
+		if existing, exists := s.toolInstances[keyForTool(spec.Tool.Descriptor)]; exists &&
+			(existing.StateVersion != spec.Tool.StateVersion || !bytes.Equal(existing.State, spec.Tool.State)) {
+			return fmt.Errorf("%w: tool instance state differs", ErrAlreadyExists)
+		}
+	}
 	return nil
+}
+
+func (s *state) registerTool(tool *ToolInstance) {
+	if tool == nil {
+		return
+	}
+	key := keyForTool(tool.Descriptor)
+	if _, exists := s.toolInstances[key]; !exists {
+		s.toolInstances[key] = cloneToolInstance(*tool)
+	}
+}
+
+func cloneOptionalTool(tool *ToolInstance) *ToolInstance {
+	if tool == nil {
+		return nil
+	}
+	copy := cloneToolInstance(*tool)
+	return &copy
 }
 
 func (s *state) allocateWorkspaceID() (WorkspaceID, error) {

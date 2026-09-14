@@ -15,6 +15,7 @@ import (
 )
 
 const DefaultConsecutiveErrorLimit = 3
+const DefaultTerminalQueueBytes = 1 << 20
 const sourcePrefix = "plugin:"
 
 var (
@@ -28,6 +29,7 @@ var (
 type Labels interface {
 	Set(context.Context, core.LabelTargetKind, uint64, string, string) error
 	Remove(context.Context, core.LabelTargetKind, uint64, string) error
+	RaiseAttention(context.Context, core.PaneID, string, core.AttentionClass, core.AttentionSeverity, string) error
 }
 
 type Plugin interface {
@@ -36,13 +38,34 @@ type Plugin interface {
 	HandleEvent(context.Context, core.Event, Labels) error
 }
 
+type TerminalEventKind string
+
+const (
+	TerminalOutput TerminalEventKind = "output"
+	TerminalExited TerminalEventKind = "exited"
+)
+
+type TerminalEvent struct {
+	Kind       TerminalEventKind
+	PaneID     core.PaneID
+	TerminalID core.TerminalID
+	Sequence   uint64
+	Data       []byte
+	Exit       *core.TerminalExit
+}
+
+type TerminalObserver interface {
+	HandleTerminalEvent(context.Context, TerminalEvent, Labels) error
+}
+
 type Config struct {
 	ConsecutiveErrorLimit int
 	CallbackTimeout       time.Duration
+	TerminalQueueBytes    int64
 }
 
 func DefaultConfig() Config {
-	return Config{ConsecutiveErrorLimit: DefaultConsecutiveErrorLimit, CallbackTimeout: 2 * time.Second}
+	return Config{ConsecutiveErrorLimit: DefaultConsecutiveErrorLimit, CallbackTimeout: 2 * time.Second, TerminalQueueBytes: DefaultTerminalQueueBytes}
 }
 
 type Status struct {
@@ -52,13 +75,16 @@ type Status struct {
 }
 
 type runtime struct {
-	plugin       Plugin
-	subscription *core.Subscription
-	labels       labelWriter
-	mu           sync.Mutex
-	status       Status
-	active       atomic.Bool
-	labelGate    sync.Mutex
+	plugin         Plugin
+	subscription   *core.Subscription
+	labels         labelWriter
+	mu             sync.Mutex
+	status         Status
+	active         atomic.Bool
+	labelGate      sync.Mutex
+	terminalEvents chan TerminalEvent
+	terminalBytes  atomic.Int64
+	stop           chan error
 }
 
 type Host struct {
@@ -82,7 +108,10 @@ func New(parent context.Context, engine *core.Core, plugins []Plugin, configurat
 	if configuration.CallbackTimeout == 0 {
 		configuration.CallbackTimeout = defaults.CallbackTimeout
 	}
-	if configuration.ConsecutiveErrorLimit < 1 || configuration.CallbackTimeout < 0 {
+	if configuration.TerminalQueueBytes == 0 {
+		configuration.TerminalQueueBytes = defaults.TerminalQueueBytes
+	}
+	if configuration.ConsecutiveErrorLimit < 1 || configuration.CallbackTimeout < 0 || configuration.TerminalQueueBytes < 1 {
 		return nil, fmt.Errorf("%w: error limit must be positive", ErrInvalidConfig)
 	}
 	ctx, cancel := context.WithCancel(parent)
@@ -109,7 +138,9 @@ func New(parent context.Context, engine *core.Core, plugins []Plugin, configurat
 		}
 		runtime := &runtime{
 			plugin: implementation, subscription: subscription,
-			status: Status{Name: name, Enabled: true},
+			status:         Status{Name: name, Enabled: true},
+			terminalEvents: make(chan TerminalEvent, 256),
+			stop:           make(chan error, 1),
 		}
 		runtime.active.Store(true)
 		runtime.labels = labelWriter{core: engine, source: LabelSource(name), active: &runtime.active, gate: &runtime.labelGate}
@@ -128,6 +159,36 @@ func (host *Host) Status() []Status {
 		runtime.mu.Unlock()
 	}
 	return result
+}
+
+// PublishTerminalEvent delivers immutable PTY observations without blocking
+// terminal draining. A slow observer is disabled independently.
+func (host *Host) PublishTerminalEvent(event TerminalEvent) {
+	for _, runtime := range host.runtime {
+		if _, ok := runtime.plugin.(TerminalObserver); !ok || !runtime.active.Load() {
+			continue
+		}
+		size := int64(len(event.Data) + 128)
+		if runtime.terminalBytes.Add(size) > host.config.TerminalQueueBytes {
+			runtime.terminalBytes.Add(-size)
+			runtime.disable(core.ErrEventQueueOverflow)
+			select {
+			case runtime.stop <- core.ErrEventQueueOverflow:
+			default:
+			}
+			continue
+		}
+		select {
+		case runtime.terminalEvents <- event:
+		default:
+			runtime.terminalBytes.Add(-size)
+			runtime.disable(core.ErrEventQueueOverflow)
+			select {
+			case runtime.stop <- core.ErrEventQueueOverflow:
+			default:
+			}
+		}
+	}
 }
 
 func (host *Host) Close(ctx context.Context) error {
@@ -159,8 +220,10 @@ func (host *Host) closeSubscriptions() {
 
 func (host *Host) run(runtime *runtime, snapshot core.Snapshot) {
 	defer host.wg.Done()
+	defer runtime.subscription.Close()
 	defer func() {
 		_, _ = host.core.Execute(context.Background(), core.RemoveLabelsBySourceCommand{Source: LabelSource(runtime.plugin.Name())})
+		_, _ = host.core.Execute(context.Background(), core.RemoveAttentionsBySourceCommand{Source: LabelSource(runtime.plugin.Name())})
 	}()
 	if err, _ := callInitialize(host.ctx, host.config.CallbackTimeout, runtime.plugin, snapshot, runtime.labels); err != nil {
 		runtime.disable(err)
@@ -192,8 +255,28 @@ func (host *Host) run(runtime *runtime, snapshot core.Snapshot) {
 				continue
 			}
 			consecutiveErrors = 0
+		case event := <-runtime.terminalEvents:
+			runtime.terminalBytes.Add(-int64(len(event.Data) + 128))
+			observer := runtime.plugin.(TerminalObserver)
+			err, panicked := callTerminalEvent(host.ctx, host.config.CallbackTimeout, observer, event, runtime.labels)
+			if panicked {
+				runtime.disable(err)
+				return
+			}
+			if err != nil {
+				consecutiveErrors++
+				if consecutiveErrors >= host.config.ConsecutiveErrorLimit {
+					runtime.disable(err)
+					return
+				}
+				continue
+			}
+			consecutiveErrors = 0
 		case <-host.ctx.Done():
 			runtime.disable(host.ctx.Err())
+			return
+		case err := <-runtime.stop:
+			runtime.disable(err)
 			return
 		}
 	}
@@ -202,9 +285,7 @@ func (host *Host) run(runtime *runtime, snapshot core.Snapshot) {
 func LabelSource(pluginName string) string { return sourcePrefix + pluginName }
 
 func (runtime *runtime) disable(err error) {
-	runtime.labelGate.Lock()
 	runtime.active.Store(false)
-	runtime.labelGate.Unlock()
 	runtime.mu.Lock()
 	runtime.status.Enabled = false
 	runtime.status.Error = err
@@ -242,6 +323,16 @@ func (writer labelWriter) Remove(ctx context.Context, kind core.LabelTargetKind,
 	return err
 }
 
+func (writer labelWriter) RaiseAttention(ctx context.Context, paneID core.PaneID, key string, class core.AttentionClass, severity core.AttentionSeverity, message string) error {
+	writer.gate.Lock()
+	defer writer.gate.Unlock()
+	if writer.active == nil || !writer.active.Load() {
+		return ErrDisabled
+	}
+	_, err := writer.core.Execute(ctx, core.RaiseAttentionCommand{PaneID: paneID, Source: writer.source, Key: key, Class: class, Severity: severity, Message: message, OccurredAt: time.Now()})
+	return err
+}
+
 type callbackResult struct {
 	err      error
 	panicked bool
@@ -257,6 +348,12 @@ func callEvent(ctx context.Context, timeout time.Duration, implementation Plugin
 	callbackCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return awaitCallback(callbackCtx, func() error { return implementation.HandleEvent(callbackCtx, event, labels) })
+}
+
+func callTerminalEvent(ctx context.Context, timeout time.Duration, implementation TerminalObserver, event TerminalEvent, labels Labels) (error, bool) {
+	callbackCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return awaitCallback(callbackCtx, func() error { return implementation.HandleTerminalEvent(callbackCtx, event, labels) })
 }
 
 func awaitCallback(ctx context.Context, callback func() error) (error, bool) {

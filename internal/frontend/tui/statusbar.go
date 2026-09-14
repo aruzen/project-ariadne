@@ -8,13 +8,15 @@ import (
 )
 
 type StatusContext struct {
-	Workspace string
-	Window    string
-	PaneID    core.PaneID
-	PaneTitle string
-	State     core.TerminalState
-	Message   string
-	Now       time.Time
+	Workspace         string
+	Window            string
+	PaneID            core.PaneID
+	PaneTitle         string
+	State             core.TerminalState
+	Message           string
+	Now               time.Time
+	UnreadAttention   int
+	AttentionSeverity core.AttentionSeverity
 }
 
 type Segment struct {
@@ -64,6 +66,19 @@ func DefaultStatusBar() StatusBar {
 			}),
 		},
 		Right: []StatusWidget{
+			StatusWidgetFunc(func(context StatusContext) []Segment {
+				if context.UnreadAttention == 0 {
+					return nil
+				}
+				style := muted
+				switch context.AttentionSeverity {
+				case core.SeverityCritical, core.SeverityError:
+					style.Foreground = Color{R: 255, G: 110, B: 110}
+				case core.SeverityWarning:
+					style.Foreground = Color{R: 255, G: 210, B: 120}
+				}
+				return []Segment{{Text: fmt.Sprintf(" !%d ", context.UnreadAttention), Style: style}}
+			}),
 			StatusWidgetFunc(func(context StatusContext) []Segment {
 				value := context.Message
 				if value == "" {

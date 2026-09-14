@@ -1,10 +1,13 @@
 package core
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aruzen/streammux"
 )
@@ -39,6 +42,27 @@ const (
 
 type PanePresentation struct {
 	Chrome PaneChrome `json:"chrome,omitempty"`
+}
+
+const (
+	MaxToolStateBytes        = 64 << 10
+	MaxAttentionMessageBytes = 4 << 10
+)
+
+// ToolDescriptor is a stable, frontend-neutral reference to one logical Tool.
+// Multiple Panes may reference the same descriptor and therefore share state.
+type ToolDescriptor struct {
+	Provider string `json:"provider"`
+	Type     string `json:"type"`
+	Instance string `json:"instance"`
+}
+
+// ToolInstance owns the opaque persistent state shared by all views of a Tool.
+type ToolInstance struct {
+	Descriptor   ToolDescriptor  `json:"descriptor"`
+	StateVersion uint32          `json:"state_version"`
+	Generation   uint64          `json:"generation"`
+	State        json.RawMessage `json:"state"`
 }
 
 type TerminalState string
@@ -129,6 +153,39 @@ type Pane struct {
 	Title        string            `json:"title,omitempty"`
 	Presentation PanePresentation  `json:"presentation,omitempty"`
 	Terminal     *TerminalInstance `json:"terminal,omitempty"`
+	Tool         *ToolDescriptor   `json:"tool,omitempty"`
+}
+
+type AttentionClass string
+
+const (
+	AttentionWaiting   AttentionClass = "waiting"
+	AttentionCompleted AttentionClass = "completed"
+	AttentionWarning   AttentionClass = "warning"
+	AttentionError     AttentionClass = "error"
+)
+
+type AttentionSeverity string
+
+const (
+	SeverityInfo     AttentionSeverity = "info"
+	SeverityWarning  AttentionSeverity = "warning"
+	SeverityError    AttentionSeverity = "error"
+	SeverityCritical AttentionSeverity = "critical"
+)
+
+// Attention is runtime-only state. State files intentionally omit it.
+type Attention struct {
+	ID             uint64            `json:"id"`
+	PaneID         PaneID            `json:"pane_id"`
+	Source         string            `json:"source"`
+	Key            string            `json:"key"`
+	Class          AttentionClass    `json:"class"`
+	Severity       AttentionSeverity `json:"severity"`
+	Message        string            `json:"message,omitempty"`
+	OccurredAt     time.Time         `json:"occurred_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
+	AcknowledgedAt *time.Time        `json:"acknowledged_at,omitempty"`
 }
 
 // StashedPane keeps a Pane alive while removing it from every Window layout.
@@ -178,8 +235,8 @@ type labelKey struct {
 	name       string
 }
 
-// Snapshot is an immutable point-in-time copy of persistent Core state.
-// Callers may mutate their copy without affecting Core.
+// Snapshot is an immutable point-in-time copy of Core state. Statefile decides
+// which fields are persistent; callers may mutate their copy without affecting Core.
 type Snapshot struct {
 	Revision        uint64          `json:"revision"`
 	NextWorkspaceID WorkspaceID     `json:"next_workspace_id"`
@@ -192,6 +249,8 @@ type Snapshot struct {
 	StashedPanes    []StashedPane   `json:"stashed_panes,omitempty"`
 	StashedWindows  []StashedWindow `json:"stashed_windows,omitempty"`
 	Labels          []Label         `json:"labels,omitempty"`
+	ToolInstances   []ToolInstance  `json:"tool_instances,omitempty"`
+	Attentions      []Attention     `json:"attentions,omitempty"`
 }
 
 // DefaultSnapshot returns the initial default/main hierarchy without starting
@@ -239,9 +298,20 @@ type state struct {
 	stashedPanes    map[PaneID]StashedPane
 	stashedWindows  map[WindowID]StashedWindow
 	labels          map[labelKey]Label
+	toolInstances   map[toolKey]ToolInstance
+	attentions      map[uint64]Attention
+	attentionKeys   map[attentionKey]uint64
+	nextAttentionID uint64
 	workspaceOrder  []WorkspaceID
 	windowOrder     []WindowID
 	paneOrder       []PaneID
+}
+
+type toolKey struct{ provider, kind, instance string }
+type attentionKey struct {
+	source string
+	paneID PaneID
+	key    string
 }
 
 func defaultState() *state {
@@ -258,6 +328,10 @@ func defaultState() *state {
 		stashedPanes:    make(map[PaneID]StashedPane),
 		stashedWindows:  make(map[WindowID]StashedWindow),
 		labels:          make(map[labelKey]Label),
+		toolInstances:   make(map[toolKey]ToolInstance),
+		attentions:      make(map[uint64]Attention),
+		attentionKeys:   make(map[attentionKey]uint64),
+		nextAttentionID: 1,
 		workspaceOrder:  []WorkspaceID{workspace.ID},
 		windowOrder:     []WindowID{window.ID},
 	}
@@ -276,6 +350,21 @@ func stateFromSnapshot(snapshot Snapshot) (*state, error) {
 		stashedPanes:    make(map[PaneID]StashedPane, len(snapshot.StashedPanes)),
 		stashedWindows:  make(map[WindowID]StashedWindow, len(snapshot.StashedWindows)),
 		labels:          make(map[labelKey]Label, len(snapshot.Labels)),
+		toolInstances:   make(map[toolKey]ToolInstance, len(snapshot.ToolInstances)),
+		attentions:      make(map[uint64]Attention, len(snapshot.Attentions)),
+		attentionKeys:   make(map[attentionKey]uint64, len(snapshot.Attentions)),
+		nextAttentionID: 1,
+	}
+	for _, tool := range snapshot.ToolInstances {
+		tool = cloneToolInstance(tool)
+		if !validToolInstance(tool) {
+			return nil, fmt.Errorf("%w: invalid tool instance", ErrInvalidState)
+		}
+		key := keyForTool(tool.Descriptor)
+		if _, exists := s.toolInstances[key]; exists {
+			return nil, fmt.Errorf("%w: duplicate tool instance", ErrInvalidState)
+		}
+		s.toolInstances[key] = tool
 	}
 	for _, workspace := range snapshot.Workspaces {
 		workspace = cloneWorkspace(workspace)
@@ -355,6 +444,13 @@ func stateFromSnapshot(snapshot Snapshot) (*state, error) {
 		s.panes[pane.ID] = pane
 		s.paneOrder = append(s.paneOrder, pane.ID)
 	}
+	for _, pane := range s.panes {
+		if pane.Tool != nil {
+			if _, exists := s.toolInstances[keyForTool(*pane.Tool)]; !exists {
+				return nil, fmt.Errorf("%w: pane %d references missing tool instance", ErrInvalidState, pane.ID)
+			}
+		}
+	}
 	for paneID := range s.stashedPanes {
 		if _, exists := s.panes[paneID]; !exists {
 			return nil, fmt.Errorf("%w: stashed pane %d does not exist", ErrInvalidState, paneID)
@@ -374,6 +470,27 @@ func stateFromSnapshot(snapshot Snapshot) (*state, error) {
 			return nil, fmt.Errorf("%w: duplicate label", ErrInvalidState)
 		}
 		s.labels[key] = label
+	}
+	for _, attention := range snapshot.Attentions {
+		attention = cloneAttention(attention)
+		if !validAttention(attention) {
+			return nil, fmt.Errorf("%w: invalid attention", ErrInvalidState)
+		}
+		if _, exists := s.panes[attention.PaneID]; !exists {
+			return nil, fmt.Errorf("%w: attention references missing pane", ErrInvalidState)
+		}
+		key := keyForAttention(attention)
+		if _, exists := s.attentionKeys[key]; exists {
+			return nil, fmt.Errorf("%w: duplicate attention key", ErrInvalidState)
+		}
+		if _, exists := s.attentions[attention.ID]; exists {
+			return nil, fmt.Errorf("%w: duplicate attention ID", ErrInvalidState)
+		}
+		s.attentions[attention.ID] = attention
+		s.attentionKeys[key] = attention.ID
+		if attention.ID >= s.nextAttentionID {
+			s.nextAttentionID = attention.ID + 1
+		}
 	}
 	if err := s.validateHierarchy(); err != nil {
 		return nil, err
@@ -499,6 +616,8 @@ func (s *state) snapshot() Snapshot {
 		StashedPanes:    make([]StashedPane, 0, len(s.stashedPanes)),
 		StashedWindows:  make([]StashedWindow, 0, len(s.stashedWindows)),
 		Labels:          make([]Label, 0, len(s.labels)),
+		ToolInstances:   make([]ToolInstance, 0, len(s.toolInstances)),
+		Attentions:      make([]Attention, 0, len(s.attentions)),
 	}
 	for _, id := range s.workspaceOrder {
 		snapshot.Workspaces = append(snapshot.Workspaces, cloneWorkspace(s.workspaces[id]))
@@ -522,6 +641,23 @@ func (s *state) snapshot() Snapshot {
 	for _, label := range s.labels {
 		snapshot.Labels = append(snapshot.Labels, label)
 	}
+	for _, tool := range s.toolInstances {
+		snapshot.ToolInstances = append(snapshot.ToolInstances, cloneToolInstance(tool))
+	}
+	for _, attention := range s.attentions {
+		snapshot.Attentions = append(snapshot.Attentions, cloneAttention(attention))
+	}
+	sort.Slice(snapshot.ToolInstances, func(i, j int) bool {
+		left, right := snapshot.ToolInstances[i].Descriptor, snapshot.ToolInstances[j].Descriptor
+		if left.Provider != right.Provider {
+			return left.Provider < right.Provider
+		}
+		if left.Type != right.Type {
+			return left.Type < right.Type
+		}
+		return left.Instance < right.Instance
+	})
+	sort.Slice(snapshot.Attentions, func(i, j int) bool { return snapshot.Attentions[i].ID < snapshot.Attentions[j].ID })
 	sort.Slice(snapshot.Labels, func(left, right int) bool {
 		first, second := snapshot.Labels[left], snapshot.Labels[right]
 		if first.TargetKind != second.TargetKind {
@@ -613,7 +749,24 @@ func clonePane(pane Pane) Pane {
 		terminal := cloneTerminal(*pane.Terminal)
 		pane.Terminal = &terminal
 	}
+	if pane.Tool != nil {
+		tool := *pane.Tool
+		pane.Tool = &tool
+	}
 	return pane
+}
+
+func cloneToolInstance(tool ToolInstance) ToolInstance {
+	tool.State = append(json.RawMessage(nil), tool.State...)
+	return tool
+}
+
+func cloneAttention(attention Attention) Attention {
+	if attention.AcknowledgedAt != nil {
+		value := *attention.AcknowledgedAt
+		attention.AcknowledgedAt = &value
+	}
+	return attention
 }
 
 func cloneTerminal(terminal TerminalInstance) TerminalInstance {
@@ -653,9 +806,59 @@ func validPane(pane Pane) bool {
 	}
 	switch pane.Kind {
 	case PaneTerminal:
-		return pane.Terminal == nil || validTerminal(*pane.Terminal)
+		return pane.Tool == nil && (pane.Terminal == nil || validTerminal(*pane.Terminal))
 	case PaneTool:
-		return pane.Terminal == nil
+		return pane.Terminal == nil && (pane.Tool == nil || validToolDescriptor(*pane.Tool))
+	default:
+		return false
+	}
+}
+
+func keyForTool(descriptor ToolDescriptor) toolKey {
+	return toolKey{provider: descriptor.Provider, kind: descriptor.Type, instance: descriptor.Instance}
+}
+
+func validToolDescriptor(descriptor ToolDescriptor) bool {
+	for _, value := range []string{descriptor.Provider, descriptor.Type, descriptor.Instance} {
+		if strings.TrimSpace(value) == "" || len(value) > 128 || strings.ContainsRune(value, 0) {
+			return false
+		}
+	}
+	return true
+}
+
+func validToolInstance(tool ToolInstance) bool {
+	if !validToolDescriptor(tool.Descriptor) || tool.StateVersion == 0 || tool.Generation == 0 ||
+		len(tool.State) > MaxToolStateBytes || !json.Valid(tool.State) {
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(tool.State))
+	decoder.UseNumber()
+	var value any
+	return decoder.Decode(&value) == nil
+}
+
+func keyForAttention(attention Attention) attentionKey {
+	return attentionKey{source: attention.Source, paneID: attention.PaneID, key: attention.Key}
+}
+
+func validAttention(attention Attention) bool {
+	if attention.ID == 0 || attention.PaneID == 0 || strings.TrimSpace(attention.Source) == "" ||
+		strings.TrimSpace(attention.Key) == "" || len(attention.Source) > 128 || len(attention.Key) > 128 ||
+		len(attention.Message) > MaxAttentionMessageBytes || strings.ContainsRune(attention.Source, 0) ||
+		strings.ContainsRune(attention.Key, 0) || strings.ContainsRune(attention.Message, 0) ||
+		attention.OccurredAt.IsZero() || attention.UpdatedAt.IsZero() || attention.UpdatedAt.Before(attention.OccurredAt) ||
+		(attention.AcknowledgedAt != nil && attention.AcknowledgedAt.Before(attention.UpdatedAt)) {
+		return false
+	}
+	switch attention.Class {
+	case AttentionWaiting, AttentionCompleted, AttentionWarning, AttentionError:
+	default:
+		return false
+	}
+	switch attention.Severity {
+	case SeverityInfo, SeverityWarning, SeverityError, SeverityCritical:
+		return true
 	default:
 		return false
 	}

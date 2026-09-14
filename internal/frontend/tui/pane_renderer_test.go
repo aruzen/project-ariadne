@@ -64,3 +64,26 @@ func TestSyncViewsCreatesBorderlessToolContentWithoutTerminal(t *testing.T) {
 	}
 	session.closeViews()
 }
+
+type panickingPaneContent struct{}
+
+func (panickingPaneContent) Resize(int, int) error { panic("resize") }
+func (panickingPaneContent) Draw(*Surface, Rect, core.Pane, bool, Style) (Cursor, error) {
+	panic("draw")
+}
+func (panickingPaneContent) HandleInput([]byte) (bool, error) { panic("input") }
+func (panickingPaneContent) Close()                           { panic("close") }
+
+func TestPaneContentPanicsAreContained(t *testing.T) {
+	content := panickingPaneContent{}
+	if err := safeResizePane(content, 10, 4); err == nil {
+		t.Fatal("resize panic was not converted to an error")
+	}
+	if _, err := safeDrawPane(content, NewSurface(10, 4, Style{}), Rect{W: 10, H: 4}, core.Pane{}, false, Style{}); err == nil {
+		t.Fatal("draw panic was not converted to an error")
+	}
+	if _, err := safeInputPane(content, []byte("x")); err == nil {
+		t.Fatal("input panic was not converted to an error")
+	}
+	safeClosePaneContent(content)
+}

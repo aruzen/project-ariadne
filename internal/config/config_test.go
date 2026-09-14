@@ -52,12 +52,25 @@ func TestParseIsStrict(t *testing.T) {
 		{name: "negative write queue", data: "[transport]\nwrite_queue_frames = -1\n"},
 		{name: "stream bytes exceed total", data: "[transport]\nper_stream_queue_bytes = 32\noutbound_queue_bytes = 16\n"},
 		{name: "stream frames exceed total", data: "[transport]\nper_stream_queue_frames = 32\noutbound_queue_frames = 16\n"},
+		{name: "zero attention entries", data: "[attention]\nmax_entries = 0\n"},
+		{name: "zero marker bytes", data: "[attention]\nmarker_bytes = 0\n"},
+		{name: "zero plugin queue", data: "[attention]\nplugin_queue_bytes = 0\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := Parse([]byte(test.data)); !errors.Is(err, ErrInvalid) {
 				t.Fatalf("Parse error = %v", err)
 			}
 		})
+	}
+}
+
+func TestParseAttentionLimits(t *testing.T) {
+	configuration, err := Parse([]byte("[attention]\nmax_entries = 32\nmarker_bytes = 4096\nplugin_queue_bytes = 65536\n"))
+	if err != nil {
+		t.Fatalf("Parse attention limits: %v", err)
+	}
+	if configuration.Attention.MaxEntries != 32 || configuration.Attention.MarkerBytes != 4096 || configuration.Attention.PluginQueueBytes != 65536 {
+		t.Fatalf("Attention = %+v", configuration.Attention)
 	}
 }
 

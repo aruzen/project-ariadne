@@ -36,6 +36,9 @@ func ApplyEvent(snapshot Snapshot, event Event) (Snapshot, error) {
 			removeSnapshotLabel(&next, label)
 		}
 	case PaneCreatedEvent:
+		if payload.Tool != nil {
+			upsertTool(&next, *payload.Tool)
+		}
 		next.Panes = append(next.Panes, clonePane(payload.Pane))
 		if payload.Pane.ID >= next.NextPaneID {
 			next.NextPaneID = payload.Pane.ID + 1
@@ -61,6 +64,12 @@ func ApplyEvent(snapshot Snapshot, event Event) (Snapshot, error) {
 		}
 		for _, label := range payload.RemovedLabels {
 			removeSnapshotLabel(&next, label)
+		}
+		if payload.RemovedTool != nil {
+			removeSnapshotTool(&next, payload.RemovedTool.Descriptor)
+		}
+		for _, attention := range payload.RemovedAttentions {
+			removeSnapshotAttention(&next, attention.ID)
 		}
 	case PaneStashEvent:
 		upsertPane(&next, payload.Pane)
@@ -101,6 +110,20 @@ func ApplyEvent(snapshot Snapshot, event Event) (Snapshot, error) {
 		for _, label := range payload.Labels {
 			removeSnapshotLabel(&next, label)
 		}
+	case ToolEvent:
+		upsertTool(&next, payload.Tool)
+	case AttentionEvent:
+		upsertAttention(&next, payload.Attention)
+		for _, attention := range payload.Removed {
+			removeSnapshotAttention(&next, attention.ID)
+		}
+	case AttentionsEvent:
+		if event.Kind != EventAttentionSourceCleared {
+			return Snapshot{}, fmt.Errorf("%w: event %q has attentions payload", ErrInvalidState, event.Kind)
+		}
+		for _, attention := range payload.Attentions {
+			removeSnapshotAttention(&next, attention.ID)
+		}
 	default:
 		return Snapshot{}, fmt.Errorf("%w: unsupported event payload %T", ErrInvalidState, event.Payload)
 	}
@@ -128,7 +151,55 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 	result.StashedPanes = append([]StashedPane(nil), snapshot.StashedPanes...)
 	result.StashedWindows = append([]StashedWindow(nil), snapshot.StashedWindows...)
 	result.Labels = append([]Label(nil), snapshot.Labels...)
+	result.ToolInstances = make([]ToolInstance, len(snapshot.ToolInstances))
+	for index, tool := range snapshot.ToolInstances {
+		result.ToolInstances[index] = cloneToolInstance(tool)
+	}
+	result.Attentions = make([]Attention, len(snapshot.Attentions))
+	for index, attention := range snapshot.Attentions {
+		result.Attentions[index] = cloneAttention(attention)
+	}
 	return result
+}
+
+func upsertTool(snapshot *Snapshot, tool ToolInstance) {
+	key := keyForTool(tool.Descriptor)
+	for index := range snapshot.ToolInstances {
+		if keyForTool(snapshot.ToolInstances[index].Descriptor) == key {
+			snapshot.ToolInstances[index] = cloneToolInstance(tool)
+			return
+		}
+	}
+	snapshot.ToolInstances = append(snapshot.ToolInstances, cloneToolInstance(tool))
+}
+
+func removeSnapshotTool(snapshot *Snapshot, descriptor ToolDescriptor) {
+	key := keyForTool(descriptor)
+	for index := range snapshot.ToolInstances {
+		if keyForTool(snapshot.ToolInstances[index].Descriptor) == key {
+			snapshot.ToolInstances = append(snapshot.ToolInstances[:index], snapshot.ToolInstances[index+1:]...)
+			return
+		}
+	}
+}
+
+func upsertAttention(snapshot *Snapshot, attention Attention) {
+	for index := range snapshot.Attentions {
+		if snapshot.Attentions[index].ID == attention.ID {
+			snapshot.Attentions[index] = cloneAttention(attention)
+			return
+		}
+	}
+	snapshot.Attentions = append(snapshot.Attentions, cloneAttention(attention))
+}
+
+func removeSnapshotAttention(snapshot *Snapshot, id uint64) {
+	for index := range snapshot.Attentions {
+		if snapshot.Attentions[index].ID == id {
+			snapshot.Attentions = append(snapshot.Attentions[:index], snapshot.Attentions[index+1:]...)
+			return
+		}
+	}
 }
 
 func upsertStashedPane(snapshot *Snapshot, stashed StashedPane) {

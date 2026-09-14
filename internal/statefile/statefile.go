@@ -18,8 +18,7 @@ import (
 )
 
 const (
-	CurrentVersion  = 2
-	previousVersion = 1
+	CurrentVersion  = 3
 	DefaultDebounce = 100 * time.Millisecond
 	DefaultMaxBytes = 16 << 20
 )
@@ -88,6 +87,7 @@ type persistentSnapshot struct {
 	Panes           []persistentPane      `json:"panes"`
 	StashedPanes    []core.StashedPane    `json:"stashed_panes,omitempty"`
 	StashedWindows  []core.StashedWindow  `json:"stashed_windows,omitempty"`
+	ToolInstances   []core.ToolInstance   `json:"tool_instances,omitempty"`
 }
 
 type persistentWorkspace struct {
@@ -119,6 +119,7 @@ type persistentPane struct {
 	Title        string                 `json:"title,omitempty"`
 	Presentation *core.PanePresentation `json:"presentation,omitempty"`
 	Terminal     *persistentTerminal    `json:"terminal,omitempty"`
+	Tool         *core.ToolDescriptor   `json:"tool,omitempty"`
 }
 
 type persistentTerminal struct {
@@ -140,7 +141,7 @@ func Encode(snapshot core.Snapshot) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// Decode accepts exactly one current-version JSON document.
+// Decode accepts exactly one supported-version JSON document.
 func Decode(data []byte, maxBytes int64) (core.Snapshot, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxBytes
@@ -157,11 +158,11 @@ func Decode(data []byte, maxBytes int64) (core.Snapshot, error) {
 	if err := ensureJSONEOF(decoder); err != nil {
 		return core.Snapshot{}, err
 	}
-	if document.Version != CurrentVersion && document.Version != previousVersion {
+	if document.Version < 1 || document.Version > CurrentVersion {
 		return core.Snapshot{}, fmt.Errorf("%w: got %d, want %d", ErrUnsupportedVersion, document.Version, CurrentVersion)
 	}
 	snapshot := snapshotFromPersistent(document.State)
-	if document.Version == previousVersion {
+	if document.Version == 1 {
 		assignSplitIDs(&snapshot)
 	}
 	if err := core.ValidateSnapshot(snapshot); err != nil {
@@ -250,6 +251,11 @@ func persistentFromSnapshot(snapshot core.Snapshot) persistentSnapshot {
 		Panes:           make([]persistentPane, len(snapshot.Panes)),
 		StashedPanes:    append([]core.StashedPane(nil), snapshot.StashedPanes...),
 		StashedWindows:  append([]core.StashedWindow(nil), snapshot.StashedWindows...),
+		ToolInstances:   make([]core.ToolInstance, len(snapshot.ToolInstances)),
+	}
+	for index, tool := range snapshot.ToolInstances {
+		persistent.ToolInstances[index] = tool
+		persistent.ToolInstances[index].State = append([]byte(nil), tool.State...)
 	}
 	for index, workspace := range snapshot.Workspaces {
 		persistent.Workspaces[index] = persistentWorkspace{
@@ -282,6 +288,10 @@ func persistentFromSnapshot(snapshot core.Snapshot) persistentSnapshot {
 			}
 			persistentPane.Terminal = &terminal
 		}
+		if pane.Tool != nil {
+			tool := *pane.Tool
+			persistentPane.Tool = &tool
+		}
 		persistent.Panes[index] = persistentPane
 	}
 	return persistent
@@ -298,6 +308,11 @@ func snapshotFromPersistent(persistent persistentSnapshot) core.Snapshot {
 		Panes:           make([]core.Pane, len(persistent.Panes)),
 		StashedPanes:    append([]core.StashedPane(nil), persistent.StashedPanes...),
 		StashedWindows:  append([]core.StashedWindow(nil), persistent.StashedWindows...),
+		ToolInstances:   make([]core.ToolInstance, len(persistent.ToolInstances)),
+	}
+	for index, tool := range persistent.ToolInstances {
+		snapshot.ToolInstances[index] = tool
+		snapshot.ToolInstances[index].State = append([]byte(nil), tool.State...)
 	}
 	for index, workspace := range persistent.Workspaces {
 		snapshot.Workspaces[index] = core.Workspace{
@@ -323,6 +338,10 @@ func snapshotFromPersistent(persistent persistentSnapshot) core.Snapshot {
 				terminal.Exit = &exit
 			}
 			corePane.Terminal = &terminal
+		}
+		if pane.Tool != nil {
+			tool := *pane.Tool
+			corePane.Tool = &tool
 		}
 		snapshot.Panes[index] = corePane
 	}

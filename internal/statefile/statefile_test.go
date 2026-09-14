@@ -205,7 +205,7 @@ func TestDecodeRejectsUnknownFieldsTrailingDataAndOversize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	unknown := strings.Replace(string(valid), "\"version\": 2", "\"version\": 2, \"unknown\": true", 1)
+	unknown := strings.Replace(string(valid), "\"version\": 3", "\"version\": 3, \"unknown\": true", 1)
 	if _, err := Decode([]byte(unknown), DefaultMaxBytes); !errors.Is(err, ErrInvalidData) {
 		t.Fatalf("unknown field error = %v", err)
 	}

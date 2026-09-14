@@ -53,11 +53,19 @@ func waitUntil(t *testing.T, condition func() bool) {
 
 func TestPluginPanicDisablesOnlyPluginAndClearsLabels(t *testing.T) {
 	engine := testCore(t, 16)
+	created, err := engine.Execute(context.Background(), core.CreatePaneCommand{WindowID: 1, Pane: core.PaneSpec{Kind: core.PaneTool}})
+	if err != nil {
+		t.Fatalf("create Pane: %v", err)
+	}
+	pane := created.(core.CreatePaneResult).Pane
 	var healthyEvents atomic.Int64
 	panicking := testPlugin{
 		name: "panicking",
 		initialize: func(ctx context.Context, _ core.Snapshot, labels Labels) error {
 			if err := labels.Set(ctx, core.LabelWorkspace, 1, "temporary", "value"); err != nil {
+				return err
+			}
+			if err := labels.RaiseAttention(ctx, pane.ID, "temporary", core.AttentionWaiting, core.SeverityInfo, "value"); err != nil {
 				return err
 			}
 			panic("boom")
@@ -78,7 +86,7 @@ func TestPluginPanicDisablesOnlyPluginAndClearsLabels(t *testing.T) {
 	})
 	waitUntil(t, func() bool {
 		snapshot, _ := engine.Snapshot(context.Background())
-		return len(snapshot.Labels) == 0
+		return len(snapshot.Labels) == 0 && len(snapshot.Attentions) == 0
 	})
 	_, err = engine.Execute(context.Background(), core.CreateWorkspaceCommand{Name: "still-running"})
 	if err != nil {
@@ -88,6 +96,70 @@ func TestPluginPanicDisablesOnlyPluginAndClearsLabels(t *testing.T) {
 	if !host.Status()[1].Enabled {
 		t.Fatal("healthy Plugin was disabled")
 	}
+}
+
+type terminalTestPlugin struct {
+	testPlugin
+	handleTerminal func(context.Context, TerminalEvent, Labels) error
+}
+
+func (plugin terminalTestPlugin) HandleTerminalEvent(ctx context.Context, event TerminalEvent, labels Labels) error {
+	if plugin.handleTerminal != nil {
+		return plugin.handleTerminal(ctx, event, labels)
+	}
+	return nil
+}
+
+func TestTerminalQueueOverflowDisablesOnlySlowObserver(t *testing.T) {
+	engine := testCore(t, 16)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	slow := terminalTestPlugin{testPlugin: testPlugin{name: "slow-terminal"}, handleTerminal: func(context.Context, TerminalEvent, Labels) error {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+		return nil
+	}}
+	var healthyEvents atomic.Int64
+	healthy := terminalTestPlugin{testPlugin: testPlugin{name: "healthy-terminal"}, handleTerminal: func(context.Context, TerminalEvent, Labels) error {
+		healthyEvents.Add(1)
+		return nil
+	}}
+	configuration := DefaultConfig()
+	configuration.TerminalQueueBytes = 512
+	host, err := New(context.Background(), engine, []Plugin{slow, healthy}, configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = host.Close(context.Background()) })
+	host.PublishTerminalEvent(TerminalEvent{Kind: TerminalOutput, PaneID: 1, Data: []byte("first")})
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("slow terminal observer did not enter handler")
+	}
+	for index := int64(1); index < 6; index++ {
+		host.PublishTerminalEvent(TerminalEvent{Kind: TerminalOutput, PaneID: 1, Data: []byte("next")})
+		waitUntil(t, func() bool { return healthyEvents.Load() >= index+1 })
+	}
+	waitUntil(t, func() bool {
+		status := host.Status()[0]
+		return !status.Enabled && errors.Is(status.Error, core.ErrEventQueueOverflow)
+	})
+	if !host.Status()[1].Enabled {
+		t.Fatal("healthy terminal observer was disabled")
+	}
+	close(release)
+	released = true
 }
 
 func TestConsecutiveErrorsDisableAndClearSourceLabels(t *testing.T) {

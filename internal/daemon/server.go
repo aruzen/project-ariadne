@@ -11,6 +11,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/aruzen/ariadne/internal/core"
 	"github.com/aruzen/ariadne/internal/plugin"
@@ -49,6 +50,7 @@ type Server struct {
 	terminalMu        sync.Mutex
 	clipboardMu       sync.Mutex
 	clipboardText     []byte
+	terminalPanes     map[core.TerminalID]core.PaneID
 	stopAfterResponse atomic.Bool
 	connectionsWG     sync.WaitGroup
 	workersWG         sync.WaitGroup
@@ -66,6 +68,18 @@ func Open(parent context.Context, factory pty.ManagedFactory, configuration Conf
 	configuration, err := configuration.withDefaults()
 	if err != nil {
 		return nil, statefile.LoadResult{}, err
+	}
+	hasAgentDetector := false
+	for _, implementation := range configuration.Plugins {
+		if implementation != nil && implementation.Name() == "agent-marker" {
+			hasAgentDetector = true
+			break
+		}
+	}
+	if !hasAgentDetector {
+		detector := plugin.NewAgentDetector()
+		detector.MaxMarkerBytes = configuration.AgentMarkerBytes
+		configuration.Plugins = append([]plugin.Plugin{detector}, configuration.Plugins...)
 	}
 	loaded, err := statefile.Load(configuration.StatePath, configuration.State)
 	if err != nil {
@@ -89,7 +103,7 @@ func Open(parent context.Context, factory pty.ManagedFactory, configuration Conf
 	ctx, cancel := context.WithCancel(context.Background())
 	server := &Server{
 		config: configuration, core: engine, manager: manager, store: store, load: loaded,
-		ctx: ctx, cancel: cancel, connections: make(map[*streammux.Peer]struct{}), fatal: make(chan error, 1),
+		ctx: ctx, cancel: cancel, connections: make(map[*streammux.Peer]struct{}), terminalPanes: make(map[core.TerminalID]core.PaneID), fatal: make(chan error, 1),
 		stateLoopDone: make(chan struct{}), managerLoopDone: make(chan struct{}),
 	}
 	if err := server.restoreSystemLabels(context.Background()); err != nil {
@@ -99,27 +113,21 @@ func Open(parent context.Context, factory pty.ManagedFactory, configuration Conf
 		_ = engine.Close()
 		return nil, loaded, err
 	}
-	if err := server.startObservers(); err != nil {
+	server.plugins, err = plugin.New(server.ctx, engine, configuration.Plugins, configuration.Plugin)
+	if err != nil {
 		cancel()
 		_ = store.Close(context.Background())
 		_ = manager.Close()
 		_ = engine.Close()
 		return nil, loaded, err
 	}
-	if len(configuration.Plugins) != 0 {
-		server.plugins, err = plugin.New(server.ctx, engine, configuration.Plugins, configuration.Plugin)
-		if err != nil {
-			cancel()
-			_ = server.managerSubscription.Close()
-			_ = server.stateSubscription.Close()
-			<-server.managerLoopDone
-			<-server.stateLoopDone
-			_ = store.Close(context.Background())
-			_ = manager.Close()
-			server.workersWG.Wait()
-			_ = engine.Close()
-			return nil, loaded, err
-		}
+	if err := server.startObservers(); err != nil {
+		cancel()
+		_ = server.plugins.Close(context.Background())
+		_ = store.Close(context.Background())
+		_ = manager.Close()
+		_ = engine.Close()
+		return nil, loaded, err
 	}
 	server.workersWG.Add(1)
 	go func() {
@@ -326,6 +334,11 @@ func (server *Server) managerLoop(subscription *pty.Subscription) {
 }
 
 func (server *Server) handleManagerEvent(event pty.Event, pendingRemoval map[streammux.StreamID]struct{}) error {
+	if event.Kind == pty.EventOutput && event.Output != nil && server.plugins != nil {
+		if paneID, exists := server.terminalPanes[event.Session.ID]; exists {
+			server.plugins.PublishTerminalEvent(plugin.TerminalEvent{Kind: plugin.TerminalOutput, PaneID: paneID, TerminalID: event.Session.ID, Sequence: event.Output.Sequence, Data: event.Output.Data})
+		}
+	}
 	switch event.Kind {
 	case pty.EventExited:
 		if event.Session.Exit == nil {
@@ -348,6 +361,11 @@ func (server *Server) handleManagerEvent(event pty.Event, pendingRemoval map[str
 			return nil
 		}
 		state, exit := terminalExit(*event.Session.Exit)
+		if server.plugins != nil {
+			if paneID, exists := server.terminalPanes[event.Session.ID]; exists {
+				server.plugins.PublishTerminalEvent(plugin.TerminalEvent{Kind: plugin.TerminalExited, PaneID: paneID, TerminalID: event.Session.ID, Exit: &exit})
+			}
+		}
 		result, err := server.core.Execute(server.ctx, core.RecordTerminalExitCommand{
 			TerminalID: event.Session.ID, State: state, Exit: exit,
 			HistoryAvailable: event.Session.HistoryAvailable,
@@ -357,6 +375,10 @@ func (server *Server) handleManagerEvent(event pty.Event, pendingRemoval map[str
 		}
 		if err == nil && terminalExitNeedsErrorLabel(exit) {
 			if err := server.setTerminalErrorLabel(server.ctx, result.(core.TerminalResult).Pane); err != nil {
+				return err
+			}
+			_, err = server.core.Execute(server.ctx, core.RaiseAttentionCommand{PaneID: result.(core.TerminalResult).Pane.ID, Source: systemLabelSource, Key: "terminal-exit", Class: core.AttentionError, Severity: core.SeverityError, Message: terminalExitMessage(exit), OccurredAt: time.Now()})
+			if err != nil {
 				return err
 			}
 		}
@@ -369,12 +391,23 @@ func (server *Server) handleManagerEvent(event pty.Event, pendingRemoval map[str
 		}
 	case pty.EventEvicted, pty.EventRemoved:
 		delete(pendingRemoval, event.Session.ID)
+		delete(server.terminalPanes, event.Session.ID)
 		_, err := server.core.Execute(server.ctx, core.ForgetTerminalSessionCommand{TerminalID: event.Session.ID})
 		if err != nil && !errors.Is(err, core.ErrNotFound) && !errors.Is(err, context.Canceled) {
 			return err
 		}
 	}
 	return nil
+}
+
+func terminalExitMessage(exit core.TerminalExit) string {
+	if exit.Message != "" {
+		return exit.Message
+	}
+	if exit.Kind == core.TerminalExitSignal {
+		return "process exited by signal " + exit.Signal
+	}
+	return fmt.Sprintf("process exited with code %d", exit.Code)
 }
 
 func (server *Server) guardCommand() (func(), error) {

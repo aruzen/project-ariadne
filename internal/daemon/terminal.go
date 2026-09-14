@@ -71,6 +71,7 @@ func (server *Server) RestartTerminal(ctx context.Context, params ariadneprotoco
 		if err := server.manager.Remove(*pane.Terminal.ID); err != nil && !errors.Is(err, pty.ErrSessionNotFound) {
 			return ariadneprotocol.TerminalOperationResult{}, err
 		}
+		delete(server.terminalPanes, *pane.Terminal.ID)
 	}
 	if _, err := server.core.Execute(ctx, core.RemoveLabelCommand{
 		TargetKind: core.LabelPane, TargetID: uint64(pane.ID), Source: systemLabelSource, Name: terminalErrorLabel,
@@ -123,6 +124,7 @@ func (server *Server) RunTerminal(ctx context.Context, params ariadneprotocol.Ru
 		if err := server.manager.Remove(*pane.Terminal.ID); err != nil && !errors.Is(err, pty.ErrSessionNotFound) {
 			return ariadneprotocol.TerminalOperationResult{}, err
 		}
+		delete(server.terminalPanes, *pane.Terminal.ID)
 	}
 	if _, err := server.core.Execute(ctx, core.RemoveLabelCommand{
 		TargetKind: core.LabelPane, TargetID: uint64(pane.ID), Source: systemLabelSource, Name: terminalErrorLabel,
@@ -166,6 +168,7 @@ func (server *Server) startReservedTerminal(ctx context.Context, pane core.Pane,
 		}
 		return ariadneprotocol.TerminalOperationResult{}, errors.Join(err, recordErr)
 	}
+	server.terminalPanes[session.ID()] = pane.ID
 	return ariadneprotocol.TerminalOperationResult{Pane: result.(core.TerminalResult).Pane}, nil
 }
 
@@ -255,6 +258,7 @@ func (server *Server) KillTerminal(ctx context.Context, params ariadneprotocol.P
 	if removeErr := server.manager.Remove(terminalID); removeErr != nil && !errors.Is(removeErr, pty.ErrSessionNotFound) {
 		return ariadneprotocol.TerminalOperationResult{}, removeErr
 	}
+	delete(server.terminalPanes, terminalID)
 	if result != nil {
 		pane = result.(core.ClosePaneResult).Pane
 	}
@@ -284,6 +288,7 @@ func (server *Server) DismissTerminal(ctx context.Context, params ariadneprotoco
 		if err := server.manager.Remove(*pane.Terminal.ID); err != nil && !errors.Is(err, pty.ErrSessionNotFound) {
 			return ariadneprotocol.TerminalOperationResult{}, err
 		}
+		delete(server.terminalPanes, *pane.Terminal.ID)
 	}
 	if _, err := server.core.Execute(ctx, core.ClosePaneCommand{PaneID: pane.ID}); err != nil {
 		return ariadneprotocol.TerminalOperationResult{}, err
@@ -297,10 +302,20 @@ func (server *Server) DaemonStatus(context.Context) (ariadneprotocol.DaemonStatu
 	connections := server.activeConnections
 	server.mu.Unlock()
 	stats := server.manager.Stats()
-	return ariadneprotocol.DaemonStatusResult{
+	result := ariadneprotocol.DaemonStatusResult{
 		Stopping: stopping, Connections: connections, Sessions: stats.Sessions,
 		ActiveTerminals: stats.ActiveSessions + stats.StartingSessions, RetainedTerminals: stats.RetainedExitedSessions,
-	}, nil
+	}
+	if server.plugins != nil {
+		for _, status := range server.plugins.Status() {
+			value := ariadneprotocol.PluginStatus{Name: status.Name, Enabled: status.Enabled}
+			if status.Error != nil {
+				value.Error = status.Error.Error()
+			}
+			result.Plugins = append(result.Plugins, value)
+		}
+	}
+	return result, nil
 }
 
 func (server *Server) DaemonStop(ctx context.Context, params ariadneprotocol.DaemonStopParams) (ariadneprotocol.DaemonStatusResult, error) {

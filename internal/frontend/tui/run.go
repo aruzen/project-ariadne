@@ -54,54 +54,58 @@ type inputMessage struct {
 }
 
 type session struct {
-	ctx               context.Context
-	cancel            context.CancelFunc
-	client            *client.Client
-	pty               *client.PTYClient
-	output            *latestFrameWriter
-	snapshot          core.Snapshot
-	workspace         core.WorkspaceID
-	window            core.WindowID
-	focus             core.PaneID
-	pendingFocus      core.PaneID
-	pendingWindow     core.WindowID
-	width             int
-	height            int
-	placements        []Placement
-	allPlacements     []Placement
-	separators        []Separator
-	paneFrame         PaneFrameMode
-	views             map[core.PaneID]*paneView
-	renderers         paneRendererRegistry
-	ptyEvents         chan paneEvent
-	statusBar         StatusBar
-	message           string
-	messageTime       time.Time
-	zoom              bool
-	inputMode         tuiInputMode
-	prompt            string
-	promptLead        string
-	confirm           string
-	confirmCallback   func(bool)
-	promptCallback    func(string)
-	shell             string
-	cwd               string
-	env               []string
-	clipboardRead     ariadneconfig.ClipboardPolicy
-	clipboardWrite    ariadneconfig.ClipboardPolicy
-	clipboardMax      int
-	clipboardRequests chan clipboardRequest
-	copyMode          bool
-	copySelecting     bool
-	copyX             int
-	copyY             int
-	copyStartX        int
-	copyStartY        int
-	searchQuery       string
-	copyNewOutput     bool
-	pendingClipboard  []clipboardRequest
-	outerClipboard    []byte
-	dirty             bool
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	client               *client.Client
+	pty                  *client.PTYClient
+	output               *latestFrameWriter
+	snapshot             core.Snapshot
+	workspace            core.WorkspaceID
+	window               core.WindowID
+	focus                core.PaneID
+	pendingFocus         core.PaneID
+	pendingWindow        core.WindowID
+	width                int
+	height               int
+	placements           []Placement
+	allPlacements        []Placement
+	separators           []Separator
+	paneFrame            PaneFrameMode
+	views                map[core.PaneID]*paneView
+	renderers            paneRendererRegistry
+	ptyEvents            chan paneEvent
+	statusBar            StatusBar
+	message              string
+	messageTime          time.Time
+	zoom                 bool
+	previewPane          core.PaneID
+	previewPreviousFocus core.PaneID
+	attentionCursor      uint64
+	inputMode            tuiInputMode
+	prompt               string
+	promptLead           string
+	confirm              string
+	confirmCallback      func(bool)
+	promptCallback       func(string)
+	shell                string
+	cwd                  string
+	env                  []string
+	clipboardRead        ariadneconfig.ClipboardPolicy
+	clipboardWrite       ariadneconfig.ClipboardPolicy
+	clipboardMax         int
+	clipboardRequests    chan clipboardRequest
+	copyMode             bool
+	copySelecting        bool
+	copyX                int
+	copyY                int
+	copyStartX           int
+	copyStartY           int
+	searchQuery          string
+	copyNewOutput        bool
+	pendingClipboard     []clipboardRequest
+	outerClipboard       []byte
+	dirty                bool
+	daemonStatus         protocol.DaemonStatusResult
 }
 
 // Run enters the full-screen frontend using an already synchronized client.
@@ -225,6 +229,11 @@ func (session *session) loop(output *os.File) error {
 				return err
 			}
 			session.snapshot = next
+			if session.previewPane != 0 {
+				if _, exists := session.pane(session.previewPane); !exists {
+					session.exitPreview()
+				}
+			}
 			if _, exists := session.currentWindow(); !exists {
 				session.selectInitialWindow()
 				session.zoom = false
@@ -262,6 +271,7 @@ func (session *session) loop(output *os.File) error {
 			session.syncViews()
 			session.dirty = true
 		case <-clock.C:
+			session.refreshDiagnostics()
 			session.dirty = true
 		case <-frames.C:
 			if session.dirty {
@@ -328,6 +338,11 @@ func (session *session) relayout() {
 		session.allPlacements = CalculateLayout(window.Layout, available)
 		session.separators = nil
 	}
+	if session.previewPane != 0 {
+		session.placements = []Placement{{PaneID: session.previewPane, Rect: available}}
+		session.separators = nil
+		return
+	}
 	if _, exists := placementFor(session.allPlacements, session.focus); !exists {
 		session.focus = session.preferredFocus()
 		session.zoom = false
@@ -383,6 +398,11 @@ func (session *session) syncViews() {
 			wanted[session.focus] = placement
 		}
 	}
+	if session.previewPane != 0 {
+		if placement, exists := placementFor(session.placements, session.previewPane); exists {
+			wanted[session.previewPane] = placement
+		}
+	}
 	for paneID, view := range session.views {
 		if _, exists := wanted[paneID]; !exists {
 			session.closeView(view)
@@ -408,7 +428,7 @@ func (session *session) syncViews() {
 				session.closeView(view)
 			}
 			view = &paneView{
-				paneID: paneID, kind: pane.Kind, terminalID: terminalID, content: renderer.NewContent(pane),
+				paneID: paneID, kind: pane.Kind, terminalID: terminalID, content: safeNewPaneContent(renderer, session, pane),
 			}
 			session.views[paneID] = view
 		}
@@ -422,7 +442,7 @@ func (session *session) syncViews() {
 			continue
 		}
 		if view.cols != cols || view.rows != rows {
-			if err := view.content.Resize(cols, rows); err != nil {
+			if err := safeResizePane(view.content, cols, rows); err != nil {
 				view.errorMessage = err.Error()
 				continue
 			}
@@ -477,7 +497,7 @@ func (session *session) forwardPTY(ctx context.Context, paneID core.PaneID, atta
 				if !ok {
 					message.err = errors.New("TUI terminal view is unavailable")
 				} else {
-					message.response, message.err = terminal.WritePTY(event.Data)
+					message.response, message.err = safeWritePTY(terminal, event.Data)
 				}
 			}
 			select {
@@ -524,7 +544,7 @@ func (session *session) sendInput(data []byte) {
 		session.setMessage("focused pane does not accept input")
 		return
 	}
-	handled, err := view.content.HandleInput(data)
+	handled, err := safeInputPane(view.content, data)
 	if err != nil {
 		session.setMessage(err.Error())
 		return
@@ -623,7 +643,11 @@ func (session *session) render() ([]byte, error) {
 			continue
 		}
 		chrome := chromeForMode(pane, renderer, session.paneFrame)
-		chrome.Draw(surface, placement.Rect, paneTitle(pane), focused)
+		title := paneTitle(pane)
+		if count, _ := session.paneAttention(pane.ID); count != 0 {
+			title = fmt.Sprintf("!%d %s", count, title)
+		}
+		chrome.Draw(surface, placement.Rect, title, focused)
 		content := chrome.ContentRect(placement.Rect)
 		view := session.views[pane.ID]
 		if content.W <= 0 || content.H <= 0 {
@@ -632,7 +656,7 @@ func (session *session) render() ([]byte, error) {
 		if view == nil || view.content == nil {
 			continue
 		}
-		paneCursor, err := view.content.Draw(surface, content, pane, focused, base)
+		paneCursor, err := safeDrawPane(view.content, surface, content, pane, focused, base)
 		if err != nil {
 			if view != nil {
 				view.errorMessage = err.Error()
@@ -680,7 +704,7 @@ func (session *session) render() ([]byte, error) {
 	}
 	session.statusBar.Draw(surface, session.height-1, StatusContext{
 		Workspace: workspaceName, Window: windowName, PaneID: pane.ID, PaneTitle: pane.Title,
-		State: state, Message: message, Now: time.Now(),
+		State: state, Message: message, Now: time.Now(), UnreadAttention: unreadAttentionCount(session.snapshot.Attentions), AttentionSeverity: highestAttentionSeverity(session.snapshot.Attentions),
 	})
 	frame := EncodeFrame(surface, cursor)
 	if len(session.outerClipboard) != 0 {
@@ -688,6 +712,39 @@ func (session *session) render() ([]byte, error) {
 		session.outerClipboard = nil
 	}
 	return frame, nil
+}
+
+func (session *session) paneAttention(id core.PaneID) (int, core.AttentionSeverity) {
+	count := 0
+	highest := core.AttentionSeverity("")
+	for _, attention := range session.snapshot.Attentions {
+		if attention.PaneID == id && attention.AcknowledgedAt == nil {
+			count++
+			if severityRank(attention.Severity) > severityRank(highest) {
+				highest = attention.Severity
+			}
+		}
+	}
+	return count, highest
+}
+
+func unreadAttentionCount(values []core.Attention) int {
+	count := 0
+	for _, value := range values {
+		if value.AcknowledgedAt == nil {
+			count++
+		}
+	}
+	return count
+}
+func highestAttentionSeverity(values []core.Attention) core.AttentionSeverity {
+	highest := core.AttentionSeverity("")
+	for _, value := range values {
+		if value.AcknowledgedAt == nil && severityRank(value.Severity) > severityRank(highest) {
+			highest = value.Severity
+		}
+	}
+	return highest
 }
 
 func drawCopySelection(surface *Surface, content Rect, startX, startY, endX, endY int) {
@@ -926,7 +983,7 @@ func (session *session) detachView(view *paneView) {
 func (session *session) closeView(view *paneView) {
 	session.detachView(view)
 	if view.content != nil {
-		view.content.Close()
+		safeClosePaneContent(view.content)
 		view.content = nil
 	}
 }

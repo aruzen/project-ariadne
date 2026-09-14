@@ -264,6 +264,70 @@ func TestDecodeStashEventsKeepsConcretePayload(t *testing.T) {
 	}
 }
 
+func TestToolAndAttentionProtocolPayloads(t *testing.T) {
+	descriptor := core.ToolDescriptor{Provider: "ariadne", Type: "help", Instance: "default"}
+	tool := core.ToolInstance{Descriptor: descriptor, StateVersion: 1, Generation: 1, State: json.RawMessage(`{}`)}
+	params, err := json.Marshal(CreatePaneParams{WindowID: 1, Kind: core.PaneTool, Tool: &tool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, err := commandFromRequest(Request{Version: Version, Operation: OperationCreatePane, Params: params}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, ok := command.(core.CreatePaneCommand)
+	if !ok || created.Pane.Tool == nil || created.Pane.Tool.Descriptor != descriptor {
+		t.Fatalf("command = %#v", command)
+	}
+
+	state := json.RawMessage(`{"page":2}`)
+	params, err = json.Marshal(UpdateToolStateParams{
+		Descriptor: descriptor, ExpectedGeneration: 1, StateVersion: 2, State: state,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, err = commandFromRequest(Request{Version: Version, Operation: OperationUpdateToolState, Params: params}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, ok := command.(core.UpdateToolStateCommand)
+	if !ok || updated.StateVersion != 2 || string(updated.State) != string(state) {
+		t.Fatalf("command = %#v", command)
+	}
+
+	now := time.Unix(400, 0).UTC()
+	attention := core.Attention{ID: 9, PaneID: 2, Source: "plugin:test", Key: "job", Class: core.AttentionWaiting, Severity: core.SeverityInfo, OccurredAt: now, UpdatedAt: now}
+	for _, event := range []core.Event{
+		{Revision: 1, Kind: core.EventToolStateUpdated, Payload: core.ToolEvent{Tool: tool}},
+		{Revision: 2, Kind: core.EventAttentionRaised, Payload: core.AttentionEvent{Attention: attention}},
+		{Revision: 3, Kind: core.EventAttentionSourceCleared, Payload: core.AttentionsEvent{Attentions: []core.Attention{attention}}},
+	} {
+		data, err := json.Marshal(EventEnvelope{Version: Version, Event: event})
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := DecodeEvent(data)
+		if err != nil {
+			t.Fatalf("DecodeEvent(%s): %v", event.Kind, err)
+		}
+		switch event.Kind {
+		case core.EventToolStateUpdated:
+			if _, ok := decoded.Payload.(core.ToolEvent); !ok {
+				t.Fatalf("tool payload = %T", decoded.Payload)
+			}
+		case core.EventAttentionRaised:
+			if _, ok := decoded.Payload.(core.AttentionEvent); !ok {
+				t.Fatalf("attention payload = %T", decoded.Payload)
+			}
+		case core.EventAttentionSourceCleared:
+			if _, ok := decoded.Payload.(core.AttentionsEvent); !ok {
+				t.Fatalf("attentions payload = %T", decoded.Payload)
+			}
+		}
+	}
+}
+
 func TestMalformedCommandDoesNotClosePeer(t *testing.T) {
 	pair := newPeerPair(t, newProtocolCore(t))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
