@@ -14,19 +14,19 @@ func DefaultConfigPath() (string, error) {
 		if !filepath.IsAbs(directory) {
 			return "", ErrHomeUnavailable
 		}
-		return filepath.Join(directory, "config"), nil
+		return filepath.Join(directory, "config.toml"), nil
 	}
 	if directory := os.Getenv("XDG_CONFIG_HOME"); directory != "" {
 		if !filepath.IsAbs(directory) {
 			return "", ErrHomeUnavailable
 		}
-		return filepath.Join(directory, "ariadne", "config"), nil
+		return filepath.Join(directory, "ariadne", "config.toml"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return "", ErrHomeUnavailable
 	}
-	return filepath.Join(home, ".config", "ariadne", "config"), nil
+	return filepath.Join(home, ".config", "ariadne", "config.toml"), nil
 }
 
 func DefaultStatePath() (string, error) {

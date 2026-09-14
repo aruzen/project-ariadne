@@ -13,7 +13,7 @@ func TestXDGPaths(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", configurationDirectory)
 	t.Setenv("XDG_STATE_HOME", stateDirectory)
 	configuration, err := DefaultConfigPath()
-	if err != nil || configuration != filepath.Join(configurationDirectory, "ariadne", "config") {
+	if err != nil || configuration != filepath.Join(configurationDirectory, "ariadne", "config.toml") {
 		t.Fatalf("DefaultConfigPath = %q, %v", configuration, err)
 	}
 	state, err := DefaultStatePath()
@@ -32,7 +32,7 @@ func TestDefaultConfigLivesUnderDotConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultConfigPath: %v", err)
 	}
-	if want := filepath.Join(home, ".config", "ariadne", "config"); configuration != want {
+	if want := filepath.Join(home, ".config", "ariadne", "config.toml"); configuration != want {
 		t.Fatalf("DefaultConfigPath = %q, want %q", configuration, want)
 	}
 }
@@ -54,7 +54,7 @@ func TestAriadneConfigPathHasHighestPriority(t *testing.T) {
 	t.Setenv("ARIADNE_CONFIG_PATH", directory)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "xdg"))
 	configuration, err := DefaultConfigPath()
-	if err != nil || configuration != filepath.Join(directory, "config") {
+	if err != nil || configuration != filepath.Join(directory, "config.toml") {
 		t.Fatalf("DefaultConfigPath = %q, %v", configuration, err)
 	}
 }
