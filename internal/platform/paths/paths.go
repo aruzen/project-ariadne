@@ -10,17 +10,23 @@ import (
 var ErrHomeUnavailable = errors.New("paths: user home is unavailable")
 
 func DefaultConfigPath() (string, error) {
+	if directory := os.Getenv("ARIADNE_CONFIG_PATH"); directory != "" {
+		if !filepath.IsAbs(directory) {
+			return "", ErrHomeUnavailable
+		}
+		return filepath.Join(directory, "config"), nil
+	}
 	if directory := os.Getenv("XDG_CONFIG_HOME"); directory != "" {
 		if !filepath.IsAbs(directory) {
 			return "", ErrHomeUnavailable
 		}
-		return filepath.Join(directory, "ariadne", "config.toml"), nil
+		return filepath.Join(directory, "ariadne", "config"), nil
 	}
-	directory, err := os.UserConfigDir()
-	if err != nil || directory == "" {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
 		return "", ErrHomeUnavailable
 	}
-	return filepath.Join(directory, "ariadne", "config.toml"), nil
+	return filepath.Join(home, ".config", "ariadne", "config"), nil
 }
 
 func DefaultStatePath() (string, error) {
