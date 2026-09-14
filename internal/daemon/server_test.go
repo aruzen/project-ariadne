@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	ariadneconfig "github.com/aruzen/ariadne/internal/config"
 	"github.com/aruzen/ariadne/internal/core"
 	ariadneplugin "github.com/aruzen/ariadne/internal/plugin"
 	ariadneprotocol "github.com/aruzen/ariadne/internal/protocol"
@@ -69,6 +70,42 @@ func (process *testManagedProcess) complete(status pty.ExitStatus) {
 type testFactory struct {
 	mu        sync.Mutex
 	processes []*testManagedProcess
+	specs     []pty.ProcessSpec
+}
+
+type testClipboardBackend struct {
+	mu       sync.Mutex
+	text     []byte
+	readErr  error
+	writeErr error
+}
+
+type testOutputSink struct {
+	events chan pty.AttachmentEvent
+}
+
+func (sink *testOutputSink) Send(ctx context.Context, event pty.AttachmentEvent) error {
+	select {
+	case sink.events <- event:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (backend *testClipboardBackend) Read(context.Context, int) ([]byte, error) {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	return append([]byte(nil), backend.text...), backend.readErr
+}
+
+func (backend *testClipboardBackend) Write(_ context.Context, data []byte) error {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.writeErr == nil {
+		backend.text = append(backend.text[:0], data...)
+	}
+	return backend.writeErr
 }
 
 type daemonTestPlugin struct{}
@@ -81,7 +118,7 @@ func (daemonTestPlugin) HandleEvent(context.Context, core.Event, ariadneplugin.L
 	return nil
 }
 
-func (factory *testFactory) StartManaged(context.Context, pty.ProcessSpec) (pty.ManagedProcess, error) {
+func (factory *testFactory) StartManaged(_ context.Context, spec pty.ProcessSpec) (pty.ManagedProcess, error) {
 	factory.mu.Lock()
 	defer factory.mu.Unlock()
 	if len(factory.processes) == 0 {
@@ -89,6 +126,7 @@ func (factory *testFactory) StartManaged(context.Context, pty.ProcessSpec) (pty.
 	}
 	process := factory.processes[0]
 	factory.processes = factory.processes[1:]
+	factory.specs = append(factory.specs, spec)
 	return process, nil
 }
 
@@ -171,7 +209,7 @@ func TestTerminalExitMapping(t *testing.T) {
 		state  core.TerminalState
 		exit   core.TerminalExit
 	}{
-		{name: "success", status: pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 0}, remove: true,
+		{name: "success", status: pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 0},
 			state: core.TerminalExited, exit: core.TerminalExit{Kind: core.TerminalExitProcess}},
 		{name: "explicit kill", status: pty.ExitStatus{Reason: pty.ExitReasonKilled}, remove: true,
 			state: core.TerminalFailed, exit: core.TerminalExit{Kind: core.TerminalExitPTYError, Message: "killed"}},
@@ -186,7 +224,7 @@ func TestTerminalExitMapping(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := terminalExitRemovesPane(test.status); got != test.remove {
+			if got := terminalExitRemovesPane(test.status, false); got != test.remove {
 				t.Fatalf("terminalExitRemovesPane = %v, want %v", got, test.remove)
 			}
 			state, exit := terminalExit(test.status)
@@ -194,6 +232,9 @@ func TestTerminalExitMapping(t *testing.T) {
 				t.Fatalf("terminalExit = (%+v, %+v), want (%+v, %+v)", state, exit, test.state, test.exit)
 			}
 		})
+	}
+	if !terminalExitRemovesPane(pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 0}, true) {
+		t.Fatal("configured successful exit did not remove Pane")
 	}
 }
 
@@ -296,7 +337,7 @@ func TestManagerAbnormalExitIsRetainedThenRemovalClearsRuntimeID(t *testing.T) {
 	})
 }
 
-func TestManagerSuccessfulExitRemovesPaneAndSession(t *testing.T) {
+func TestManagerSuccessfulExitRetainsPaneAndSession(t *testing.T) {
 	process := newTestManagedProcess()
 	server, _ := openTestServer(t, &testFactory{processes: []*testManagedProcess{process}})
 	addRunningPane(t, server, 1)
@@ -304,6 +345,32 @@ func TestManagerSuccessfulExitRemovesPaneAndSession(t *testing.T) {
 		Command: "test-command", Dir: "/tmp", InitialSize: pty.Size{Cols: 80, Rows: 24},
 	})
 	if err != nil {
+		t.Fatalf("Manager Open: %v", err)
+	}
+	process.complete(pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 0})
+	waitFor(t, func() bool {
+		snapshot := serverSnapshot(t, server)
+		return len(snapshot.Panes) == 1 && snapshot.Panes[0].Terminal.State == core.TerminalExited &&
+			snapshot.Panes[0].Terminal.Exit != nil && snapshot.Panes[0].Terminal.Exit.Code == 0 &&
+			len(snapshot.Labels) == 0 && len(server.manager.List()) == 1
+	})
+}
+
+func TestManagerSuccessfulExitCanClosePane(t *testing.T) {
+	process := newTestManagedProcess()
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	configuration := DefaultConfig(statePath)
+	configuration.ClosePaneOnSuccessfulExit = true
+	configuration.Manager.GracefulKillTimeout = 10 * time.Millisecond
+	server, _, err := Open(context.Background(), &testFactory{processes: []*testManagedProcess{process}}, configuration)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer server.Close(context.Background())
+	addRunningPane(t, server, 1)
+	if _, err := server.manager.Open(context.Background(), pty.ProcessSpec{
+		Command: "test-command", Dir: "/tmp", InitialSize: pty.Size{Cols: 80, Rows: 24},
+	}); err != nil {
 		t.Fatalf("Manager Open: %v", err)
 	}
 	process.complete(pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 0})
@@ -371,6 +438,221 @@ func TestTerminalOperationsNewListRestartKillAndDismiss(t *testing.T) {
 	}
 	if len(serverSnapshot(t, server).Panes) != 0 || len(server.manager.List()) != 0 {
 		t.Fatal("dismiss did not remove Pane and retained Session")
+	}
+}
+
+func TestStashedTerminalContinuesDrainAndReplaysOnRestore(t *testing.T) {
+	process := newTestManagedProcess()
+	server, _ := openTestServer(t, &testFactory{processes: []*testManagedProcess{process}})
+	created, err := server.NewTerminal(context.Background(), ariadneprotocol.NewTerminalParams{
+		Argv: []string{"test-command"}, CWD: "/tmp", InitialSize: pty.Size{Cols: 80, Rows: 24},
+	})
+	if err != nil {
+		t.Fatalf("NewTerminal: %v", err)
+	}
+	terminalID := *created.Pane.Terminal.ID
+	executeCore[core.StashPaneResult](t, server, core.StashPaneCommand{PaneID: created.Pane.ID})
+	go func() { _, _ = process.writer.Write([]byte("while-stashed")) }()
+	waitFor(t, func() bool {
+		session, exists := server.manager.Get(terminalID)
+		return exists && session.Info().LastSequence == 1 && session.Info().HistoryAvailable
+	})
+	executeCore[core.RestorePaneResult](t, server, core.RestorePaneCommand{PaneID: created.Pane.ID})
+	session, exists := server.manager.Get(terminalID)
+	if !exists {
+		t.Fatal("Terminal Session disappeared while stashed")
+	}
+	sink := &testOutputSink{events: make(chan pty.AttachmentEvent, 2)}
+	attachment, replay, err := session.Attach(context.Background(), pty.AttachOptions{Replay: pty.ReplayHistory}, sink)
+	if err != nil {
+		t.Fatalf("Attach after restore: %v", err)
+	}
+	defer attachment.Close()
+	if replay.ReplayFirst != 1 || replay.ReplayLast != 1 || replay.Truncated {
+		t.Fatalf("replay = %+v", replay)
+	}
+	select {
+	case event := <-sink.events:
+		if event.Kind != pty.AttachmentOutput || event.Output == nil || string(event.Output.Data) != "while-stashed" {
+			t.Fatalf("replayed event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for stashed output replay")
+	}
+}
+
+func TestRunTerminalReplacesLaunchAndUsesPreviousCWD(t *testing.T) {
+	first := newTestManagedProcess()
+	second := newTestManagedProcess()
+	factory := &testFactory{processes: []*testManagedProcess{first, second}}
+	server, _ := openTestServer(t, factory)
+	created, err := server.NewTerminal(context.Background(), ariadneprotocol.NewTerminalParams{
+		Argv: []string{"old-command"}, CWD: "/previous", Env: []string{"OLD=value"},
+		InitialSize: pty.Size{Cols: 80, Rows: 24},
+	})
+	if err != nil {
+		t.Fatalf("NewTerminal: %v", err)
+	}
+	first.complete(pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 0})
+	waitFor(t, func() bool {
+		pane, exists := serverSnapshot(t, server).PaneByTerminalID(*created.Pane.Terminal.ID)
+		return exists && pane.Terminal.State == core.TerminalExited
+	})
+	run, err := server.RunTerminal(context.Background(), ariadneprotocol.RunTerminalParams{
+		PaneID: created.Pane.ID, Argv: []string{"new-command", "argument"}, FallbackCWD: "/fallback",
+		Env: []string{"NEW=value"}, InitialSize: pty.Size{Cols: 100, Rows: 30},
+	})
+	if err != nil {
+		t.Fatalf("RunTerminal: %v", err)
+	}
+	if run.Pane.Terminal == nil || run.Pane.Terminal.State != core.TerminalRunning ||
+		run.Pane.Terminal.Launch.CWD != "/previous" || len(run.Pane.Terminal.Launch.Argv) != 2 ||
+		run.Pane.Terminal.Launch.Argv[0] != "new-command" {
+		t.Fatalf("run Pane = %+v", run.Pane)
+	}
+	factory.mu.Lock()
+	spec := factory.specs[len(factory.specs)-1]
+	factory.mu.Unlock()
+	if spec.Command != "new-command" || len(spec.Args) != 1 || spec.Args[0] != "argument" ||
+		spec.Dir != "/previous" || len(spec.Env) != 1 || spec.Env[0] != "NEW=value" {
+		t.Fatalf("run ProcessSpec = %+v", spec)
+	}
+	if _, err := server.RunTerminal(context.Background(), ariadneprotocol.RunTerminalParams{
+		PaneID: created.Pane.ID, Argv: []string{"again"}, FallbackCWD: "/fallback",
+		InitialSize: pty.Size{Cols: 80, Rows: 24},
+	}); !errors.Is(err, core.ErrInvalidState) {
+		t.Fatalf("RunTerminal while running error = %v", err)
+	}
+}
+
+func TestConcurrentRunAndRestartCreateOnlyOnePTY(t *testing.T) {
+	first := newTestManagedProcess()
+	second := newTestManagedProcess()
+	third := newTestManagedProcess()
+	factory := &testFactory{processes: []*testManagedProcess{first, second, third}}
+	server, _ := openTestServer(t, factory)
+	created, err := server.NewTerminal(context.Background(), ariadneprotocol.NewTerminalParams{
+		Argv: []string{"old-command"}, CWD: "/tmp", InitialSize: pty.Size{Cols: 80, Rows: 24},
+	})
+	if err != nil {
+		t.Fatalf("NewTerminal: %v", err)
+	}
+	first.complete(pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 0})
+	waitFor(t, func() bool {
+		pane, exists := serverSnapshot(t, server).PaneByTerminalID(*created.Pane.Terminal.ID)
+		return exists && pane.Terminal.State == core.TerminalExited
+	})
+
+	errorsByOperation := make(chan error, 2)
+	go func() {
+		_, runErr := server.RunTerminal(context.Background(), ariadneprotocol.RunTerminalParams{
+			PaneID: created.Pane.ID, Argv: []string{"new-command"}, FallbackCWD: "/tmp",
+			InitialSize: pty.Size{Cols: 80, Rows: 24},
+		})
+		errorsByOperation <- runErr
+	}()
+	go func() {
+		_, restartErr := server.RestartTerminal(context.Background(), ariadneprotocol.RestartTerminalParams{
+			PaneID: created.Pane.ID, InitialSize: pty.Size{Cols: 80, Rows: 24},
+		})
+		errorsByOperation <- restartErr
+	}()
+	successes := 0
+	invalidStates := 0
+	for range 2 {
+		operationErr := <-errorsByOperation
+		switch {
+		case operationErr == nil:
+			successes++
+		case errors.Is(operationErr, core.ErrInvalidState):
+			invalidStates++
+		default:
+			t.Fatalf("concurrent operation error = %v", operationErr)
+		}
+	}
+	if successes != 1 || invalidStates != 1 || len(server.manager.List()) != 1 {
+		t.Fatalf("successes=%d invalidStates=%d sessions=%d", successes, invalidStates, len(server.manager.List()))
+	}
+	factory.mu.Lock()
+	started := len(factory.specs)
+	factory.mu.Unlock()
+	if started != 2 {
+		t.Fatalf("started PTYs = %d, want initial plus one replacement", started)
+	}
+}
+
+func TestClipboardPolicyOSSyncAndMemoryFallback(t *testing.T) {
+	backend := &testClipboardBackend{}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	configuration := DefaultConfig(statePath)
+	configuration.Clipboard.Backend = backend
+	configuration.Clipboard.ReadPolicy = ariadneconfig.ClipboardAsk
+	configuration.Clipboard.WritePolicy = ariadneconfig.ClipboardAsk
+	configuration.Clipboard.MaxTextBytes = 16
+	server, _, err := Open(context.Background(), &testFactory{}, configuration)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer server.Close(context.Background())
+	pane := executeCore[core.CreatePaneResult](t, server, core.CreatePaneCommand{
+		WindowID: 1, Pane: core.PaneSpec{Kind: core.PaneTool},
+	}).Pane
+	write := ariadneprotocol.ClipboardWriteParams{PaneID: pane.ID, Protocol: "copy-mode", Text: "shared", Approved: false}
+	if _, err := server.ClipboardWrite(context.Background(), write); !errors.Is(err, ariadneprotocol.ErrPermissionDenied) {
+		t.Fatalf("unapproved write error = %v", err)
+	}
+	write.Approved = true
+	if _, err := server.ClipboardWrite(context.Background(), write); err != nil {
+		t.Fatalf("approved write: %v", err)
+	}
+	read, err := server.ClipboardRead(context.Background(), ariadneprotocol.ClipboardReadParams{
+		PaneID: pane.ID, Protocol: "paste", Approved: true,
+	})
+	if err != nil || read.Text != "shared" {
+		t.Fatalf("OS clipboard read = %+v, %v", read, err)
+	}
+	backend.mu.Lock()
+	backend.readErr = errors.New("OS clipboard unavailable")
+	backend.text = nil
+	backend.mu.Unlock()
+	read, err = server.ClipboardRead(context.Background(), ariadneprotocol.ClipboardReadParams{
+		PaneID: pane.ID, Protocol: "paste", Approved: true,
+	})
+	if err != nil || read.Text != "shared" {
+		t.Fatalf("shared clipboard fallback = %+v, %v", read, err)
+	}
+	write.Text = "0123456789abcdefg"
+	if _, err := server.ClipboardWrite(context.Background(), write); !errors.Is(err, core.ErrInvalidArgument) {
+		t.Fatalf("oversized write error = %v", err)
+	}
+	write.Text = string([]byte{0xff})
+	if _, err := server.ClipboardWrite(context.Background(), write); !errors.Is(err, core.ErrInvalidArgument) {
+		t.Fatalf("invalid UTF-8 write error = %v", err)
+	}
+}
+
+func TestClipboardDenyPolicyCannotBeOverridden(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	configuration := DefaultConfig(statePath)
+	configuration.Clipboard.ReadPolicy = ariadneconfig.ClipboardDeny
+	configuration.Clipboard.WritePolicy = ariadneconfig.ClipboardDeny
+	server, _, err := Open(context.Background(), &testFactory{}, configuration)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer server.Close(context.Background())
+	pane := executeCore[core.CreatePaneResult](t, server, core.CreatePaneCommand{
+		WindowID: 1, Pane: core.PaneSpec{Kind: core.PaneTool},
+	}).Pane
+	if _, err := server.ClipboardWrite(context.Background(), ariadneprotocol.ClipboardWriteParams{
+		PaneID: pane.ID, Protocol: "test", Text: "secret", Approved: true,
+	}); !errors.Is(err, ariadneprotocol.ErrPermissionDenied) {
+		t.Fatalf("denied write error = %v", err)
+	}
+	if _, err := server.ClipboardRead(context.Background(), ariadneprotocol.ClipboardReadParams{
+		PaneID: pane.ID, Protocol: "test", Approved: true,
+	}); !errors.Is(err, ariadneprotocol.ErrPermissionDenied) {
+		t.Fatalf("denied read error = %v", err)
 	}
 }
 

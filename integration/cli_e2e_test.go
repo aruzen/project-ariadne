@@ -58,10 +58,36 @@ func TestCLIEndToEnd(t *testing.T) {
 	runtime := newE2ERuntime(t)
 	runtime.testConcurrentAutoStart(t)
 	runtime.testNewKill(t)
+	runtime.testStashRestore(t)
 	runtime.testAbnormalExitDismiss(t)
 	runtime.testRestart(t)
 	runtime.testDaemonRestartRestoresPlaceholder(t)
 	runtime.testOpenDetachReattachResize(t)
+}
+
+func (runtime *e2eRuntime) testStashRestore(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	output, err := runtime.run(ctx, "new", "--", "/bin/sh", "-c", "sleep 30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paneID, _ := parseTerminalResult(t, output, "created")
+	if _, err := runtime.run(ctx, "stash", "pane", fmt.Sprint(paneID)); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := runtime.run(ctx, "stash", "list")
+	if err != nil || !strings.Contains(listed, "pane") || !strings.Contains(listed, fmt.Sprint(paneID)) || !strings.Contains(listed, "running") {
+		t.Fatalf("stash list = %q, %v", listed, err)
+	}
+	if _, err := runtime.run(ctx, "restore", "pane", fmt.Sprint(paneID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.run(ctx, "kill", fmt.Sprint(paneID)); err != nil {
+		t.Fatal(err)
+	}
+	runtime.waitForEntries(t, ctx, func(result listResult) bool { return len(result.Entries) == 0 })
 }
 
 func newE2ERuntime(t *testing.T) *e2eRuntime {
@@ -328,6 +354,13 @@ func (runtime *e2eRuntime) testOpenDetachReattachResize(t *testing.T) {
 	}
 	waitCommand(t, attach, 10*time.Second)
 	_ = attachedTerminal.Close()
+	runtime.waitForEntries(t, ctx, func(result listResult) bool {
+		return len(result.Entries) == 1 && result.Entries[0].Pane.ID != 0 && result.Entries[0].Pane.Terminal != nil &&
+			result.Entries[0].Pane.Terminal.State == "exited"
+	})
+	if _, err := runtime.run(ctx, "dismiss", fmt.Sprint(result.Entries[0].Pane.ID)); err != nil {
+		t.Fatal(err)
+	}
 	runtime.waitForEntries(t, ctx, func(result listResult) bool { return len(result.Entries) == 0 })
 }
 

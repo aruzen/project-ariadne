@@ -200,6 +200,70 @@ func TestCreatePaneCommandPreservesPresentation(t *testing.T) {
 	}
 }
 
+func TestStashListAndRestoreProtocol(t *testing.T) {
+	pair := newPeerPair(t, newProtocolCore(t))
+	if _, err := call(t, pair.client, OperationSync, nil); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	response, err := call(t, pair.client, OperationCreatePane, CreatePaneParams{WindowID: 1, Kind: core.PaneTool})
+	if err != nil {
+		t.Fatalf("create pane: %v", err)
+	}
+	var created core.CreatePaneResult
+	if err := json.Unmarshal(response.Result, &created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	if _, err := call(t, pair.client, OperationStashPane, PaneParams{PaneID: created.Pane.ID}); err != nil {
+		t.Fatalf("stash pane: %v", err)
+	}
+	response, err = call(t, pair.client, OperationListStash, nil)
+	if err != nil {
+		t.Fatalf("list stash: %v", err)
+	}
+	var listed StashListResult
+	if err := json.Unmarshal(response.Result, &listed); err != nil {
+		t.Fatalf("decode stash list: %v", err)
+	}
+	if len(listed.Panes) != 1 || listed.Panes[0].Stashed.PaneID != created.Pane.ID || listed.Panes[0].Pane.ID != created.Pane.ID {
+		t.Fatalf("stash list = %+v", listed)
+	}
+	if _, err := call(t, pair.client, OperationRestorePane, RestorePaneParams{PaneID: created.Pane.ID}); err != nil {
+		t.Fatalf("restore pane: %v", err)
+	}
+}
+
+func TestDecodeStashEventsKeepsConcretePayload(t *testing.T) {
+	for _, event := range []core.Event{
+		{Revision: 1, Kind: core.EventPaneStashed, Payload: core.PaneStashEvent{
+			Pane: core.Pane{ID: 1, WindowID: 1, Kind: core.PaneTool}, Window: core.Window{ID: 1, WorkspaceID: 1, Name: "main"},
+			Stashed: core.StashedPane{PaneID: 1, OriginWorkspaceID: 1, OriginWindowID: 1},
+		}},
+		{Revision: 2, Kind: core.EventWindowRestored, Payload: core.WindowStashEvent{
+			Window: core.Window{ID: 1, WorkspaceID: 1, Name: "main"}, Workspace: core.Workspace{ID: 1, Name: "default", WindowIDs: []core.WindowID{1}},
+			Stashed: core.StashedWindow{WindowID: 1, OriginWorkspaceID: 1},
+		}},
+	} {
+		data, err := json.Marshal(EventEnvelope{Version: Version, Event: event})
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := DecodeEvent(data)
+		if err != nil {
+			t.Fatalf("DecodeEvent(%s): %v", event.Kind, err)
+		}
+		switch event.Kind {
+		case core.EventPaneStashed:
+			if _, ok := decoded.Payload.(core.PaneStashEvent); !ok {
+				t.Fatalf("pane payload = %T", decoded.Payload)
+			}
+		case core.EventWindowRestored:
+			if _, ok := decoded.Payload.(core.WindowStashEvent); !ok {
+				t.Fatalf("window payload = %T", decoded.Payload)
+			}
+		}
+	}
+}
+
 func TestMalformedCommandDoesNotClosePeer(t *testing.T) {
 	pair := newPeerPair(t, newProtocolCore(t))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

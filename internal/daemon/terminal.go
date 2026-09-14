@@ -85,6 +85,60 @@ func (server *Server) RestartTerminal(ctx context.Context, params ariadneprotoco
 	return server.startReservedTerminal(ctx, reserved, params.Env, params.InitialSize)
 }
 
+func (server *Server) RunTerminal(ctx context.Context, params ariadneprotocol.RunTerminalParams) (ariadneprotocol.TerminalOperationResult, error) {
+	server.terminalMu.Lock()
+	defer server.terminalMu.Unlock()
+	if params.PaneID == 0 || len(params.Argv) == 0 || errEnv(params.Env) != nil || params.InitialSize.Validate() != nil {
+		return ariadneprotocol.TerminalOperationResult{}, fmt.Errorf("%w: invalid run parameters", core.ErrInvalidArgument)
+	}
+	snapshot, err := server.core.Snapshot(ctx)
+	if err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
+	pane, exists := paneByID(snapshot, params.PaneID)
+	if !exists {
+		return ariadneprotocol.TerminalOperationResult{}, fmt.Errorf("%w: pane %d", core.ErrNotFound, params.PaneID)
+	}
+	if pane.Kind != core.PaneTerminal {
+		return ariadneprotocol.TerminalOperationResult{}, fmt.Errorf("%w: pane %d is not a Terminal Pane", core.ErrInvalidState, pane.ID)
+	}
+	if pane.Terminal != nil {
+		switch pane.Terminal.State {
+		case core.TerminalPlaceholder, core.TerminalExited, core.TerminalFailed:
+		default:
+			return ariadneprotocol.TerminalOperationResult{}, fmt.Errorf("%w: pane %d cannot run", core.ErrInvalidState, pane.ID)
+		}
+	}
+	cwd := params.CWD
+	if cwd == "" && pane.Terminal != nil {
+		cwd = pane.Terminal.Launch.CWD
+	}
+	if cwd == "" {
+		cwd = params.FallbackCWD
+	}
+	if err := validateLaunch(params.Argv, cwd, params.Env, params.InitialSize); err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
+	if pane.Terminal != nil && pane.Terminal.ID != nil {
+		if err := server.manager.Remove(*pane.Terminal.ID); err != nil && !errors.Is(err, pty.ErrSessionNotFound) {
+			return ariadneprotocol.TerminalOperationResult{}, err
+		}
+	}
+	if _, err := server.core.Execute(ctx, core.RemoveLabelCommand{
+		TargetKind: core.LabelPane, TargetID: uint64(pane.ID), Source: systemLabelSource, Name: terminalErrorLabel,
+	}); err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
+	result, err := server.core.Execute(ctx, core.PrepareTerminalRunCommand{
+		PaneID: pane.ID, Launch: core.LaunchSpec{Argv: append([]string(nil), params.Argv...), CWD: cwd},
+	})
+	if err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
+	reserved := result.(core.TerminalResult).Pane
+	return server.startReservedTerminal(ctx, reserved, params.Env, params.InitialSize)
+}
+
 func (server *Server) startReservedTerminal(ctx context.Context, pane core.Pane, environment []string, size pty.Size) (ariadneprotocol.TerminalOperationResult, error) {
 	launch := pane.Terminal.Launch
 	session, err := server.manager.Open(ctx, pty.ProcessSpec{
@@ -141,7 +195,7 @@ func (server *Server) restoreSystemLabels(ctx context.Context) error {
 		return err
 	}
 	for _, pane := range snapshot.Panes {
-		if pane.Terminal == nil || pane.Terminal.Exit == nil {
+		if pane.Terminal == nil || pane.Terminal.Exit == nil || !terminalExitNeedsErrorLabel(*pane.Terminal.Exit) {
 			continue
 		}
 		if err := server.setTerminalErrorLabel(ctx, pane); err != nil {

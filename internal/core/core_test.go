@@ -51,7 +51,7 @@ func snapshot(t *testing.T, core *Core) Snapshot {
 func TestNewCreatesDefaultHierarchy(t *testing.T) {
 	core := newTestCore(t, 8)
 	state := snapshot(t, core)
-	if state.Revision != 0 || state.NextWorkspaceID != 2 || state.NextWindowID != 2 || state.NextPaneID != 1 {
+	if state.Revision != 0 || state.NextWorkspaceID != 2 || state.NextWindowID != 2 || state.NextPaneID != 1 || state.NextSplitID != 1 {
 		t.Fatalf("unexpected initial counters: %+v", state)
 	}
 	if len(state.Workspaces) != 1 || state.Workspaces[0].ID != 1 || state.Workspaces[0].Name != "default" {
@@ -96,13 +96,17 @@ func TestSplitFlattensMatchingDirectionAndNestsOtherDirection(t *testing.T) {
 	if root == nil || root.Kind != LayoutSplit || root.Direction != SplitHorizontal {
 		t.Fatalf("unexpected horizontal root: %+v", root)
 	}
+	if root.SplitID == 0 {
+		t.Fatal("horizontal split has no SplitID")
+	}
 	wantOrder := []PaneID{one.Pane.ID, three.Pane.ID, two.Pane.ID}
+	wantWeights := []uint32{1, 1, 2}
 	if len(root.Children) != len(wantOrder) || len(root.Weights) != len(wantOrder) {
 		t.Fatalf("unexpected child/weight count: %+v", root)
 	}
 	for index, want := range wantOrder {
-		if root.Children[index].PaneID != want || root.Weights[index] != 1 {
-			t.Fatalf("child %d = %+v weight=%d, want pane=%d weight=1", index, root.Children[index], root.Weights[index], want)
+		if root.Children[index].PaneID != want || root.Weights[index] != wantWeights[index] {
+			t.Fatalf("child %d = %+v weight=%d, want pane=%d weight=%d", index, root.Children[index], root.Weights[index], want, wantWeights[index])
 		}
 	}
 
@@ -110,6 +114,9 @@ func TestSplitFlattensMatchingDirectionAndNestsOtherDirection(t *testing.T) {
 	root = four.Window.Layout
 	if root.Children[0].Kind != LayoutSplit || root.Children[0].Direction != SplitVertical {
 		t.Fatalf("opposite direction did not create nested split: %+v", root)
+	}
+	if root.Children[0].SplitID == 0 || root.Children[0].SplitID == root.SplitID {
+		t.Fatalf("nested SplitIDs are not unique: root=%d nested=%d", root.SplitID, root.Children[0].SplitID)
 	}
 	if root.Children[0].Children[0].PaneID != one.Pane.ID || root.Children[0].Children[1].PaneID != four.Pane.ID {
 		t.Fatalf("unexpected nested order: %+v", root.Children[0])
@@ -119,6 +126,59 @@ func TestSplitFlattensMatchingDirectionAndNestsOtherDirection(t *testing.T) {
 	root = closed.Window.Layout
 	if root.Children[0].PaneID != four.Pane.ID {
 		t.Fatalf("single-child split was not collapsed: %+v", root)
+	}
+}
+
+func TestResizeSplitAndHierarchyRenameDelete(t *testing.T) {
+	engine := newTestCore(t, 32)
+	one := execute[CreatePaneResult](t, engine, CreatePaneCommand{WindowID: 1, Pane: PaneSpec{Kind: PaneTool}}).Pane
+	two := execute[CreatePaneResult](t, engine, SplitPaneCommand{
+		TargetPaneID: one.ID, Direction: SplitHorizontal, Pane: PaneSpec{Kind: PaneTool},
+	})
+	splitID := two.Window.Layout.SplitID
+	resized := execute[ResizeSplitResult](t, engine, ResizeSplitCommand{SplitID: splitID, Weights: []uint32{3, 1}})
+	if resized.Window.Layout.Weights[0] != 3 || resized.Window.Layout.Weights[1] != 1 {
+		t.Fatalf("resized weights = %v", resized.Window.Layout.Weights)
+	}
+	if _, err := engine.Execute(context.Background(), ResizeSplitCommand{SplitID: splitID, Weights: []uint32{1}}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("wrong weight count error = %v", err)
+	}
+	three := execute[CreatePaneResult](t, engine, SplitPaneCommand{
+		TargetPaneID: one.ID, Direction: SplitHorizontal, Pane: PaneSpec{Kind: PaneTool},
+	})
+	if got := three.Window.Layout.Weights; len(got) != 3 || got[0] != 3 || got[1] != 3 || got[2] != 2 {
+		t.Fatalf("split erased existing weight ratio: %v", got)
+	}
+
+	workspace := execute[CreateWorkspaceResult](t, engine, CreateWorkspaceCommand{Name: "other"}).Workspace
+	workspace = execute[WorkspaceResult](t, engine, RenameWorkspaceCommand{WorkspaceID: workspace.ID, Name: "renamed"}).Workspace
+	window := execute[CreateWindowResult](t, engine, CreateWindowCommand{WorkspaceID: workspace.ID, Name: "secondary"}).Window
+	window = execute[WindowResult](t, engine, RenameWindowCommand{WindowID: window.ID, Name: "renamed-window"}).Window
+	if workspace.Name != "renamed" || window.Name != "renamed-window" {
+		t.Fatalf("rename results = %+v %+v", workspace, window)
+	}
+	if _, err := engine.Execute(context.Background(), DeleteWorkspaceCommand{WorkspaceID: workspace.ID}); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("delete nonempty workspace error = %v", err)
+	}
+	execute[DeleteWindowResult](t, engine, DeleteWindowCommand{WindowID: window.ID})
+	execute[DeleteWorkspaceResult](t, engine, DeleteWorkspaceCommand{WorkspaceID: workspace.ID})
+}
+
+func TestSelectWindowIsFrontendLocal(t *testing.T) {
+	engine := newTestCore(t, 16)
+	_, subscription, err := engine.Subscribe(context.Background())
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	workspace := execute[CreateWorkspaceResult](t, engine, CreateWorkspaceCommand{Name: "other"}).Workspace
+	window := execute[CreateWindowResult](t, engine, CreateWindowCommand{WorkspaceID: workspace.ID, Name: "main"}).Window
+	revision := snapshot(t, engine).Revision
+	selected := execute[SetFocusResult](t, engine, SelectWindowCommand{FrontendID: subscription.ID(), WindowID: window.ID})
+	if selected.Focus.WorkspaceID != workspace.ID || selected.Focus.WindowID != window.ID || selected.Focus.PaneID != 0 {
+		t.Fatalf("selected frontend state = %+v", selected.Focus)
+	}
+	if snapshot(t, engine).Revision != revision {
+		t.Fatal("SelectWindow changed persistent revision")
 	}
 }
 
@@ -532,6 +592,40 @@ func TestTerminalStartStopAndRestartTransitions(t *testing.T) {
 	if failed.Pane.Terminal.State != TerminalFailed || failed.Pane.Terminal.Exit == nil ||
 		failed.Pane.Terminal.Exit.Kind != TerminalExitPTYError {
 		t.Fatalf("failed terminal = %+v", failed.Pane.Terminal)
+	}
+}
+
+func TestPrepareTerminalRunReplacesInactiveLaunch(t *testing.T) {
+	engine := newTestCore(t, 16)
+	terminalID := TerminalID(42)
+	created := execute[CreatePaneResult](t, engine, CreatePaneCommand{
+		WindowID: 1,
+		Pane: PaneSpec{Kind: PaneTerminal, Terminal: &TerminalInstance{
+			ID: &terminalID, State: TerminalExited,
+			Launch: LaunchSpec{Argv: []string{"old"}, CWD: "/old"},
+			Exit:   &TerminalExit{Kind: TerminalExitProcess},
+		}},
+	})
+	launch := LaunchSpec{Argv: []string{"new", "argument"}, CWD: "/new"}
+	prepared := execute[TerminalResult](t, engine, PrepareTerminalRunCommand{PaneID: created.Pane.ID, Launch: launch})
+	launch.Argv[0] = "mutated"
+	if prepared.Pane.Terminal.State != TerminalStarting || prepared.Pane.Terminal.ID != nil ||
+		prepared.Pane.Terminal.Exit != nil || prepared.Pane.Terminal.Launch.Argv[0] != "new" ||
+		prepared.Pane.Terminal.Launch.CWD != "/new" {
+		t.Fatalf("prepared terminal = %+v", prepared.Pane.Terminal)
+	}
+	if _, err := engine.Execute(context.Background(), PrepareTerminalRunCommand{
+		PaneID: created.Pane.ID, Launch: LaunchSpec{Argv: []string{"again"}, CWD: "/tmp"},
+	}); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("run while starting error = %v", err)
+	}
+	tool := execute[CreatePaneResult](t, engine, SplitPaneCommand{
+		TargetPaneID: created.Pane.ID, Direction: SplitVertical, Pane: PaneSpec{Kind: PaneTool},
+	}).Pane
+	if _, err := engine.Execute(context.Background(), PrepareTerminalRunCommand{
+		PaneID: tool.ID, Launch: LaunchSpec{Argv: []string{"tool"}, CWD: "/tmp"},
+	}); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("run on Tool Pane error = %v", err)
 	}
 }
 

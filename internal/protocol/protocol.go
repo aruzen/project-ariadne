@@ -30,18 +30,33 @@ type Operation string
 const (
 	OperationSync            Operation = "sync"
 	OperationCreateWorkspace Operation = "create_workspace"
+	OperationRenameWorkspace Operation = "rename_workspace"
+	OperationDeleteWorkspace Operation = "delete_workspace"
 	OperationCreateWindow    Operation = "create_window"
+	OperationRenameWindow    Operation = "rename_window"
+	OperationDeleteWindow    Operation = "delete_window"
 	OperationCreatePane      Operation = "create_pane"
 	OperationSplitPane       Operation = "split_pane"
 	OperationMovePane        Operation = "move_pane"
+	OperationClosePane       Operation = "close_pane"
+	OperationResizeSplit     Operation = "resize_split"
+	OperationStashPane       Operation = "stash_pane"
+	OperationRestorePane     Operation = "restore_pane"
+	OperationStashWindow     Operation = "stash_window"
+	OperationRestoreWindow   Operation = "restore_window"
+	OperationListStash       Operation = "list_stash"
 	OperationSetFocus        Operation = "set_focus"
+	OperationSelectWindow    Operation = "select_window"
 	OperationNewTerminal     Operation = "new_terminal"
 	OperationListTerminals   Operation = "list_terminals"
 	OperationRestartTerminal Operation = "restart_terminal"
+	OperationRunTerminal     Operation = "run_terminal"
 	OperationKillTerminal    Operation = "kill_terminal"
 	OperationDismissTerminal Operation = "dismiss_terminal"
 	OperationDaemonStatus    Operation = "daemon_status"
 	OperationDaemonStop      Operation = "daemon_stop"
+	OperationClipboardRead   Operation = "clipboard_read"
+	OperationClipboardWrite  Operation = "clipboard_write"
 )
 
 type ErrorCode string
@@ -61,6 +76,7 @@ var (
 	ErrUnsupportedVersion  = errors.New("protocol: unsupported version")
 	ErrNotSynchronized     = errors.New("protocol: connection is not synchronized")
 	ErrAlreadySynchronized = errors.New("protocol: connection is already synchronized")
+	ErrPermissionDenied    = errors.New("protocol: permission denied")
 )
 
 type Config struct {
@@ -78,10 +94,13 @@ type TerminalController interface {
 	NewTerminal(context.Context, NewTerminalParams) (TerminalOperationResult, error)
 	ListTerminals(context.Context) (ListTerminalsResult, error)
 	RestartTerminal(context.Context, RestartTerminalParams) (TerminalOperationResult, error)
+	RunTerminal(context.Context, RunTerminalParams) (TerminalOperationResult, error)
 	KillTerminal(context.Context, PaneParams) (TerminalOperationResult, error)
 	DismissTerminal(context.Context, PaneParams) (TerminalOperationResult, error)
 	DaemonStatus(context.Context) (DaemonStatusResult, error)
 	DaemonStop(context.Context, DaemonStopParams) (DaemonStatusResult, error)
+	ClipboardRead(context.Context, ClipboardReadParams) (ClipboardResult, error)
+	ClipboardWrite(context.Context, ClipboardWriteParams) (ClipboardResult, error)
 }
 
 type ResponseObserver interface {
@@ -163,16 +182,28 @@ func DecodeEvent(data []byte) (core.Event, error) {
 	switch envelope.Event.Kind {
 	case core.EventWorkspaceCreated:
 		payload = &core.WorkspaceCreatedEvent{}
+	case core.EventWorkspaceRenamed:
+		payload = &core.WorkspaceEvent{}
+	case core.EventWorkspaceDeleted:
+		payload = &core.WorkspaceDeletedEvent{}
 	case core.EventWindowCreated:
 		payload = &core.WindowCreatedEvent{}
+	case core.EventWindowRenamed, core.EventSplitResized:
+		payload = &core.WindowEvent{}
+	case core.EventWindowDeleted:
+		payload = &core.WindowDeletedEvent{}
 	case core.EventPaneCreated:
 		payload = &core.PaneCreatedEvent{}
 	case core.EventPaneMoved:
 		payload = &core.PaneMovedEvent{}
 	case core.EventPaneClosed:
 		payload = &core.PaneClosedEvent{}
+	case core.EventPaneStashed, core.EventPaneRestored:
+		payload = &core.PaneStashEvent{}
+	case core.EventWindowStashed, core.EventWindowRestored:
+		payload = &core.WindowStashEvent{}
 	case core.EventTerminalExited, core.EventTerminalUnavailable, core.EventTerminalStarted,
-		core.EventTerminalStartFailed, core.EventTerminalRestarting, core.EventTerminalStopping:
+		core.EventTerminalStartFailed, core.EventTerminalRestarting, core.EventTerminalRunPrepared, core.EventTerminalStopping:
 		payload = &core.TerminalEvent{}
 	case core.EventLabelSet, core.EventLabelRemoved:
 		payload = &core.LabelEvent{}
@@ -187,13 +218,25 @@ func DecodeEvent(data []byte) (core.Event, error) {
 	switch value := payload.(type) {
 	case *core.WorkspaceCreatedEvent:
 		payload = *value
+	case *core.WorkspaceEvent:
+		payload = *value
+	case *core.WorkspaceDeletedEvent:
+		payload = *value
 	case *core.WindowCreatedEvent:
+		payload = *value
+	case *core.WindowEvent:
+		payload = *value
+	case *core.WindowDeletedEvent:
 		payload = *value
 	case *core.PaneCreatedEvent:
 		payload = *value
 	case *core.PaneMovedEvent:
 		payload = *value
 	case *core.PaneClosedEvent:
+		payload = *value
+	case *core.PaneStashEvent:
+		payload = *value
+	case *core.WindowStashEvent:
 		payload = *value
 	case *core.TerminalEvent:
 		payload = *value
@@ -212,6 +255,24 @@ type CreateWorkspaceParams struct {
 type CreateWindowParams struct {
 	WorkspaceID core.WorkspaceID `json:"workspace_id"`
 	Name        string           `json:"name"`
+}
+
+type RenameWorkspaceParams struct {
+	WorkspaceID core.WorkspaceID `json:"workspace_id"`
+	Name        string           `json:"name"`
+}
+
+type DeleteWorkspaceParams struct {
+	WorkspaceID core.WorkspaceID `json:"workspace_id"`
+}
+
+type RenameWindowParams struct {
+	WindowID core.WindowID `json:"window_id"`
+	Name     string        `json:"name"`
+}
+
+type DeleteWindowParams struct {
+	WindowID core.WindowID `json:"window_id"`
 }
 
 type CreatePaneParams struct {
@@ -240,6 +301,43 @@ type SetFocusParams struct {
 	PaneID core.PaneID `json:"pane_id"`
 }
 
+type ResizeSplitParams struct {
+	SplitID core.SplitID `json:"split_id"`
+	Weights []uint32     `json:"weights"`
+}
+
+type SelectWindowParams struct {
+	WindowID core.WindowID `json:"window_id"`
+}
+
+type RestorePaneParams struct {
+	PaneID              core.PaneID         `json:"pane_id"`
+	DestinationWindowID core.WindowID       `json:"destination_window_id,omitempty"`
+	TargetPaneID        core.PaneID         `json:"target_pane_id,omitempty"`
+	Direction           core.SplitDirection `json:"direction,omitempty"`
+}
+
+type RestoreWindowParams struct {
+	WindowID    core.WindowID    `json:"window_id"`
+	WorkspaceID core.WorkspaceID `json:"workspace_id,omitempty"`
+}
+
+type StashListResult struct {
+	Panes   []StashedPaneEntry   `json:"panes"`
+	Windows []StashedWindowEntry `json:"windows"`
+}
+
+type StashedPaneEntry struct {
+	Stashed core.StashedPane `json:"stashed"`
+	Pane    core.Pane        `json:"pane"`
+}
+
+type StashedWindowEntry struct {
+	Stashed core.StashedWindow `json:"stashed"`
+	Window  core.Window        `json:"window"`
+	Panes   []core.Pane        `json:"panes"`
+}
+
 type NewTerminalParams struct {
 	WindowID     core.WindowID         `json:"window_id,omitempty"`
 	TargetPaneID core.PaneID           `json:"target_pane_id,omitempty"`
@@ -254,6 +352,15 @@ type NewTerminalParams struct {
 
 type RestartTerminalParams struct {
 	PaneID      core.PaneID `json:"pane_id"`
+	Env         []string    `json:"env"`
+	InitialSize pty.Size    `json:"initial_size"`
+}
+
+type RunTerminalParams struct {
+	PaneID      core.PaneID `json:"pane_id"`
+	Argv        []string    `json:"argv"`
+	CWD         string      `json:"cwd,omitempty"`
+	FallbackCWD string      `json:"fallback_cwd"`
 	Env         []string    `json:"env"`
 	InitialSize pty.Size    `json:"initial_size"`
 }
@@ -286,6 +393,23 @@ type DaemonStatusResult struct {
 
 type DaemonStopParams struct {
 	Force bool `json:"force"`
+}
+
+type ClipboardReadParams struct {
+	PaneID   core.PaneID `json:"pane_id"`
+	Protocol string      `json:"protocol"`
+	Approved bool        `json:"approved"`
+}
+
+type ClipboardWriteParams struct {
+	PaneID   core.PaneID `json:"pane_id"`
+	Protocol string      `json:"protocol"`
+	Text     string      `json:"text"`
+	Approved bool        `json:"approved"`
+}
+
+type ClipboardResult struct {
+	Text string `json:"text,omitempty"`
 }
 
 type Protocol struct {
@@ -385,6 +509,21 @@ func (protocol *Protocol) handleCommand(ctx context.Context, peer *streammux.Pee
 		go protocol.forwardEvents(subscription)
 		return nil
 	}
+	if request.Operation == OperationListStash {
+		if _, err := protocol.frontendID(); err != nil {
+			return protocol.respondCoreError(ctx, frame, err)
+		}
+		if err := decodeNoParams(request.Params); err != nil {
+			return protocol.respondCoreError(ctx, frame, err)
+		}
+		snapshot, err := protocol.core.Snapshot(ctx)
+		if err != nil {
+			return protocol.respondCoreError(ctx, frame, err)
+		}
+		release()
+		release = nil
+		return protocol.respondResult(ctx, frame, stashList(snapshot))
+	}
 	if isTerminalOperation(request.Operation) {
 		result, err := protocol.executeTerminal(ctx, request)
 		release()
@@ -419,10 +558,39 @@ func (protocol *Protocol) handleCommand(ctx context.Context, peer *streammux.Pee
 	return protocol.respondResult(ctx, frame, result)
 }
 
+func stashList(snapshot core.Snapshot) StashListResult {
+	panes := make(map[core.PaneID]core.Pane, len(snapshot.Panes))
+	for _, pane := range snapshot.Panes {
+		panes[pane.ID] = pane
+	}
+	windows := make(map[core.WindowID]core.Window, len(snapshot.Windows))
+	for _, window := range snapshot.Windows {
+		windows[window.ID] = window
+	}
+	result := StashListResult{
+		Panes:   make([]StashedPaneEntry, 0, len(snapshot.StashedPanes)),
+		Windows: make([]StashedWindowEntry, 0, len(snapshot.StashedWindows)),
+	}
+	for _, stashed := range snapshot.StashedPanes {
+		result.Panes = append(result.Panes, StashedPaneEntry{Stashed: stashed, Pane: panes[stashed.PaneID]})
+	}
+	for _, stashed := range snapshot.StashedWindows {
+		entry := StashedWindowEntry{Stashed: stashed, Window: windows[stashed.WindowID]}
+		for _, pane := range snapshot.Panes {
+			if pane.WindowID == stashed.WindowID {
+				entry.Panes = append(entry.Panes, pane)
+			}
+		}
+		result.Windows = append(result.Windows, entry)
+	}
+	return result
+}
+
 func isTerminalOperation(operation Operation) bool {
 	switch operation {
-	case OperationNewTerminal, OperationListTerminals, OperationRestartTerminal,
-		OperationKillTerminal, OperationDismissTerminal, OperationDaemonStatus, OperationDaemonStop:
+	case OperationNewTerminal, OperationListTerminals, OperationRestartTerminal, OperationRunTerminal,
+		OperationKillTerminal, OperationDismissTerminal, OperationDaemonStatus, OperationDaemonStop,
+		OperationClipboardRead, OperationClipboardWrite:
 		return true
 	default:
 		return false
@@ -454,6 +622,12 @@ func (protocol *Protocol) executeTerminal(ctx context.Context, request Request) 
 			return nil, err
 		}
 		return protocol.config.Terminal.RestartTerminal(ctx, params)
+	case OperationRunTerminal:
+		var params RunTerminalParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return protocol.config.Terminal.RunTerminal(ctx, params)
 	case OperationKillTerminal:
 		var params PaneParams
 		if err := decodeParams(request.Params, &params); err != nil {
@@ -477,6 +651,18 @@ func (protocol *Protocol) executeTerminal(ctx context.Context, request Request) 
 			return nil, err
 		}
 		return protocol.config.Terminal.DaemonStop(ctx, params)
+	case OperationClipboardRead:
+		var params ClipboardReadParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return protocol.config.Terminal.ClipboardRead(ctx, params)
+	case OperationClipboardWrite:
+		var params ClipboardWriteParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return protocol.config.Terminal.ClipboardWrite(ctx, params)
 	default:
 		return nil, fmt.Errorf("%w: unknown terminal operation", core.ErrInvalidArgument)
 	}
@@ -528,12 +714,36 @@ func commandFromRequest(request Request, frontendID core.FrontendID) (core.Comma
 			return nil, err
 		}
 		return core.CreateWorkspaceCommand{Name: params.Name}, nil
+	case OperationRenameWorkspace:
+		var params RenameWorkspaceParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return core.RenameWorkspaceCommand{WorkspaceID: params.WorkspaceID, Name: params.Name}, nil
+	case OperationDeleteWorkspace:
+		var params DeleteWorkspaceParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return core.DeleteWorkspaceCommand{WorkspaceID: params.WorkspaceID}, nil
 	case OperationCreateWindow:
 		var params CreateWindowParams
 		if err := decodeParams(request.Params, &params); err != nil {
 			return nil, err
 		}
 		return core.CreateWindowCommand{WorkspaceID: params.WorkspaceID, Name: params.Name}, nil
+	case OperationRenameWindow:
+		var params RenameWindowParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return core.RenameWindowCommand{WindowID: params.WindowID, Name: params.Name}, nil
+	case OperationDeleteWindow:
+		var params DeleteWindowParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return core.DeleteWindowCommand{WindowID: params.WindowID}, nil
 	case OperationCreatePane:
 		var params CreatePaneParams
 		if err := decodeParams(request.Params, &params); err != nil {
@@ -552,12 +762,57 @@ func commandFromRequest(request Request, frontendID core.FrontendID) (core.Comma
 			return nil, err
 		}
 		return core.MovePaneCommand{PaneID: params.PaneID, DestinationID: params.DestinationID, TargetPaneID: params.TargetPaneID, Direction: params.Direction}, nil
+	case OperationClosePane:
+		var params PaneParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return core.ClosePaneCommand{PaneID: params.PaneID}, nil
+	case OperationResizeSplit:
+		var params ResizeSplitParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return core.ResizeSplitCommand{SplitID: params.SplitID, Weights: params.Weights}, nil
+	case OperationStashPane:
+		var params PaneParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return core.StashPaneCommand{PaneID: params.PaneID}, nil
+	case OperationRestorePane:
+		var params RestorePaneParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return core.RestorePaneCommand{
+			FrontendID: frontendID, PaneID: params.PaneID, DestinationWindowID: params.DestinationWindowID,
+			TargetPaneID: params.TargetPaneID, Direction: params.Direction,
+		}, nil
+	case OperationStashWindow:
+		var params DeleteWindowParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return core.StashWindowCommand{WindowID: params.WindowID}, nil
+	case OperationRestoreWindow:
+		var params RestoreWindowParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return core.RestoreWindowCommand{FrontendID: frontendID, WindowID: params.WindowID, WorkspaceID: params.WorkspaceID}, nil
 	case OperationSetFocus:
 		var params SetFocusParams
 		if err := decodeParams(request.Params, &params); err != nil {
 			return nil, err
 		}
 		return core.SetFocusCommand{FrontendID: frontendID, PaneID: params.PaneID}, nil
+	case OperationSelectWindow:
+		var params SelectWindowParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		return core.SelectWindowCommand{FrontendID: frontendID, WindowID: params.WindowID}, nil
 	default:
 		return nil, fmt.Errorf("%w: unknown operation", core.ErrInvalidArgument)
 	}
@@ -651,6 +906,8 @@ func classifyError(err error) (ErrorCode, string) {
 	case errors.Is(err, core.ErrInvalidState), errors.Is(err, ErrNotSynchronized), errors.Is(err, ErrAlreadySynchronized),
 		errors.Is(err, pty.ErrSessionRunning), errors.Is(err, pty.ErrSessionLimit):
 		return CodeInvalidState, "invalid state"
+	case errors.Is(err, ErrPermissionDenied):
+		return CodePermissionDenied, "permission denied"
 	default:
 		return CodeInternal, "internal error"
 	}

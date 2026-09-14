@@ -13,6 +13,14 @@ func (c *Core) execute(command Command, frontends map[FrontendID]*frontend) (any
 		return c.createWorkspace(value)
 	case CreateWindowCommand:
 		return c.createWindow(value)
+	case RenameWorkspaceCommand:
+		return c.renameWorkspace(value)
+	case DeleteWorkspaceCommand:
+		return c.deleteWorkspace(value, frontends)
+	case RenameWindowCommand:
+		return c.renameWindow(value)
+	case DeleteWindowCommand:
+		return c.deleteWindow(value, frontends)
 	case CreatePaneCommand:
 		return c.createPane(value)
 	case SplitPaneCommand:
@@ -21,8 +29,20 @@ func (c *Core) execute(command Command, frontends map[FrontendID]*frontend) (any
 		return c.movePane(value, frontends)
 	case ClosePaneCommand:
 		return c.closePane(value, frontends)
+	case ResizeSplitCommand:
+		return c.resizeSplit(value)
+	case StashPaneCommand:
+		return c.stashPane(value, frontends)
+	case RestorePaneCommand:
+		return c.restorePane(value, frontends)
+	case StashWindowCommand:
+		return c.stashWindow(value, frontends)
+	case RestoreWindowCommand:
+		return c.restoreWindow(value, frontends)
 	case SetFocusCommand:
 		return c.setFocus(value, frontends)
+	case SelectWindowCommand:
+		return c.selectWindow(value, frontends)
 	case RecordTerminalExitCommand:
 		return c.recordTerminalExit(value)
 	case ForgetTerminalSessionCommand:
@@ -33,6 +53,8 @@ func (c *Core) execute(command Command, frontends map[FrontendID]*frontend) (any
 		return c.failTerminalStart(value)
 	case PrepareTerminalRestartCommand:
 		return c.prepareTerminalRestart(value)
+	case PrepareTerminalRunCommand:
+		return c.prepareTerminalRun(value)
 	case BeginTerminalStopCommand:
 		return c.beginTerminalStop(value)
 	case SetLabelCommand:
@@ -167,6 +189,32 @@ func (c *Core) prepareTerminalRestart(command PrepareTerminalRestartCommand) (an
 	return result, &event, nil
 }
 
+func (c *Core) prepareTerminalRun(command PrepareTerminalRunCommand) (any, *Event, error) {
+	pane, exists := c.state.panes[command.PaneID]
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: pane %d", ErrNotFound, command.PaneID)
+	}
+	if pane.Kind != PaneTerminal {
+		return nil, nil, fmt.Errorf("%w: pane %d is not a Terminal Pane", ErrInvalidState, pane.ID)
+	}
+	if pane.Terminal != nil {
+		switch pane.Terminal.State {
+		case TerminalPlaceholder, TerminalExited, TerminalFailed:
+		default:
+			return nil, nil, fmt.Errorf("%w: pane %d terminal cannot run", ErrInvalidState, pane.ID)
+		}
+	}
+	terminal := TerminalInstance{State: TerminalStarting, Launch: cloneLaunch(command.Launch)}
+	if !validTerminal(terminal) {
+		return nil, nil, fmt.Errorf("%w: invalid terminal launch", ErrInvalidArgument)
+	}
+	pane.Terminal = &terminal
+	c.state.panes[pane.ID] = pane
+	result := TerminalResult{Pane: clonePane(pane)}
+	event := Event{Kind: EventTerminalRunPrepared, Payload: TerminalEvent{Pane: clonePane(pane)}}
+	return result, &event, nil
+}
+
 func (c *Core) beginTerminalStop(command BeginTerminalStopCommand) (any, *Event, error) {
 	pane, exists := c.state.panes[command.PaneID]
 	if !exists {
@@ -284,10 +332,102 @@ func (c *Core) createWindow(command CreateWindowCommand) (any, *Event, error) {
 	return result, &event, nil
 }
 
+func (c *Core) renameWorkspace(command RenameWorkspaceCommand) (any, *Event, error) {
+	workspace, exists := c.state.workspaces[command.WorkspaceID]
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: workspace %d", ErrNotFound, command.WorkspaceID)
+	}
+	if strings.TrimSpace(command.Name) == "" {
+		return nil, nil, fmt.Errorf("%w: workspace name is empty", ErrInvalidArgument)
+	}
+	for id, other := range c.state.workspaces {
+		if id != workspace.ID && other.Name == command.Name {
+			return nil, nil, fmt.Errorf("%w: workspace name %q", ErrAlreadyExists, command.Name)
+		}
+	}
+	workspace.Name = command.Name
+	c.state.workspaces[workspace.ID] = workspace
+	result := WorkspaceResult{Workspace: cloneWorkspace(workspace)}
+	return result, &Event{Kind: EventWorkspaceRenamed, Payload: WorkspaceEvent{Workspace: cloneWorkspace(workspace)}}, nil
+}
+
+func (c *Core) deleteWorkspace(command DeleteWorkspaceCommand, frontends map[FrontendID]*frontend) (any, *Event, error) {
+	workspace, exists := c.state.workspaces[command.WorkspaceID]
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: workspace %d", ErrNotFound, command.WorkspaceID)
+	}
+	if len(workspace.WindowIDs) != 0 || len(c.state.workspaces) == 1 {
+		return nil, nil, fmt.Errorf("%w: workspace %d is not deletable", ErrInvalidState, workspace.ID)
+	}
+	delete(c.state.workspaces, workspace.ID)
+	c.state.workspaceOrder = removeWorkspaceID(c.state.workspaceOrder, workspace.ID)
+	removedLabels := c.state.removeTargetLabels(LabelWorkspace, uint64(workspace.ID))
+	for _, frontend := range frontends {
+		if frontend.state.WorkspaceID == workspace.ID {
+			frontend.state = c.initialFrontendState(frontend.state.ID)
+		}
+	}
+	result := DeleteWorkspaceResult{Workspace: cloneWorkspace(workspace), RemovedLabels: removedLabels}
+	return result, &Event{Kind: EventWorkspaceDeleted, Payload: WorkspaceDeletedEvent{
+		Workspace: cloneWorkspace(workspace), RemovedLabels: append([]Label(nil), removedLabels...),
+	}}, nil
+}
+
+func (c *Core) renameWindow(command RenameWindowCommand) (any, *Event, error) {
+	window, exists := c.state.windows[command.WindowID]
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: window %d", ErrNotFound, command.WindowID)
+	}
+	if strings.TrimSpace(command.Name) == "" {
+		return nil, nil, fmt.Errorf("%w: window name is empty", ErrInvalidArgument)
+	}
+	workspace := c.state.workspaces[window.WorkspaceID]
+	for _, id := range workspace.WindowIDs {
+		if id != window.ID && c.state.windows[id].Name == command.Name {
+			return nil, nil, fmt.Errorf("%w: window name %q", ErrAlreadyExists, command.Name)
+		}
+	}
+	window.Name = command.Name
+	c.state.windows[window.ID] = window
+	result := WindowResult{Window: cloneWindow(window)}
+	return result, &Event{Kind: EventWindowRenamed, Payload: WindowEvent{Window: cloneWindow(window)}}, nil
+}
+
+func (c *Core) deleteWindow(command DeleteWindowCommand, frontends map[FrontendID]*frontend) (any, *Event, error) {
+	window, exists := c.state.windows[command.WindowID]
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: window %d", ErrNotFound, command.WindowID)
+	}
+	if _, stashed := c.state.stashedWindows[window.ID]; stashed {
+		return nil, nil, fmt.Errorf("%w: window %d is stashed", ErrInvalidState, window.ID)
+	}
+	if window.Layout != nil {
+		return nil, nil, fmt.Errorf("%w: window %d is not empty", ErrInvalidState, window.ID)
+	}
+	workspace := c.state.workspaces[window.WorkspaceID]
+	workspace.WindowIDs = removeWindowID(workspace.WindowIDs, window.ID)
+	c.state.workspaces[workspace.ID] = workspace
+	delete(c.state.windows, window.ID)
+	c.state.windowOrder = removeWindowID(c.state.windowOrder, window.ID)
+	removedLabels := c.state.removeTargetLabels(LabelWindow, uint64(window.ID))
+	for _, frontend := range frontends {
+		if frontend.state.WindowID == window.ID {
+			frontend.state = c.initialFrontendState(frontend.state.ID)
+		}
+	}
+	result := DeleteWindowResult{Window: cloneWindow(window), Workspace: cloneWorkspace(workspace), RemovedLabels: removedLabels}
+	return result, &Event{Kind: EventWindowDeleted, Payload: WindowDeletedEvent{
+		Window: cloneWindow(window), Workspace: cloneWorkspace(workspace), RemovedLabels: append([]Label(nil), removedLabels...),
+	}}, nil
+}
+
 func (c *Core) createPane(command CreatePaneCommand) (any, *Event, error) {
 	window, exists := c.state.windows[command.WindowID]
 	if !exists {
 		return nil, nil, fmt.Errorf("%w: window %d", ErrNotFound, command.WindowID)
+	}
+	if _, stashed := c.state.stashedWindows[window.ID]; stashed {
+		return nil, nil, fmt.Errorf("%w: window %d is stashed", ErrInvalidState, window.ID)
 	}
 	if window.Layout != nil {
 		return nil, nil, fmt.Errorf("%w: window %d is not empty", ErrInvalidState, window.ID)
@@ -315,6 +455,12 @@ func (c *Core) splitPane(command SplitPaneCommand) (any, *Event, error) {
 	if !exists {
 		return nil, nil, fmt.Errorf("%w: pane %d", ErrNotFound, command.TargetPaneID)
 	}
+	if _, stashed := c.state.stashedPanes[target.ID]; stashed {
+		return nil, nil, fmt.Errorf("%w: pane %d is stashed", ErrInvalidState, target.ID)
+	}
+	if _, stashed := c.state.stashedWindows[target.WindowID]; stashed {
+		return nil, nil, fmt.Errorf("%w: pane %d belongs to a stashed window", ErrInvalidState, target.ID)
+	}
 	if !validDirection(command.Direction) {
 		return nil, nil, fmt.Errorf("%w: split direction %q", ErrInvalidArgument, command.Direction)
 	}
@@ -323,11 +469,15 @@ func (c *Core) splitPane(command SplitPaneCommand) (any, *Event, error) {
 	}
 	window := c.state.windows[target.WindowID]
 	layout := cloneLayout(*window.Layout)
+	splitID, err := c.state.splitIDForInsertion(layout, target.ID, command.Direction)
+	if err != nil {
+		return nil, nil, err
+	}
 	id, err := c.state.allocatePaneID()
 	if err != nil {
 		return nil, nil, err
 	}
-	if !insertSplit(&layout, target.ID, id, command.Direction) {
+	if !insertSplit(&layout, target.ID, id, command.Direction, splitID) {
 		return nil, nil, fmt.Errorf("%w: pane %d missing from layout", ErrInvalidState, target.ID)
 	}
 	pane := paneFromSpec(id, window.ID, command.Pane)
@@ -347,9 +497,18 @@ func (c *Core) movePane(command MovePaneCommand, frontends map[FrontendID]*front
 	if !exists {
 		return nil, nil, fmt.Errorf("%w: pane %d", ErrNotFound, command.PaneID)
 	}
+	if _, stashed := c.state.stashedPanes[pane.ID]; stashed {
+		return nil, nil, fmt.Errorf("%w: pane %d is stashed", ErrInvalidState, pane.ID)
+	}
+	if _, stashed := c.state.stashedWindows[pane.WindowID]; stashed {
+		return nil, nil, fmt.Errorf("%w: pane %d belongs to a stashed window", ErrInvalidState, pane.ID)
+	}
 	destination, exists := c.state.windows[command.DestinationID]
 	if !exists {
 		return nil, nil, fmt.Errorf("%w: window %d", ErrNotFound, command.DestinationID)
+	}
+	if _, stashed := c.state.stashedWindows[destination.ID]; stashed {
+		return nil, nil, fmt.Errorf("%w: destination window %d is stashed", ErrInvalidState, destination.ID)
 	}
 	if command.TargetPaneID == pane.ID {
 		return nil, nil, fmt.Errorf("%w: pane cannot target itself", ErrInvalidArgument)
@@ -377,7 +536,11 @@ func (c *Core) movePane(command MovePaneCommand, frontends map[FrontendID]*front
 		if !removed || layout == nil {
 			return nil, nil, fmt.Errorf("%w: cannot move the only pane within its window", ErrInvalidState)
 		}
-		if !insertSplit(layout, command.TargetPaneID, pane.ID, command.Direction) {
+		splitID, err := c.state.splitIDForInsertion(*layout, command.TargetPaneID, command.Direction)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !insertSplit(layout, command.TargetPaneID, pane.ID, command.Direction, splitID) {
 			return nil, nil, fmt.Errorf("%w: target pane %d missing from layout", ErrInvalidState, command.TargetPaneID)
 		}
 		source.Layout = layout
@@ -400,7 +563,11 @@ func (c *Core) movePane(command MovePaneCommand, frontends map[FrontendID]*front
 		destinationLayout = &leaf
 	} else {
 		layout := cloneLayout(*destination.Layout)
-		if !insertSplit(&layout, command.TargetPaneID, pane.ID, command.Direction) {
+		splitID, err := c.state.splitIDForInsertion(layout, command.TargetPaneID, command.Direction)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !insertSplit(&layout, command.TargetPaneID, pane.ID, command.Direction, splitID) {
 			return nil, nil, fmt.Errorf("%w: target pane %d missing from layout", ErrInvalidState, command.TargetPaneID)
 		}
 		destinationLayout = &layout
@@ -431,12 +598,16 @@ func (c *Core) closePane(command ClosePaneCommand, frontends map[FrontendID]*fro
 		return nil, nil, fmt.Errorf("%w: pane %d", ErrNotFound, command.PaneID)
 	}
 	window := c.state.windows[pane.WindowID]
-	layout, removed := removePaneFromLayout(window.Layout, pane.ID)
-	if !removed {
-		return nil, nil, fmt.Errorf("%w: pane %d missing from layout", ErrInvalidState, pane.ID)
+	if _, stashed := c.state.stashedPanes[pane.ID]; stashed {
+		delete(c.state.stashedPanes, pane.ID)
+	} else {
+		layout, removed := removePaneFromLayout(window.Layout, pane.ID)
+		if !removed {
+			return nil, nil, fmt.Errorf("%w: pane %d missing from layout", ErrInvalidState, pane.ID)
+		}
+		window.Layout = layout
+		c.state.windows[window.ID] = window
 	}
-	window.Layout = layout
-	c.state.windows[window.ID] = window
 	delete(c.state.panes, pane.ID)
 	removedLabels := make([]Label, 0)
 	for key, label := range c.state.labels {
@@ -459,6 +630,37 @@ func (c *Core) closePane(command ClosePaneCommand, frontends map[FrontendID]*fro
 	return result, &event, nil
 }
 
+func (c *Core) resizeSplit(command ResizeSplitCommand) (any, *Event, error) {
+	if command.SplitID == 0 || len(command.Weights) < 2 {
+		return nil, nil, fmt.Errorf("%w: invalid split resize", ErrInvalidArgument)
+	}
+	for _, weight := range command.Weights {
+		if weight == 0 {
+			return nil, nil, fmt.Errorf("%w: zero split weight", ErrInvalidArgument)
+		}
+	}
+	for _, windowID := range c.state.windowOrder {
+		window := c.state.windows[windowID]
+		if window.Layout == nil {
+			continue
+		}
+		layout := cloneLayout(*window.Layout)
+		split := splitByID(&layout, command.SplitID)
+		if split == nil {
+			continue
+		}
+		if len(split.Children) != len(command.Weights) {
+			return nil, nil, fmt.Errorf("%w: split weight count", ErrInvalidArgument)
+		}
+		split.Weights = append([]uint32(nil), command.Weights...)
+		window.Layout = &layout
+		c.state.windows[window.ID] = window
+		result := ResizeSplitResult{Window: cloneWindow(window)}
+		return result, &Event{Kind: EventSplitResized, Payload: WindowEvent{Window: cloneWindow(window)}}, nil
+	}
+	return nil, nil, fmt.Errorf("%w: split %d", ErrNotFound, command.SplitID)
+}
+
 func (c *Core) setFocus(command SetFocusCommand, frontends map[FrontendID]*frontend) (any, *Event, error) {
 	frontend, exists := frontends[command.FrontendID]
 	if !exists {
@@ -468,10 +670,37 @@ func (c *Core) setFocus(command SetFocusCommand, frontends map[FrontendID]*front
 	if !exists {
 		return nil, nil, fmt.Errorf("%w: pane %d", ErrNotFound, command.PaneID)
 	}
+	if _, stashed := c.state.stashedPanes[pane.ID]; stashed {
+		return nil, nil, fmt.Errorf("%w: pane %d is stashed", ErrInvalidState, pane.ID)
+	}
+	if _, stashed := c.state.stashedWindows[pane.WindowID]; stashed {
+		return nil, nil, fmt.Errorf("%w: pane %d belongs to a stashed window", ErrInvalidState, pane.ID)
+	}
 	window := c.state.windows[pane.WindowID]
 	frontend.state.WorkspaceID = window.WorkspaceID
 	frontend.state.WindowID = window.ID
 	frontend.state.PaneID = pane.ID
+	return SetFocusResult{Focus: frontend.state}, nil, nil
+}
+
+func (c *Core) selectWindow(command SelectWindowCommand, frontends map[FrontendID]*frontend) (any, *Event, error) {
+	frontend, exists := frontends[command.FrontendID]
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: frontend %d", ErrNotFound, command.FrontendID)
+	}
+	window, exists := c.state.windows[command.WindowID]
+	if !exists {
+		return nil, nil, fmt.Errorf("%w: window %d", ErrNotFound, command.WindowID)
+	}
+	if _, stashed := c.state.stashedWindows[window.ID]; stashed {
+		return nil, nil, fmt.Errorf("%w: window %d is stashed", ErrInvalidState, window.ID)
+	}
+	frontend.state.WorkspaceID = window.WorkspaceID
+	frontend.state.WindowID = window.ID
+	frontend.state.PaneID = 0
+	if window.Layout != nil {
+		frontend.state.PaneID = firstPane(*window.Layout)
+	}
 	return SetFocusResult{Focus: frontend.state}, nil, nil
 }
 
@@ -524,6 +753,90 @@ func (s *state) allocatePaneID() (PaneID, error) {
 	id := s.nextPaneID
 	s.nextPaneID++
 	return id, nil
+}
+
+func (s *state) allocateSplitID() (SplitID, error) {
+	if s.nextSplitID == 0 || uint64(s.nextSplitID) == math.MaxUint64 {
+		return 0, fmt.Errorf("%w: split ID exhausted", ErrInvalidState)
+	}
+	id := s.nextSplitID
+	s.nextSplitID++
+	return id, nil
+}
+
+func (s *state) splitIDForInsertion(layout LayoutNode, target PaneID, direction SplitDirection) (SplitID, error) {
+	required, found := insertionRequiresSplit(layout, target, direction)
+	if !found {
+		return 0, fmt.Errorf("%w: pane %d missing from layout", ErrInvalidState, target)
+	}
+	if !required {
+		return 0, nil
+	}
+	return s.allocateSplitID()
+}
+
+func insertionRequiresSplit(node LayoutNode, target PaneID, direction SplitDirection) (bool, bool) {
+	if node.Kind == LayoutPane {
+		return true, node.PaneID == target
+	}
+	for _, child := range node.Children {
+		if child.Kind == LayoutPane && child.PaneID == target && node.Direction == direction {
+			return false, true
+		}
+		if required, found := insertionRequiresSplit(child, target, direction); found {
+			return required, true
+		}
+	}
+	return false, false
+}
+
+func splitByID(node *LayoutNode, splitID SplitID) *LayoutNode {
+	if node.Kind == LayoutSplit && node.SplitID == splitID {
+		return node
+	}
+	for index := range node.Children {
+		if split := splitByID(&node.Children[index], splitID); split != nil {
+			return split
+		}
+	}
+	return nil
+}
+
+func (s *state) removeTargetLabels(kind LabelTargetKind, id uint64) []Label {
+	removed := make([]Label, 0)
+	for key, label := range s.labels {
+		if label.TargetKind == kind && label.TargetID == id {
+			removed = append(removed, label)
+			delete(s.labels, key)
+		}
+	}
+	sort.Slice(removed, func(left, right int) bool {
+		if removed[left].Source != removed[right].Source {
+			return removed[left].Source < removed[right].Source
+		}
+		return removed[left].Name < removed[right].Name
+	})
+	return removed
+}
+
+func removeWorkspaceID(ids []WorkspaceID, removed WorkspaceID) []WorkspaceID {
+	result := make([]WorkspaceID, 0, len(ids)-1)
+	for _, id := range ids {
+		if id != removed {
+			result = append(result, id)
+		}
+	}
+	return result
+}
+
+func removeWindowID(ids []WindowID, removed WindowID) []WindowID {
+	result := make([]WindowID, 0, len(ids)-1)
+	for _, id := range ids {
+		if id != removed {
+			result = append(result, id)
+		}
+	}
+	return result
 }
 
 func removePaneID(ids []PaneID, removed PaneID) []PaneID {

@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"time"
 
 	ariadneconfig "github.com/aruzen/ariadne/internal/config"
 	"github.com/aruzen/ariadne/internal/daemon"
@@ -54,6 +55,11 @@ func Run(arguments []string) error {
 		return err
 	}
 	configuration := daemon.DefaultConfig(*statePath)
+	configuration.ClosePaneOnSuccessfulExit = fileConfiguration.Terminal.SuccessfulExit == ariadneconfig.SuccessfulExitClose
+	configuration.Clipboard.ReadPolicy = fileConfiguration.Clipboard.Read
+	configuration.Clipboard.WritePolicy = fileConfiguration.Clipboard.Write
+	configuration.Clipboard.MaxTextBytes = fileConfiguration.Clipboard.MaxTextBytes
+	configuration.Clipboard.Timeout = time.Duration(fileConfiguration.Clipboard.CommandTimeoutMS) * time.Millisecond
 	fileConfiguration.ApplyManager(&configuration.Manager)
 	fileConfiguration.ApplyStream(&configuration.Stream)
 	fileConfiguration.ApplyPeer(&configuration.Peer)

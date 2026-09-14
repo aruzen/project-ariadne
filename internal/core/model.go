@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 type WorkspaceID uint64
 type WindowID uint64
 type PaneID uint64
+type SplitID uint64
 type FrontendID uint64
 
 // TerminalID is intentionally an alias. The PTY manager's StreamID is the
@@ -100,6 +102,7 @@ const (
 // positive integer ratios and have the same length as Children.
 type LayoutNode struct {
 	Kind      LayoutNodeKind `json:"kind"`
+	SplitID   SplitID        `json:"split_id,omitempty"`
 	PaneID    PaneID         `json:"pane_id,omitempty"`
 	Direction SplitDirection `json:"direction,omitempty"`
 	Children  []LayoutNode   `json:"children,omitempty"`
@@ -126,6 +129,28 @@ type Pane struct {
 	Title        string            `json:"title,omitempty"`
 	Presentation PanePresentation  `json:"presentation,omitempty"`
 	Terminal     *TerminalInstance `json:"terminal,omitempty"`
+}
+
+// StashedPane keeps a Pane alive while removing it from every Window layout.
+// The remaining fields are best-effort hints for restoring its old position.
+type StashedPane struct {
+	PaneID            PaneID         `json:"pane_id"`
+	OriginWorkspaceID WorkspaceID    `json:"origin_workspace_id"`
+	OriginWindowID    WindowID       `json:"origin_window_id"`
+	TargetPaneID      PaneID         `json:"target_pane_id,omitempty"`
+	Direction         SplitDirection `json:"direction,omitempty"`
+	Before            bool           `json:"before,omitempty"`
+	Weight            uint32         `json:"weight,omitempty"`
+	TargetWeight      uint32         `json:"target_weight,omitempty"`
+	OriginalSplitID   SplitID        `json:"original_split_id,omitempty"`
+}
+
+// StashedWindow keeps an entire Window and its layout alive but removes it
+// from normal Workspace navigation.
+type StashedWindow struct {
+	WindowID            WindowID    `json:"window_id"`
+	OriginWorkspaceID   WorkspaceID `json:"origin_workspace_id"`
+	OriginalWindowIndex int         `json:"original_window_index"`
 }
 
 type LabelTargetKind string
@@ -156,14 +181,17 @@ type labelKey struct {
 // Snapshot is an immutable point-in-time copy of persistent Core state.
 // Callers may mutate their copy without affecting Core.
 type Snapshot struct {
-	Revision        uint64      `json:"revision"`
-	NextWorkspaceID WorkspaceID `json:"next_workspace_id"`
-	NextWindowID    WindowID    `json:"next_window_id"`
-	NextPaneID      PaneID      `json:"next_pane_id"`
-	Workspaces      []Workspace `json:"workspaces"`
-	Windows         []Window    `json:"windows"`
-	Panes           []Pane      `json:"panes"`
-	Labels          []Label     `json:"labels,omitempty"`
+	Revision        uint64          `json:"revision"`
+	NextWorkspaceID WorkspaceID     `json:"next_workspace_id"`
+	NextWindowID    WindowID        `json:"next_window_id"`
+	NextPaneID      PaneID          `json:"next_pane_id"`
+	NextSplitID     SplitID         `json:"next_split_id"`
+	Workspaces      []Workspace     `json:"workspaces"`
+	Windows         []Window        `json:"windows"`
+	Panes           []Pane          `json:"panes"`
+	StashedPanes    []StashedPane   `json:"stashed_panes,omitempty"`
+	StashedWindows  []StashedWindow `json:"stashed_windows,omitempty"`
+	Labels          []Label         `json:"labels,omitempty"`
 }
 
 // DefaultSnapshot returns the initial default/main hierarchy without starting
@@ -204,9 +232,12 @@ type state struct {
 	nextWorkspaceID WorkspaceID
 	nextWindowID    WindowID
 	nextPaneID      PaneID
+	nextSplitID     SplitID
 	workspaces      map[WorkspaceID]Workspace
 	windows         map[WindowID]Window
 	panes           map[PaneID]Pane
+	stashedPanes    map[PaneID]StashedPane
+	stashedWindows  map[WindowID]StashedWindow
 	labels          map[labelKey]Label
 	workspaceOrder  []WorkspaceID
 	windowOrder     []WindowID
@@ -220,9 +251,12 @@ func defaultState() *state {
 		nextWorkspaceID: 2,
 		nextWindowID:    2,
 		nextPaneID:      1,
+		nextSplitID:     1,
 		workspaces:      map[WorkspaceID]Workspace{workspace.ID: workspace},
 		windows:         map[WindowID]Window{window.ID: window},
 		panes:           make(map[PaneID]Pane),
+		stashedPanes:    make(map[PaneID]StashedPane),
+		stashedWindows:  make(map[WindowID]StashedWindow),
 		labels:          make(map[labelKey]Label),
 		workspaceOrder:  []WorkspaceID{workspace.ID},
 		windowOrder:     []WindowID{window.ID},
@@ -235,9 +269,12 @@ func stateFromSnapshot(snapshot Snapshot) (*state, error) {
 		nextWorkspaceID: snapshot.NextWorkspaceID,
 		nextWindowID:    snapshot.NextWindowID,
 		nextPaneID:      snapshot.NextPaneID,
+		nextSplitID:     snapshot.NextSplitID,
 		workspaces:      make(map[WorkspaceID]Workspace, len(snapshot.Workspaces)),
 		windows:         make(map[WindowID]Window, len(snapshot.Windows)),
 		panes:           make(map[PaneID]Pane, len(snapshot.Panes)),
+		stashedPanes:    make(map[PaneID]StashedPane, len(snapshot.StashedPanes)),
+		stashedWindows:  make(map[WindowID]StashedWindow, len(snapshot.StashedWindows)),
 		labels:          make(map[labelKey]Label, len(snapshot.Labels)),
 	}
 	for _, workspace := range snapshot.Workspaces {
@@ -256,6 +293,26 @@ func stateFromSnapshot(snapshot Snapshot) (*state, error) {
 		s.workspaces[workspace.ID] = workspace
 		s.workspaceOrder = append(s.workspaceOrder, workspace.ID)
 	}
+	for _, stashed := range snapshot.StashedWindows {
+		if stashed.WindowID == 0 || stashed.OriginWorkspaceID == 0 || stashed.OriginalWindowIndex < 0 {
+			return nil, fmt.Errorf("%w: invalid stashed window", ErrInvalidState)
+		}
+		if _, exists := s.stashedWindows[stashed.WindowID]; exists {
+			return nil, fmt.Errorf("%w: duplicate stashed window %d", ErrInvalidState, stashed.WindowID)
+		}
+		s.stashedWindows[stashed.WindowID] = stashed
+	}
+	for _, stashed := range snapshot.StashedPanes {
+		if stashed.PaneID == 0 || stashed.TargetPaneID == stashed.PaneID || stashed.OriginWorkspaceID == 0 || stashed.OriginWindowID == 0 ||
+			(stashed.TargetPaneID == 0 && (stashed.Direction != "" || stashed.Before || stashed.Weight != 0 || stashed.TargetWeight != 0 || stashed.OriginalSplitID != 0)) ||
+			(stashed.TargetPaneID != 0 && (!validDirection(stashed.Direction) || stashed.Weight == 0 || stashed.TargetWeight == 0 || stashed.OriginalSplitID == 0)) {
+			return nil, fmt.Errorf("%w: invalid stashed pane", ErrInvalidState)
+		}
+		if _, exists := s.stashedPanes[stashed.PaneID]; exists {
+			return nil, fmt.Errorf("%w: duplicate stashed pane %d", ErrInvalidState, stashed.PaneID)
+		}
+		s.stashedPanes[stashed.PaneID] = stashed
+	}
 	for _, window := range snapshot.Windows {
 		window = cloneWindow(window)
 		if window.ID == 0 || window.Name == "" {
@@ -264,7 +321,8 @@ func stateFromSnapshot(snapshot Snapshot) (*state, error) {
 		if _, exists := s.windows[window.ID]; exists {
 			return nil, fmt.Errorf("%w: duplicate window ID %d", ErrInvalidState, window.ID)
 		}
-		if _, exists := s.workspaces[window.WorkspaceID]; !exists {
+		_, isStashed := s.stashedWindows[window.ID]
+		if _, exists := s.workspaces[window.WorkspaceID]; !exists && !isStashed {
 			return nil, fmt.Errorf("%w: window %d references workspace %d", ErrInvalidState, window.ID, window.WorkspaceID)
 		}
 		for _, other := range s.windows {
@@ -284,7 +342,8 @@ func stateFromSnapshot(snapshot Snapshot) (*state, error) {
 		if _, exists := s.panes[pane.ID]; exists {
 			return nil, fmt.Errorf("%w: duplicate pane ID %d", ErrInvalidState, pane.ID)
 		}
-		if _, exists := s.windows[pane.WindowID]; !exists {
+		_, isStashed := s.stashedPanes[pane.ID]
+		if _, exists := s.windows[pane.WindowID]; !exists && !isStashed {
 			return nil, fmt.Errorf("%w: pane %d references window %d", ErrInvalidState, pane.ID, pane.WindowID)
 		}
 		if pane.Terminal != nil && pane.Terminal.ID != nil {
@@ -295,6 +354,16 @@ func stateFromSnapshot(snapshot Snapshot) (*state, error) {
 		}
 		s.panes[pane.ID] = pane
 		s.paneOrder = append(s.paneOrder, pane.ID)
+	}
+	for paneID := range s.stashedPanes {
+		if _, exists := s.panes[paneID]; !exists {
+			return nil, fmt.Errorf("%w: stashed pane %d does not exist", ErrInvalidState, paneID)
+		}
+	}
+	for windowID := range s.stashedWindows {
+		if _, exists := s.windows[windowID]; !exists {
+			return nil, fmt.Errorf("%w: stashed window %d does not exist", ErrInvalidState, windowID)
+		}
 	}
 	for _, label := range snapshot.Labels {
 		if !validLabel(label) || !s.labelTargetExists(label.TargetKind, label.TargetID) {
@@ -309,10 +378,10 @@ func stateFromSnapshot(snapshot Snapshot) (*state, error) {
 	if err := s.validateHierarchy(); err != nil {
 		return nil, err
 	}
-	if s.nextWorkspaceID == 0 || s.nextWindowID == 0 || s.nextPaneID == 0 ||
+	if s.nextWorkspaceID == 0 || s.nextWindowID == 0 || s.nextPaneID == 0 || s.nextSplitID == 0 ||
 		s.nextWorkspaceID <= WorkspaceID(maxKey(s.workspaces)) ||
 		s.nextWindowID <= WindowID(maxKey(s.windows)) ||
-		s.nextPaneID <= PaneID(maxKey(s.panes)) {
+		s.nextPaneID <= PaneID(maxKey(s.panes)) || s.nextSplitID <= maxSplitID(s.windows) || s.nextSplitID <= maxStashedSplitID(s.stashedPanes) {
 		return nil, fmt.Errorf("%w: next ID does not exceed allocated IDs", ErrInvalidState)
 	}
 	return s, nil
@@ -343,17 +412,22 @@ func (s *state) validateHierarchy() error {
 			seenWindows[windowID] = struct{}{}
 		}
 	}
-	if len(seenWindows) != len(s.windows) {
-		return fmt.Errorf("%w: unreferenced window", ErrInvalidState)
+	for windowID := range s.windows {
+		_, referenced := seenWindows[windowID]
+		_, stashed := s.stashedWindows[windowID]
+		if referenced == stashed {
+			return fmt.Errorf("%w: window %d must be either visible or stashed", ErrInvalidState, windowID)
+		}
 	}
 
 	seenPanes := make(map[PaneID]struct{}, len(s.panes))
+	seenSplits := make(map[SplitID]struct{})
 	for _, windowID := range s.windowOrder {
 		window := s.windows[windowID]
 		if window.Layout == nil {
 			continue
 		}
-		if err := validateLayout(*window.Layout, func(paneID PaneID) error {
+		if err := validateLayout(*window.Layout, seenSplits, func(paneID PaneID) error {
 			pane, exists := s.panes[paneID]
 			if !exists || pane.WindowID != window.ID {
 				return fmt.Errorf("%w: invalid window/pane relationship", ErrInvalidState)
@@ -367,28 +441,42 @@ func (s *state) validateHierarchy() error {
 			return err
 		}
 	}
-	if len(seenPanes) != len(s.panes) {
-		return fmt.Errorf("%w: unreferenced pane", ErrInvalidState)
+	for paneID := range s.panes {
+		_, referenced := seenPanes[paneID]
+		_, stashed := s.stashedPanes[paneID]
+		if referenced == stashed {
+			return fmt.Errorf("%w: pane %d must be either visible or stashed", ErrInvalidState, paneID)
+		}
+		if stashed {
+			pane := s.panes[paneID]
+			if _, windowStashed := s.stashedWindows[pane.WindowID]; windowStashed {
+				return fmt.Errorf("%w: pane %d and its window are both stashed", ErrInvalidState, paneID)
+			}
+		}
 	}
 	return nil
 }
 
-func validateLayout(node LayoutNode, visit func(PaneID) error) error {
+func validateLayout(node LayoutNode, seenSplits map[SplitID]struct{}, visit func(PaneID) error) error {
 	switch node.Kind {
 	case LayoutPane:
-		if node.PaneID == 0 || node.Direction != "" || len(node.Children) != 0 || len(node.Weights) != 0 {
+		if node.SplitID != 0 || node.PaneID == 0 || node.Direction != "" || len(node.Children) != 0 || len(node.Weights) != 0 {
 			return fmt.Errorf("%w: invalid pane layout node", ErrInvalidState)
 		}
 		return visit(node.PaneID)
 	case LayoutSplit:
-		if !validDirection(node.Direction) || node.PaneID != 0 || len(node.Children) < 2 || len(node.Children) != len(node.Weights) {
+		if node.SplitID == 0 || !validDirection(node.Direction) || node.PaneID != 0 || len(node.Children) < 2 || len(node.Children) != len(node.Weights) {
 			return fmt.Errorf("%w: invalid split layout node", ErrInvalidState)
 		}
+		if _, exists := seenSplits[node.SplitID]; exists {
+			return fmt.Errorf("%w: duplicate split ID %d", ErrInvalidState, node.SplitID)
+		}
+		seenSplits[node.SplitID] = struct{}{}
 		for index, child := range node.Children {
 			if node.Weights[index] == 0 {
 				return fmt.Errorf("%w: zero split weight", ErrInvalidState)
 			}
-			if err := validateLayout(child, visit); err != nil {
+			if err := validateLayout(child, seenSplits, visit); err != nil {
 				return err
 			}
 		}
@@ -404,9 +492,12 @@ func (s *state) snapshot() Snapshot {
 		NextWorkspaceID: s.nextWorkspaceID,
 		NextWindowID:    s.nextWindowID,
 		NextPaneID:      s.nextPaneID,
+		NextSplitID:     s.nextSplitID,
 		Workspaces:      make([]Workspace, 0, len(s.workspaces)),
 		Windows:         make([]Window, 0, len(s.windows)),
 		Panes:           make([]Pane, 0, len(s.panes)),
+		StashedPanes:    make([]StashedPane, 0, len(s.stashedPanes)),
+		StashedWindows:  make([]StashedWindow, 0, len(s.stashedWindows)),
 		Labels:          make([]Label, 0, len(s.labels)),
 	}
 	for _, id := range s.workspaceOrder {
@@ -417,6 +508,16 @@ func (s *state) snapshot() Snapshot {
 	}
 	for _, id := range s.paneOrder {
 		snapshot.Panes = append(snapshot.Panes, clonePane(s.panes[id]))
+	}
+	for _, id := range s.paneOrder {
+		if stashed, exists := s.stashedPanes[id]; exists {
+			snapshot.StashedPanes = append(snapshot.StashedPanes, stashed)
+		}
+	}
+	for _, id := range s.windowOrder {
+		if stashed, exists := s.stashedWindows[id]; exists {
+			snapshot.StashedWindows = append(snapshot.StashedWindows, stashed)
+		}
 	}
 	for _, label := range s.labels {
 		snapshot.Labels = append(snapshot.Labels, label)
@@ -435,6 +536,35 @@ func (s *state) snapshot() Snapshot {
 		return first.Name < second.Name
 	})
 	return snapshot
+}
+
+func maxSplitID(windows map[WindowID]Window) SplitID {
+	maximum := SplitID(0)
+	var visit func(LayoutNode)
+	visit = func(node LayoutNode) {
+		if node.SplitID > maximum {
+			maximum = node.SplitID
+		}
+		for _, child := range node.Children {
+			visit(child)
+		}
+	}
+	for _, window := range windows {
+		if window.Layout != nil {
+			visit(*window.Layout)
+		}
+	}
+	return maximum
+}
+
+func maxStashedSplitID(stashed map[PaneID]StashedPane) SplitID {
+	maximum := SplitID(0)
+	for _, pane := range stashed {
+		if pane.OriginalSplitID > maximum {
+			maximum = pane.OriginalSplitID
+		}
+	}
+	return maximum
 }
 
 func keyForLabel(label Label) labelKey {
@@ -487,7 +617,7 @@ func clonePane(pane Pane) Pane {
 }
 
 func cloneTerminal(terminal TerminalInstance) TerminalInstance {
-	terminal.Launch.Argv = append([]string(nil), terminal.Launch.Argv...)
+	terminal.Launch = cloneLaunch(terminal.Launch)
 	if terminal.ID != nil {
 		terminalID := *terminal.ID
 		terminal.ID = &terminalID
@@ -497,6 +627,11 @@ func cloneTerminal(terminal TerminalInstance) TerminalInstance {
 		terminal.Exit = &exit
 	}
 	return terminal
+}
+
+func cloneLaunch(launch LaunchSpec) LaunchSpec {
+	launch.Argv = append([]string(nil), launch.Argv...)
+	return launch
 }
 
 func cloneLayout(node LayoutNode) LayoutNode {
@@ -584,13 +719,14 @@ func paneLeaf(id PaneID) LayoutNode {
 	return LayoutNode{Kind: LayoutPane, PaneID: id}
 }
 
-func insertSplit(node *LayoutNode, target PaneID, inserted PaneID, direction SplitDirection) bool {
+func insertSplit(node *LayoutNode, target PaneID, inserted PaneID, direction SplitDirection, splitID SplitID) bool {
 	if node.Kind == LayoutPane {
 		if node.PaneID != target {
 			return false
 		}
 		*node = LayoutNode{
 			Kind:      LayoutSplit,
+			SplitID:   splitID,
 			Direction: direction,
 			Children:  []LayoutNode{paneLeaf(target), paneLeaf(inserted)},
 			Weights:   []uint32{1, 1},
@@ -600,20 +736,44 @@ func insertSplit(node *LayoutNode, target PaneID, inserted PaneID, direction Spl
 	for index := range node.Children {
 		child := &node.Children[index]
 		if child.Kind == LayoutPane && child.PaneID == target && node.Direction == direction {
+			weights := splitWeightsForInsertion(node.Weights, index)
 			node.Children = append(node.Children, LayoutNode{})
 			copy(node.Children[index+2:], node.Children[index+1:])
 			node.Children[index+1] = paneLeaf(inserted)
-			node.Weights = make([]uint32, len(node.Children))
-			for weightIndex := range node.Weights {
-				node.Weights[weightIndex] = 1
-			}
+			node.Weights = weights
 			return true
 		}
-		if insertSplit(child, target, inserted, direction) {
+		if insertSplit(child, target, inserted, direction, splitID) {
 			return true
 		}
 	}
 	return false
+}
+
+func splitWeightsForInsertion(weights []uint32, index int) []uint32 {
+	normalized := append([]uint32(nil), weights...)
+	for {
+		canDouble := true
+		for _, weight := range normalized {
+			if weight > math.MaxUint32/2 {
+				canDouble = false
+				break
+			}
+		}
+		if canDouble {
+			break
+		}
+		for position, weight := range normalized {
+			normalized[position] = max(1, (weight+1)/2)
+		}
+	}
+	result := make([]uint32, len(normalized)+1)
+	for position, weight := range normalized {
+		result[position] = weight * 2
+	}
+	copy(result[index+2:], result[index+1:])
+	result[index], result[index+1] = normalized[index], normalized[index]
+	return result
 }
 
 func removePaneFromLayout(node *LayoutNode, paneID PaneID) (*LayoutNode, bool) {
@@ -626,6 +786,7 @@ func removePaneFromLayout(node *LayoutNode, paneID PaneID) (*LayoutNode, bool) {
 	}
 
 	children := make([]LayoutNode, 0, len(node.Children))
+	weights := make([]uint32, 0, len(node.Weights))
 	removed := false
 	for index := range node.Children {
 		child, childRemoved := removePaneFromLayout(&node.Children[index], paneID)
@@ -634,6 +795,7 @@ func removePaneFromLayout(node *LayoutNode, paneID PaneID) (*LayoutNode, bool) {
 		}
 		if child != nil {
 			children = append(children, *child)
+			weights = append(weights, node.Weights[index])
 		}
 	}
 	if !removed {
@@ -647,9 +809,6 @@ func removePaneFromLayout(node *LayoutNode, paneID PaneID) (*LayoutNode, bool) {
 		child := cloneLayout(children[0])
 		return &child, true
 	}
-	result := LayoutNode{Kind: LayoutSplit, Direction: node.Direction, Children: children, Weights: make([]uint32, len(children))}
-	for index := range result.Weights {
-		result.Weights[index] = 1
-	}
+	result := LayoutNode{Kind: LayoutSplit, SplitID: node.SplitID, Direction: node.Direction, Children: children, Weights: weights}
 	return &result, true
 }

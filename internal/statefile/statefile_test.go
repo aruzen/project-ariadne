@@ -159,12 +159,53 @@ func TestEncodeDecodeStripsRuntimeStateAndRestoresPlaceholder(t *testing.T) {
 	}
 }
 
+func TestEncodeDecodePreservesStashAndMakesRunningTerminalPlaceholder(t *testing.T) {
+	engine, err := core.New(core.Config{EventQueueCapacity: 8})
+	if err != nil {
+		t.Fatalf("core.New: %v", err)
+	}
+	defer engine.Close()
+	id := streammux.StreamID(91)
+	value, err := engine.Execute(context.Background(), core.CreatePaneCommand{
+		WindowID: 1,
+		Pane: core.PaneSpec{Kind: core.PaneTerminal, Terminal: &core.TerminalInstance{
+			ID: &id, State: core.TerminalRunning, Launch: core.LaunchSpec{Argv: []string{"sh"}, CWD: "/tmp"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+	pane := value.(core.CreatePaneResult).Pane
+	if _, err := engine.Execute(context.Background(), core.StashPaneCommand{PaneID: pane.ID}); err != nil {
+		t.Fatalf("StashPane: %v", err)
+	}
+	original, err := engine.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	data, err := Encode(original)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	restored, err := Decode(data, DefaultMaxBytes)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(restored.StashedPanes) != 1 || restored.StashedPanes[0].PaneID != pane.ID {
+		t.Fatalf("stash not restored: %+v", restored.StashedPanes)
+	}
+	terminal := restored.Panes[0].Terminal
+	if terminal == nil || terminal.State != core.TerminalPlaceholder || terminal.ID != nil || terminal.HistoryAvailable {
+		t.Fatalf("stashed running terminal = %+v", terminal)
+	}
+}
+
 func TestDecodeRejectsUnknownFieldsTrailingDataAndOversize(t *testing.T) {
 	valid, err := Encode(core.DefaultSnapshot())
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	unknown := strings.Replace(string(valid), "\"version\": 1", "\"version\": 1, \"unknown\": true", 1)
+	unknown := strings.Replace(string(valid), "\"version\": 2", "\"version\": 2, \"unknown\": true", 1)
 	if _, err := Decode([]byte(unknown), DefaultMaxBytes); !errors.Is(err, ErrInvalidData) {
 		t.Fatalf("unknown field error = %v", err)
 	}
@@ -173,6 +214,35 @@ func TestDecodeRejectsUnknownFieldsTrailingDataAndOversize(t *testing.T) {
 	}
 	if _, err := Decode(valid, int64(len(valid)-1)); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("oversize error = %v", err)
+	}
+}
+
+func TestDecodeMigratesVersionOneSplitIDs(t *testing.T) {
+	data := []byte(`{
+  "version": 1,
+  "state": {
+    "next_workspace_id": 2,
+    "next_window_id": 2,
+    "next_pane_id": 3,
+    "workspaces": [{"id": 1, "name": "default", "window_ids": [1]}],
+    "windows": [{
+      "id": 1, "workspace_id": 1, "name": "main",
+      "layout": {"kind": "split", "direction": "horizontal", "children": [
+        {"kind": "pane", "pane_id": 1}, {"kind": "pane", "pane_id": 2}
+      ], "weights": [1, 1]}
+    }],
+    "panes": [
+      {"id": 1, "window_id": 1, "kind": "tool"},
+      {"id": 2, "window_id": 1, "kind": "tool"}
+    ]
+  }
+}`)
+	snapshot, err := Decode(data, DefaultMaxBytes)
+	if err != nil {
+		t.Fatalf("Decode version 1: %v", err)
+	}
+	if snapshot.Windows[0].Layout.SplitID != 1 || snapshot.NextSplitID != 2 {
+		t.Fatalf("migrated split state = %+v, next=%d", snapshot.Windows[0].Layout, snapshot.NextSplitID)
 	}
 }
 

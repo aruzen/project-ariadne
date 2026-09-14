@@ -40,6 +40,11 @@ func TestParseIsStrict(t *testing.T) {
 		{name: "blank detach", data: "detach_key = \"   \"\n"},
 		{name: "blank shell", data: "shell = \"   \"\n"},
 		{name: "unknown TUI frame", data: "[tui]\npane_frame = \"unknown\"\n"},
+		{name: "unknown successful exit policy", data: "[terminal]\nsuccessful_exit = \"unknown\"\n"},
+		{name: "unknown clipboard read policy", data: "[clipboard]\nread = \"unknown\"\n"},
+		{name: "unknown clipboard write policy", data: "[clipboard]\nwrite = \"unknown\"\n"},
+		{name: "zero clipboard bytes", data: "[clipboard]\nmax_text_bytes = 0\n"},
+		{name: "zero clipboard timeout", data: "[clipboard]\ncommand_timeout_ms = 0\n"},
 		{name: "negative history", data: "[terminal]\nhistory_bytes = -1\n"},
 		{name: "partial history disable", data: "[terminal]\nhistory_bytes = 0\n"},
 		{name: "history exceeds total", data: "[terminal]\nhistory_bytes = 1024\nmax_total_history_bytes = 512\n"},
@@ -53,6 +58,27 @@ func TestParseIsStrict(t *testing.T) {
 				t.Fatalf("Parse error = %v", err)
 			}
 		})
+	}
+}
+
+func TestParseSuccessfulExitPolicy(t *testing.T) {
+	configuration, err := Parse([]byte("[terminal]\nsuccessful_exit = \"close\"\n"))
+	if err != nil {
+		t.Fatalf("Parse successful exit policy: %v", err)
+	}
+	if configuration.Terminal.SuccessfulExit != SuccessfulExitClose {
+		t.Fatalf("SuccessfulExit = %q", configuration.Terminal.SuccessfulExit)
+	}
+}
+
+func TestParseClipboardOptions(t *testing.T) {
+	configuration, err := Parse([]byte("[clipboard]\nread = \"deny\"\nwrite = \"allow\"\nmax_text_bytes = 4096\ncommand_timeout_ms = 75\n"))
+	if err != nil {
+		t.Fatalf("Parse clipboard options: %v", err)
+	}
+	if configuration.Clipboard.Read != ClipboardDeny || configuration.Clipboard.Write != ClipboardAllow ||
+		configuration.Clipboard.MaxTextBytes != 4096 || configuration.Clipboard.CommandTimeoutMS != 75 {
+		t.Fatalf("Clipboard = %+v", configuration.Clipboard)
 	}
 }
 

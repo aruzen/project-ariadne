@@ -47,6 +47,8 @@ type Server struct {
 	closeOnce         sync.Once
 	commandGate       sync.RWMutex
 	terminalMu        sync.Mutex
+	clipboardMu       sync.Mutex
+	clipboardText     []byte
 	stopAfterResponse atomic.Bool
 	connectionsWG     sync.WaitGroup
 	workersWG         sync.WaitGroup
@@ -329,7 +331,7 @@ func (server *Server) handleManagerEvent(event pty.Event, pendingRemoval map[str
 		if event.Session.Exit == nil {
 			return nil
 		}
-		if terminalExitRemovesPane(*event.Session.Exit) {
+		if terminalExitRemovesPane(*event.Session.Exit, server.config.ClosePaneOnSuccessfulExit) {
 			snapshot, err := server.core.Snapshot(server.ctx)
 			if err == nil {
 				if pane, exists := snapshot.PaneByTerminalID(event.Session.ID); exists {
@@ -353,7 +355,7 @@ func (server *Server) handleManagerEvent(event pty.Event, pendingRemoval map[str
 		if err != nil && !errors.Is(err, core.ErrNotFound) && !errors.Is(err, context.Canceled) {
 			return err
 		}
-		if err == nil {
+		if err == nil && terminalExitNeedsErrorLabel(exit) {
 			if err := server.setTerminalErrorLabel(server.ctx, result.(core.TerminalResult).Pane); err != nil {
 				return err
 			}
@@ -387,8 +389,13 @@ func (server *Server) guardCommand() (func(), error) {
 	return server.commandGate.RUnlock, nil
 }
 
-func terminalExitRemovesPane(status pty.ExitStatus) bool {
-	return status.Reason == pty.ExitReasonKilled || (status.Reason == pty.ExitReasonExited && status.Code == 0)
+func terminalExitRemovesPane(status pty.ExitStatus, closeSuccessfulExit bool) bool {
+	return status.Reason == pty.ExitReasonKilled ||
+		(closeSuccessfulExit && status.Reason == pty.ExitReasonExited && status.Code == 0)
+}
+
+func terminalExitNeedsErrorLabel(exit core.TerminalExit) bool {
+	return exit.Kind != core.TerminalExitProcess || exit.Code != 0
 }
 
 func terminalExit(status pty.ExitStatus) (core.TerminalState, core.TerminalExit) {

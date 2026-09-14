@@ -61,8 +61,34 @@ func TestWindowsCLIEndToEnd(t *testing.T) {
 	instance := newWindowsE2ERuntime(t)
 	instance.testConcurrentAutoStart(t)
 	instance.testLifecycle(t)
+	instance.testStashRestore(t)
 	instance.testDaemonRestart(t)
 	instance.testOpenDetachReattachResize(t)
+}
+
+func (runtime *windowsE2ERuntime) testStashRestore(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	output, err := runtime.run(ctx, "new", "--", "cmd.exe", "/d", "/s", "/c", "ping -n 31 127.0.0.1 >NUL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paneID, _ := windowsParseTerminalResult(t, output, "created")
+	if _, err := runtime.run(ctx, "stash", "pane", fmt.Sprint(paneID)); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := runtime.run(ctx, "stash", "list")
+	if err != nil || !strings.Contains(listed, "pane") || !strings.Contains(listed, fmt.Sprint(paneID)) || !strings.Contains(listed, "running") {
+		t.Fatalf("stash list = %q, %v", listed, err)
+	}
+	if _, err := runtime.run(ctx, "restore", "pane", fmt.Sprint(paneID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.run(ctx, "kill", fmt.Sprint(paneID)); err != nil {
+		t.Fatal(err)
+	}
+	runtime.waitForEntries(t, ctx, func(result windowsListResult) bool { return len(result.Entries) == 0 })
 }
 
 func newWindowsE2ERuntime(t *testing.T) *windowsE2ERuntime {
@@ -269,6 +295,13 @@ func (runtime *windowsE2ERuntime) testOpenDetachReattachResize(t *testing.T) {
 		t.Fatalf("write shell exit: %v", err)
 	}
 	attached.wait(t, 15*time.Second)
+	runtime.waitForEntries(t, ctx, func(result windowsListResult) bool {
+		return len(result.Entries) == 1 && result.Entries[0].Pane.ID != 0 && result.Entries[0].Pane.Terminal != nil &&
+			result.Entries[0].Pane.Terminal.State == "exited"
+	})
+	if _, err := runtime.run(ctx, "dismiss", fmt.Sprint(result.Entries[0].Pane.ID)); err != nil {
+		t.Fatal(err)
+	}
 	runtime.waitForEntries(t, ctx, func(result windowsListResult) bool { return len(result.Entries) == 0 })
 }
 

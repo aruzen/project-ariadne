@@ -17,9 +17,28 @@ import (
 )
 
 const (
-	DefaultDetachKey    = "ctrl-a d"
-	DefaultMaxBytes     = 1 << 20
-	DefaultTUIFrameMode = TUIFrameFull
+	DefaultDetachKey            = "ctrl-a d"
+	DefaultMaxBytes             = 1 << 20
+	DefaultTUIFrameMode         = TUIFrameFull
+	DefaultSuccessfulExitPolicy = SuccessfulExitRetain
+	DefaultClipboardPolicy      = ClipboardAsk
+	DefaultClipboardMaxBytes    = 1 << 20
+	DefaultClipboardTimeoutMS   = 2000
+)
+
+type ClipboardPolicy string
+
+const (
+	ClipboardDeny  ClipboardPolicy = "deny"
+	ClipboardAsk   ClipboardPolicy = "ask"
+	ClipboardAllow ClipboardPolicy = "allow"
+)
+
+type SuccessfulExitPolicy string
+
+const (
+	SuccessfulExitRetain SuccessfulExitPolicy = "retain"
+	SuccessfulExitClose  SuccessfulExitPolicy = "close"
 )
 
 type TUIFrameMode string
@@ -39,11 +58,19 @@ var (
 // Config is loaded at process startup. An empty Shell selects the runtime
 // $SHELL and /bin/sh fallback chain.
 type Config struct {
-	Shell     string          `toml:"shell"`
-	DetachKey string          `toml:"detach_key"`
-	TUI       TUIOptions      `toml:"tui"`
-	Terminal  TerminalLimits  `toml:"terminal"`
-	Transport TransportLimits `toml:"transport"`
+	Shell     string           `toml:"shell"`
+	DetachKey string           `toml:"detach_key"`
+	TUI       TUIOptions       `toml:"tui"`
+	Terminal  TerminalLimits   `toml:"terminal"`
+	Clipboard ClipboardOptions `toml:"clipboard"`
+	Transport TransportLimits  `toml:"transport"`
+}
+
+type ClipboardOptions struct {
+	Read             ClipboardPolicy `toml:"read"`
+	Write            ClipboardPolicy `toml:"write"`
+	MaxTextBytes     int             `toml:"max_text_bytes"`
+	CommandTimeoutMS int             `toml:"command_timeout_ms"`
 }
 
 // TUIOptions controls local presentation and is not sent to the daemon.
@@ -53,11 +80,12 @@ type TUIOptions struct {
 
 // TerminalLimits bounds PTY output retained or queued by the daemon.
 type TerminalLimits struct {
-	HistoryBytes         int   `toml:"history_bytes"`
-	MaxTotalHistoryBytes int64 `toml:"max_total_history_bytes"`
-	ReadBufferBytes      int   `toml:"read_buffer_bytes"`
-	AttachmentQueueBytes int   `toml:"attachment_queue_bytes"`
-	ObserverQueueBytes   int   `toml:"observer_queue_bytes"`
+	SuccessfulExit       SuccessfulExitPolicy `toml:"successful_exit"`
+	HistoryBytes         int                  `toml:"history_bytes"`
+	MaxTotalHistoryBytes int64                `toml:"max_total_history_bytes"`
+	ReadBufferBytes      int                  `toml:"read_buffer_bytes"`
+	AttachmentQueueBytes int                  `toml:"attachment_queue_bytes"`
+	ObserverQueueBytes   int                  `toml:"observer_queue_bytes"`
 }
 
 // TransportLimits bounds streammux frames and in-memory queues. Queue byte
@@ -79,9 +107,14 @@ func Default() Config {
 		DetachKey: DefaultDetachKey,
 		TUI:       TUIOptions{PaneFrame: DefaultTUIFrameMode},
 		Terminal: TerminalLimits{
-			HistoryBytes: manager.HistoryBytes, MaxTotalHistoryBytes: manager.MaxTotalHistoryBytes,
+			SuccessfulExit: DefaultSuccessfulExitPolicy,
+			HistoryBytes:   manager.HistoryBytes, MaxTotalHistoryBytes: manager.MaxTotalHistoryBytes,
 			ReadBufferBytes: manager.ReadBufferBytes, AttachmentQueueBytes: manager.AttachmentQueueBytes,
 			ObserverQueueBytes: manager.ObserverQueueBytes,
+		},
+		Clipboard: ClipboardOptions{
+			Read: DefaultClipboardPolicy, Write: DefaultClipboardPolicy,
+			MaxTextBytes: DefaultClipboardMaxBytes, CommandTimeoutMS: DefaultClipboardTimeoutMS,
 		},
 		Transport: TransportLimits{
 			MaxFrameBytes: stream.MaxFrameBytes, WriteQueueFrames: stream.WriteQueue,
@@ -177,6 +210,11 @@ func (configuration Config) validate() error {
 		return fmt.Errorf("%w: tui.pane_frame must be full, split, or none", ErrInvalid)
 	}
 	terminal := configuration.Terminal
+	switch terminal.SuccessfulExit {
+	case SuccessfulExitRetain, SuccessfulExitClose:
+	default:
+		return fmt.Errorf("%w: terminal.successful_exit must be retain or close", ErrInvalid)
+	}
 	if terminal.HistoryBytes < 0 || terminal.MaxTotalHistoryBytes < 0 {
 		return fmt.Errorf("%w: terminal history limits must not be negative", ErrInvalid)
 	}
@@ -188,6 +226,13 @@ func (configuration Config) validate() error {
 	}
 	if terminal.ReadBufferBytes <= 0 || terminal.AttachmentQueueBytes <= 0 || terminal.ObserverQueueBytes <= 0 {
 		return fmt.Errorf("%w: terminal buffer limits must be positive", ErrInvalid)
+	}
+	clipboard := configuration.Clipboard
+	if !validClipboardPolicy(clipboard.Read) || !validClipboardPolicy(clipboard.Write) {
+		return fmt.Errorf("%w: clipboard policy must be deny, ask, or allow", ErrInvalid)
+	}
+	if clipboard.MaxTextBytes <= 0 || clipboard.CommandTimeoutMS <= 0 {
+		return fmt.Errorf("%w: clipboard limits must be positive", ErrInvalid)
 	}
 	transport := configuration.Transport
 	if transport.MaxFrameBytes <= 0 || uint64(transport.MaxFrameBytes) > math.MaxUint32 {
@@ -207,4 +252,13 @@ func (configuration Config) validate() error {
 		return fmt.Errorf("%w: transport.per_stream_queue_frames exceeds transport.outbound_queue_frames", ErrInvalid)
 	}
 	return nil
+}
+
+func validClipboardPolicy(policy ClipboardPolicy) bool {
+	switch policy {
+	case ClipboardDeny, ClipboardAsk, ClipboardAllow:
+		return true
+	default:
+		return false
+	}
 }

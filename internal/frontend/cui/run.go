@@ -107,6 +107,10 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if fileConfiguration.Shell != "" {
+			options.Shell = fileConfiguration.Shell
+		}
+		options.Clipboard = fileConfiguration.Clipboard
 		return tui.Run(operationCtx, frontend, synchronized.Snapshot, stdout, options)
 	case "new":
 		return runNew(operationCtx, frontend, arguments[1:], stdout, stderr)
@@ -118,10 +122,16 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 		return runList(operationCtx, frontend, arguments[1:], stdout, stderr)
 	case "restart":
 		return runRestart(operationCtx, frontend, arguments[1:], stdout, stderr)
+	case "run":
+		return runTerminal(operationCtx, frontend, arguments[1:], stdout, stderr)
 	case "kill":
 		return runPaneCommand(operationCtx, frontend, protocol.OperationKillTerminal, arguments[1:], stdout, "killed")
 	case "dismiss":
 		return runPaneCommand(operationCtx, frontend, protocol.OperationDismissTerminal, arguments[1:], stdout, "dismissed")
+	case "stash":
+		return runStash(operationCtx, frontend, arguments[1:], stdout)
+	case "restore":
+		return runRestore(operationCtx, frontend, arguments[1:], stdout, stderr)
 	case "daemon":
 		return runDaemon(operationCtx, frontend, arguments[1:], stdout, stderr)
 	}
@@ -141,19 +151,129 @@ func parseTUIOptions(arguments []string, defaults ariadneconfig.TUIOptions, stde
 	mode := tui.PaneFrameMode(*paneFrame)
 	switch mode {
 	case tui.PaneFrameFull, tui.PaneFrameSplit, tui.PaneFrameNone:
-		return tui.Options{PaneFrame: mode}, nil
+		cwd, err := os.Getwd()
+		if err != nil {
+			return tui.Options{}, err
+		}
+		return tui.Options{PaneFrame: mode, Shell: defaultsShell(), CWD: cwd, Env: os.Environ()}, nil
 	default:
 		return tui.Options{}, fmt.Errorf("invalid TUI Pane frame mode %q", *paneFrame)
 	}
 }
 
+func defaultsShell() string {
+	if shell := os.Getenv("SHELL"); shell != "" {
+		return shell
+	}
+	if value := os.Getenv("COMSPEC"); value != "" {
+		return value
+	}
+	return "/bin/sh"
+}
+
 func knownCommand(command string) bool {
 	switch command {
-	case "tui", "new", "open", "attach", "list", "restart", "kill", "dismiss", "daemon":
+	case "tui", "new", "open", "attach", "list", "restart", "run", "kill", "dismiss", "stash", "restore", "daemon":
 		return true
 	default:
 		return false
 	}
+}
+
+func runStash(ctx context.Context, frontend *client.Client, arguments []string, stdout io.Writer) error {
+	if len(arguments) == 1 && arguments[0] == "list" {
+		listed, err := client.Call[protocol.StashListResult](ctx, frontend, protocol.OperationListStash, nil)
+		if err != nil {
+			return err
+		}
+		writer := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+		_, _ = fmt.Fprintln(writer, "TYPE\tID\tSTATE\tORIGIN")
+		for _, entry := range listed.Panes {
+			state := string(entry.Pane.Kind)
+			if entry.Pane.Terminal != nil {
+				state = string(entry.Pane.Terminal.State)
+				if entry.Pane.Terminal.HistoryAvailable {
+					state += "+history"
+				}
+			}
+			_, _ = fmt.Fprintf(writer, "pane\t%d\t%s\t%d/%d\n", entry.Pane.ID, state,
+				entry.Stashed.OriginWorkspaceID, entry.Stashed.OriginWindowID)
+		}
+		for _, entry := range listed.Windows {
+			_, _ = fmt.Fprintf(writer, "window\t%d\t%d panes\t%d\n", entry.Window.ID, len(entry.Panes), entry.Stashed.OriginWorkspaceID)
+		}
+		return writer.Flush()
+	}
+	if len(arguments) != 2 {
+		return errors.New("usage: stash pane PANE | stash window WINDOW | stash list")
+	}
+	id, err := strconv.ParseUint(arguments[1], 10, 64)
+	if err != nil || id == 0 {
+		return errors.New("invalid stash target ID")
+	}
+	switch arguments[0] {
+	case "pane":
+		_, err = client.Call[core.StashPaneResult](ctx, frontend, protocol.OperationStashPane, protocol.PaneParams{PaneID: core.PaneID(id)})
+	case "window":
+		_, err = client.Call[core.StashWindowResult](ctx, frontend, protocol.OperationStashWindow, protocol.DeleteWindowParams{WindowID: core.WindowID(id)})
+	default:
+		return errors.New("usage: stash pane PANE | stash window WINDOW | stash list")
+	}
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "%s %d stashed\n", arguments[0], id)
+	return err
+}
+
+func runRestore(ctx context.Context, frontend *client.Client, arguments []string, stdout, stderr io.Writer) error {
+	if len(arguments) < 2 {
+		return errors.New("usage: restore pane|window ID [options]")
+	}
+	id, err := strconv.ParseUint(arguments[1], 10, 64)
+	if err != nil || id == 0 {
+		return errors.New("invalid restore target ID")
+	}
+	switch arguments[0] {
+	case "pane":
+		flags := flag.NewFlagSet("restore pane", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		windowID := flags.Uint64("window", 0, "destination Window ID")
+		targetID := flags.Uint64("target", 0, "target Pane ID")
+		direction := flags.String("direction", "", "horizontal or vertical")
+		if err := flags.Parse(arguments[2:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 {
+			return errors.New("unexpected restore pane arguments")
+		}
+		params := protocol.RestorePaneParams{
+			PaneID: core.PaneID(id), DestinationWindowID: core.WindowID(*windowID), TargetPaneID: core.PaneID(*targetID),
+			Direction: core.SplitDirection(*direction),
+		}
+		if _, err := client.Call[core.RestorePaneResult](ctx, frontend, protocol.OperationRestorePane, params); err != nil {
+			return err
+		}
+	case "window":
+		flags := flag.NewFlagSet("restore window", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		workspaceID := flags.Uint64("workspace", 0, "destination Workspace ID")
+		if err := flags.Parse(arguments[2:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 {
+			return errors.New("unexpected restore window arguments")
+		}
+		if _, err := client.Call[core.RestoreWindowResult](ctx, frontend, protocol.OperationRestoreWindow, protocol.RestoreWindowParams{
+			WindowID: core.WindowID(id), WorkspaceID: core.WorkspaceID(*workspaceID),
+		}); err != nil {
+			return err
+		}
+	default:
+		return errors.New("usage: restore pane|window ID [options]")
+	}
+	_, err = fmt.Fprintf(stdout, "%s %d restored\n", arguments[0], id)
+	return err
 }
 
 func runNew(ctx context.Context, frontend *client.Client, arguments []string, stdout, stderr io.Writer) error {
@@ -257,6 +377,41 @@ func runRestart(ctx context.Context, frontend *client.Client, arguments []string
 		return err
 	}
 	return printTerminalResult(stdout, "restarted", result.Pane)
+}
+
+func runTerminal(ctx context.Context, frontend *client.Client, arguments []string, stdout, stderr io.Writer) error {
+	separator := -1
+	for index, argument := range arguments {
+		if argument == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 || separator == len(arguments)-1 {
+		return errors.New("run requires -- followed by a command")
+	}
+	flags := flag.NewFlagSet("run", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	cwd := flags.String("cwd", "", "working directory; defaults to the Pane's previous directory")
+	if err := flags.Parse(arguments[:separator]); err != nil {
+		return err
+	}
+	paneID, err := exactlyOnePaneID(flags.Args())
+	if err != nil {
+		return err
+	}
+	fallbackCWD, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	result, err := client.Call[protocol.TerminalOperationResult](ctx, frontend, protocol.OperationRunTerminal, protocol.RunTerminalParams{
+		PaneID: paneID, Argv: append([]string(nil), arguments[separator+1:]...), CWD: *cwd, FallbackCWD: fallbackCWD,
+		Env: os.Environ(), InitialSize: terminalSize(os.Stdin),
+	})
+	if err != nil {
+		return err
+	}
+	return printTerminalResult(stdout, "started", result.Pane)
 }
 
 func runPaneCommand(ctx context.Context, frontend *client.Client, operation protocol.Operation, arguments []string, stdout io.Writer, verb string) error {

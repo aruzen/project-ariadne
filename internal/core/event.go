@@ -4,15 +4,25 @@ type EventKind string
 
 const (
 	EventWorkspaceCreated    EventKind = "workspace_created"
+	EventWorkspaceRenamed    EventKind = "workspace_renamed"
+	EventWorkspaceDeleted    EventKind = "workspace_deleted"
 	EventWindowCreated       EventKind = "window_created"
+	EventWindowRenamed       EventKind = "window_renamed"
+	EventWindowDeleted       EventKind = "window_deleted"
 	EventPaneCreated         EventKind = "pane_created"
 	EventPaneMoved           EventKind = "pane_moved"
 	EventPaneClosed          EventKind = "pane_closed"
+	EventSplitResized        EventKind = "split_resized"
+	EventPaneStashed         EventKind = "pane_stashed"
+	EventPaneRestored        EventKind = "pane_restored"
+	EventWindowStashed       EventKind = "window_stashed"
+	EventWindowRestored      EventKind = "window_restored"
 	EventTerminalExited      EventKind = "terminal_exited"
 	EventTerminalUnavailable EventKind = "terminal_unavailable"
 	EventTerminalStarted     EventKind = "terminal_started"
 	EventTerminalStartFailed EventKind = "terminal_start_failed"
 	EventTerminalRestarting  EventKind = "terminal_restarting"
+	EventTerminalRunPrepared EventKind = "terminal_run_prepared"
 	EventTerminalStopping    EventKind = "terminal_stopping"
 	EventLabelSet            EventKind = "label_set"
 	EventLabelRemoved        EventKind = "label_removed"
@@ -31,8 +41,27 @@ type WorkspaceCreatedEvent struct {
 	Workspace Workspace `json:"workspace"`
 }
 
+type WorkspaceEvent struct {
+	Workspace Workspace `json:"workspace"`
+}
+
+type WorkspaceDeletedEvent struct {
+	Workspace     Workspace `json:"workspace"`
+	RemovedLabels []Label   `json:"removed_labels,omitempty"`
+}
+
 type WindowCreatedEvent struct {
 	Window Window `json:"window"`
+}
+
+type WindowEvent struct {
+	Window Window `json:"window"`
+}
+
+type WindowDeletedEvent struct {
+	Window        Window    `json:"window"`
+	Workspace     Workspace `json:"workspace"`
+	RemovedLabels []Label   `json:"removed_labels,omitempty"`
 }
 
 type PaneCreatedEvent struct {
@@ -56,6 +85,18 @@ type PaneClosedEvent struct {
 	RemovedLabels []Label `json:"removed_labels,omitempty"`
 }
 
+type PaneStashEvent struct {
+	Pane    Pane        `json:"pane"`
+	Window  Window      `json:"window"`
+	Stashed StashedPane `json:"stashed"`
+}
+
+type WindowStashEvent struct {
+	Window    Window        `json:"window"`
+	Workspace Workspace     `json:"workspace"`
+	Stashed   StashedWindow `json:"stashed"`
+}
+
 type TerminalEvent struct {
 	Pane Pane `json:"pane"`
 }
@@ -73,8 +114,23 @@ func cloneEvent(event Event) Event {
 	case WorkspaceCreatedEvent:
 		payload.Workspace = cloneWorkspace(payload.Workspace)
 		event.Payload = payload
+	case WorkspaceEvent:
+		payload.Workspace = cloneWorkspace(payload.Workspace)
+		event.Payload = payload
+	case WorkspaceDeletedEvent:
+		payload.Workspace = cloneWorkspace(payload.Workspace)
+		payload.RemovedLabels = append([]Label(nil), payload.RemovedLabels...)
+		event.Payload = payload
 	case WindowCreatedEvent:
 		payload.Window = cloneWindow(payload.Window)
+		event.Payload = payload
+	case WindowEvent:
+		payload.Window = cloneWindow(payload.Window)
+		event.Payload = payload
+	case WindowDeletedEvent:
+		payload.Window = cloneWindow(payload.Window)
+		payload.Workspace = cloneWorkspace(payload.Workspace)
+		payload.RemovedLabels = append([]Label(nil), payload.RemovedLabels...)
 		event.Payload = payload
 	case PaneCreatedEvent:
 		payload.Pane = clonePane(payload.Pane)
@@ -89,6 +145,14 @@ func cloneEvent(event Event) Event {
 		payload.Pane = clonePane(payload.Pane)
 		payload.Window = cloneWindow(payload.Window)
 		payload.RemovedLabels = append([]Label(nil), payload.RemovedLabels...)
+		event.Payload = payload
+	case PaneStashEvent:
+		payload.Pane = clonePane(payload.Pane)
+		payload.Window = cloneWindow(payload.Window)
+		event.Payload = payload
+	case WindowStashEvent:
+		payload.Window = cloneWindow(payload.Window)
+		payload.Workspace = cloneWorkspace(payload.Workspace)
 		event.Payload = payload
 	case TerminalEvent:
 		payload.Pane = clonePane(payload.Pane)

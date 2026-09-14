@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aruzen/ariadne/internal/client"
+	ariadneconfig "github.com/aruzen/ariadne/internal/config"
 	"github.com/aruzen/ariadne/internal/core"
 	"github.com/aruzen/ariadne/internal/daemon"
 	platformterminal "github.com/aruzen/ariadne/internal/platform/terminal"
@@ -43,6 +44,8 @@ type paneEvent struct {
 	paneID     core.PaneID
 	attachment *client.PTYAttachment
 	event      client.PTYEvent
+	response   []byte
+	err        error
 }
 
 type inputMessage struct {
@@ -51,27 +54,54 @@ type inputMessage struct {
 }
 
 type session struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	client      *client.Client
-	pty         *client.PTYClient
-	output      *latestFrameWriter
-	snapshot    core.Snapshot
-	workspace   core.WorkspaceID
-	window      core.WindowID
-	focus       core.PaneID
-	width       int
-	height      int
-	placements  []Placement
-	separators  []Separator
-	paneFrame   PaneFrameMode
-	views       map[core.PaneID]*paneView
-	renderers   paneRendererRegistry
-	ptyEvents   chan paneEvent
-	statusBar   StatusBar
-	message     string
-	messageTime time.Time
-	dirty       bool
+	ctx               context.Context
+	cancel            context.CancelFunc
+	client            *client.Client
+	pty               *client.PTYClient
+	output            *latestFrameWriter
+	snapshot          core.Snapshot
+	workspace         core.WorkspaceID
+	window            core.WindowID
+	focus             core.PaneID
+	pendingFocus      core.PaneID
+	pendingWindow     core.WindowID
+	width             int
+	height            int
+	placements        []Placement
+	allPlacements     []Placement
+	separators        []Separator
+	paneFrame         PaneFrameMode
+	views             map[core.PaneID]*paneView
+	renderers         paneRendererRegistry
+	ptyEvents         chan paneEvent
+	statusBar         StatusBar
+	message           string
+	messageTime       time.Time
+	zoom              bool
+	inputMode         tuiInputMode
+	prompt            string
+	promptLead        string
+	confirm           string
+	confirmCallback   func(bool)
+	promptCallback    func(string)
+	shell             string
+	cwd               string
+	env               []string
+	clipboardRead     ariadneconfig.ClipboardPolicy
+	clipboardWrite    ariadneconfig.ClipboardPolicy
+	clipboardMax      int
+	clipboardRequests chan clipboardRequest
+	copyMode          bool
+	copySelecting     bool
+	copyX             int
+	copyY             int
+	copyStartX        int
+	copyStartY        int
+	searchQuery       string
+	copyNewOutput     bool
+	pendingClipboard  []clipboardRequest
+	outerClipboard    []byte
+	dirty             bool
 }
 
 // Run enters the full-screen frontend using an already synchronized client.
@@ -114,8 +144,29 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 	value := &session{
 		ctx: ctx, cancel: cancel, client: frontend, pty: ptyClient, output: frameOutput,
 		snapshot: snapshot, width: cols, height: rows, views: make(map[core.PaneID]*paneView),
-		renderers: defaultPaneRendererRegistry(), ptyEvents: make(chan paneEvent, 256),
+		renderers: defaultPaneRendererRegistry(), ptyEvents: make(chan paneEvent, 256), clipboardRequests: make(chan clipboardRequest, 16),
 		statusBar: DefaultStatusBar(), paneFrame: options.PaneFrame, dirty: true,
+		shell: options.Shell, cwd: options.CWD, env: append([]string(nil), options.Env...),
+		clipboardRead: options.Clipboard.Read, clipboardWrite: options.Clipboard.Write,
+		clipboardMax: options.Clipboard.MaxTextBytes,
+	}
+	if value.shell == "" {
+		value.shell = os.Getenv("SHELL")
+		if value.shell == "" {
+			value.shell = "/bin/sh"
+		}
+	}
+	if value.cwd == "" {
+		value.cwd, _ = os.Getwd()
+	}
+	if value.clipboardRead == "" {
+		value.clipboardRead = ariadneconfig.ClipboardAsk
+	}
+	if value.clipboardWrite == "" {
+		value.clipboardWrite = ariadneconfig.ClipboardAsk
+	}
+	if value.clipboardMax == 0 {
+		value.clipboardMax = ariadneconfig.DefaultClipboardMaxBytes
 	}
 	value.selectInitialWindow()
 	value.relayout()
@@ -147,12 +198,20 @@ func (session *session) loop(output *os.File) error {
 			if message.err != nil {
 				return message.err
 			}
+			if session.inputMode != inputModeNormal {
+				session.handleModalInput(message.data)
+				continue
+			}
+			if session.copyMode {
+				session.handleCopyInput(message.data)
+				continue
+			}
 			data, actions := decoder.Feed(message.data)
 			for _, action := range actions {
 				if action == actionQuit {
 					return nil
 				}
-				session.moveFocus(action)
+				session.handleAction(action)
 			}
 			if len(data) != 0 {
 				session.sendInput(data)
@@ -166,6 +225,15 @@ func (session *session) loop(output *os.File) error {
 				return err
 			}
 			session.snapshot = next
+			if _, exists := session.currentWindow(); !exists {
+				session.selectInitialWindow()
+				session.zoom = false
+			}
+			if session.pendingFocus != 0 && session.window == session.pendingWindow && session.currentLayoutContains(session.pendingFocus) {
+				session.focus = session.pendingFocus
+				session.pendingFocus = 0
+				session.pendingWindow = 0
+			}
 			session.relayout()
 			session.syncViews()
 			session.dirty = true
@@ -177,6 +245,8 @@ func (session *session) loop(output *os.File) error {
 				session.setMessage(err.Error())
 			}
 			session.dirty = true
+		case request := <-session.clipboardRequests:
+			session.handleClipboardRequest(request)
 		case _, ok := <-resize:
 			if !ok {
 				resize = nil
@@ -220,13 +290,20 @@ func (session *session) loop(output *os.File) error {
 }
 
 func (session *session) selectInitialWindow() {
+	session.workspace = 0
+	session.window = 0
+	session.focus = 0
 	if len(session.snapshot.Workspaces) == 0 {
 		return
 	}
-	workspace := session.snapshot.Workspaces[0]
-	session.workspace = workspace.ID
-	if len(workspace.WindowIDs) != 0 {
+	session.workspace = session.snapshot.Workspaces[0].ID
+	for _, workspace := range session.snapshot.Workspaces {
+		if len(workspace.WindowIDs) == 0 {
+			continue
+		}
+		session.workspace = workspace.ID
 		session.window = workspace.WindowIDs[0]
+		return
 	}
 }
 
@@ -234,6 +311,7 @@ func (session *session) relayout() {
 	window, exists := session.currentWindow()
 	if !exists {
 		session.placements = nil
+		session.allPlacements = nil
 		session.separators = nil
 		return
 	}
@@ -244,19 +322,27 @@ func (session *session) relayout() {
 	available := Rect{W: session.width, H: contentHeight}
 	if session.paneFrame == PaneFrameSplit {
 		layout := CalculateSplitLayout(window.Layout, available)
-		session.placements = layout.Placements
+		session.allPlacements = layout.Placements
 		session.separators = layout.Separators
 	} else {
-		session.placements = CalculateLayout(window.Layout, available)
+		session.allPlacements = CalculateLayout(window.Layout, available)
 		session.separators = nil
 	}
-	if _, exists := placementFor(session.placements, session.focus); !exists {
+	if _, exists := placementFor(session.allPlacements, session.focus); !exists {
 		session.focus = session.preferredFocus()
+		session.zoom = false
+		session.copyMode = false
+		session.copySelecting = false
+	}
+	session.placements = session.allPlacements
+	if session.zoom && session.focus != 0 {
+		session.placements = []Placement{{PaneID: session.focus, Rect: available}}
+		session.separators = nil
 	}
 }
 
 func (session *session) preferredFocus() core.PaneID {
-	for _, placement := range session.placements {
+	for _, placement := range session.viewPlacements() {
 		pane, exists := session.pane(placement.PaneID)
 		if !exists {
 			continue
@@ -266,7 +352,7 @@ func (session *session) preferredFocus() core.PaneID {
 			return placement.PaneID
 		}
 	}
-	for _, placement := range session.placements {
+	for _, placement := range session.viewPlacements() {
 		pane, exists := session.pane(placement.PaneID)
 		if !exists {
 			continue
@@ -280,8 +366,9 @@ func (session *session) preferredFocus() core.PaneID {
 }
 
 func (session *session) syncViews() {
-	wanted := make(map[core.PaneID]Placement, len(session.placements))
-	for _, placement := range session.placements {
+	placements := session.viewPlacements()
+	wanted := make(map[core.PaneID]Placement, len(placements))
+	for _, placement := range placements {
 		pane, exists := session.pane(placement.PaneID)
 		if !exists {
 			continue
@@ -289,6 +376,11 @@ func (session *session) syncViews() {
 		_, err := session.paneRenderer(pane)
 		if err == nil {
 			wanted[placement.PaneID] = placement
+		}
+	}
+	if session.zoom {
+		if placement, exists := placementFor(session.placements, session.focus); exists {
+			wanted[session.focus] = placement
 		}
 	}
 	for paneID, view := range session.views {
@@ -346,7 +438,10 @@ func (session *session) syncViews() {
 			attachmentCtx, attachmentCancel := context.WithCancel(session.ctx)
 			view.attachCancel = attachmentCancel
 			view.ptyCols, view.ptyRows = 0, 0
-			go session.forwardPTY(attachmentCtx, view.paneID, attachment)
+			if content, ok := view.content.(*terminalPaneContent); ok {
+				content.setClipboardHandler(session.clipboardHandler(attachmentCtx, paneID), session.clipboardMax)
+			}
+			go session.forwardPTY(attachmentCtx, view.paneID, attachment, view.content)
 		}
 		if renderer.UsesTerminal() && view.attachment != nil && pane.Terminal != nil && pane.Terminal.State == core.TerminalRunning &&
 			(view.ptyCols != cols || view.ptyRows != rows) {
@@ -362,15 +457,31 @@ func (session *session) syncViews() {
 	}
 }
 
-func (session *session) forwardPTY(ctx context.Context, paneID core.PaneID, attachment *client.PTYAttachment) {
+func (session *session) viewPlacements() []Placement {
+	if session.allPlacements != nil {
+		return session.allPlacements
+	}
+	return session.placements
+}
+
+func (session *session) forwardPTY(ctx context.Context, paneID core.PaneID, attachment *client.PTYAttachment, content paneContent) {
 	for {
 		select {
 		case event, ok := <-attachment.Events():
 			if !ok {
 				return
 			}
+			message := paneEvent{paneID: paneID, attachment: attachment, event: event}
+			if event.Kind == client.PTYOutput {
+				terminal, ok := content.(ptyPaneContent)
+				if !ok {
+					message.err = errors.New("TUI terminal view is unavailable")
+				} else {
+					message.response, message.err = terminal.WritePTY(event.Data)
+				}
+			}
 			select {
-			case session.ptyEvents <- paneEvent{paneID: paneID, attachment: attachment, event: event}:
+			case session.ptyEvents <- message:
 			case <-ctx.Done():
 				return
 			}
@@ -387,16 +498,14 @@ func (session *session) handlePTYEvent(message paneEvent) error {
 	}
 	switch message.event.Kind {
 	case client.PTYOutput:
-		content, ok := view.content.(ptyPaneContent)
-		if !ok {
-			return errors.New("TUI terminal view is unavailable")
+		if message.err != nil {
+			return message.err
 		}
-		response, err := content.WritePTY(message.event.Data)
-		if err != nil {
-			return err
+		if len(message.response) != 0 {
+			session.sendPTYInput(view, message.response)
 		}
-		if len(response) != 0 {
-			session.sendPTYInput(view, response)
+		if session.copyMode && message.paneID == session.focus {
+			session.copyNewOutput = true
 		}
 	case client.PTYExit:
 		view.errorMessage = "exited"
@@ -535,6 +644,12 @@ func (session *session) render() ([]byte, error) {
 		if paneCursor.Visible {
 			cursor = paneCursor
 		}
+		if session.copyMode && focused {
+			if session.copySelecting {
+				drawCopySelection(surface, content, session.copyStartX, session.copyStartY, session.copyX, session.copyY)
+			}
+			cursor = Cursor{X: content.X + session.copyX, Y: content.Y + session.copyY, Visible: true}
+		}
 		if view.errorMessage != "" {
 			warning := Style{Foreground: Color{R: 255, G: 210, B: 120}, Background: base.Background}
 			surface.Text(content.X, content.Y, content.W, fitText(view.errorMessage, content.W), warning)
@@ -551,13 +666,47 @@ func (session *session) render() ([]byte, error) {
 	}
 	message := session.message
 	if message == "" || (!session.messageTime.IsZero() && time.Since(session.messageTime) > 4*time.Second) {
-		message = "^A d quit · ^A h/j/k/l focus"
+		message = "^A d quit · h/j/k/l focus · z zoom · %/\" split · x close · : command"
+	}
+	if session.inputMode == inputModePrompt {
+		message = session.promptLead + session.prompt
+	} else if session.inputMode == inputModeConfirm {
+		message = session.confirm + " [y/N]"
+	} else if session.copyMode {
+		message = "COPY h/j/k/l move · ^U/^D page · g/G ends · Space select · Enter copy · / search · q cancel"
+		if session.copyNewOutput {
+			message += " · new output"
+		}
 	}
 	session.statusBar.Draw(surface, session.height-1, StatusContext{
 		Workspace: workspaceName, Window: windowName, PaneID: pane.ID, PaneTitle: pane.Title,
 		State: state, Message: message, Now: time.Now(),
 	})
-	return EncodeFrame(surface, cursor), nil
+	frame := EncodeFrame(surface, cursor)
+	if len(session.outerClipboard) != 0 {
+		frame = append(frame, session.outerClipboard...)
+		session.outerClipboard = nil
+	}
+	return frame, nil
+}
+
+func drawCopySelection(surface *Surface, content Rect, startX, startY, endX, endY int) {
+	start, end := startY*content.W+startX, endY*content.W+endX
+	if start > end {
+		start, end = end, start
+	}
+	for index := start; index <= end; index++ {
+		x, y := content.X+index%content.W, content.Y+index/content.W
+		if y >= content.Y+content.H {
+			break
+		}
+		cell := surface.At(x, y)
+		cell.Style.Foreground, cell.Style.Background = cell.Style.Background, cell.Style.Foreground
+		if cell.Style.Foreground == cell.Style.Background {
+			cell.Style.Background = Color{R: 80, G: 110, B: 150}
+		}
+		surface.Set(x, y, cell)
+	}
 }
 
 func drawPaneBorder(surface *Surface, rect Rect, title string, focused bool) {
@@ -685,11 +834,39 @@ func paneFrameStyle(focused bool) Style {
 
 func (session *session) currentWindow() (core.Window, bool) {
 	for _, window := range session.snapshot.Windows {
-		if window.ID == session.window {
-			return window, true
+		if window.ID != session.window {
+			continue
 		}
+		for _, workspace := range session.snapshot.Workspaces {
+			for _, windowID := range workspace.WindowIDs {
+				if windowID == window.ID {
+					return window, true
+				}
+			}
+		}
+		return core.Window{}, false
 	}
 	return core.Window{}, false
+}
+
+func (session *session) currentLayoutContains(paneID core.PaneID) bool {
+	window, exists := session.currentWindow()
+	if !exists || window.Layout == nil {
+		return false
+	}
+	var contains func(core.LayoutNode) bool
+	contains = func(node core.LayoutNode) bool {
+		if node.Kind == core.LayoutPane {
+			return node.PaneID == paneID
+		}
+		for _, child := range node.Children {
+			if contains(child) {
+				return true
+			}
+		}
+		return false
+	}
+	return contains(*window.Layout)
 }
 
 func (session *session) pane(id core.PaneID) (core.Pane, bool) {

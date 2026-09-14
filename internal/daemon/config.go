@@ -3,8 +3,11 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"time"
 
+	ariadneconfig "github.com/aruzen/ariadne/internal/config"
 	"github.com/aruzen/ariadne/internal/core"
+	platformclipboard "github.com/aruzen/ariadne/internal/platform/clipboard"
 	"github.com/aruzen/ariadne/internal/plugin"
 	ariadneprotocol "github.com/aruzen/ariadne/internal/protocol"
 	"github.com/aruzen/ariadne/internal/statefile"
@@ -13,6 +16,14 @@ import (
 )
 
 const DefaultMaxConnections = 64
+
+type ClipboardConfig struct {
+	ReadPolicy   ariadneconfig.ClipboardPolicy
+	WritePolicy  ariadneconfig.ClipboardPolicy
+	MaxTextBytes int
+	Timeout      time.Duration
+	Backend      platformclipboard.Backend
+}
 
 var (
 	ErrInvalidConfig      = errors.New("daemon: invalid configuration")
@@ -23,17 +34,19 @@ var (
 )
 
 type Config struct {
-	StatePath       string
-	MaxConnections  int
-	Core            core.Config
-	Manager         pty.ManagerConfig
-	Stream          streammux.Config
-	Peer            streammux.PeerConfig
-	AriadneProtocol ariadneprotocol.Config
-	PTYProtocol     pty.ProtocolConfig
-	State           statefile.Options
-	Plugins         []plugin.Plugin
-	Plugin          plugin.Config
+	StatePath                 string
+	MaxConnections            int
+	Core                      core.Config
+	Manager                   pty.ManagerConfig
+	Stream                    streammux.Config
+	Peer                      streammux.PeerConfig
+	AriadneProtocol           ariadneprotocol.Config
+	PTYProtocol               pty.ProtocolConfig
+	State                     statefile.Options
+	Plugins                   []plugin.Plugin
+	Plugin                    plugin.Config
+	ClosePaneOnSuccessfulExit bool
+	Clipboard                 ClipboardConfig
 }
 
 func DefaultConfig(statePath string) Config {
@@ -53,6 +66,12 @@ func DefaultConfig(statePath string) Config {
 		Stream: streammux.DefaultConfig(), Peer: peer,
 		AriadneProtocol: ariadneprotocol.DefaultConfig(), PTYProtocol: ptyProtocol,
 		State: statefile.DefaultOptions(), Plugin: plugin.DefaultConfig(),
+		Clipboard: ClipboardConfig{
+			ReadPolicy: ariadneconfig.ClipboardAsk, WritePolicy: ariadneconfig.ClipboardAsk,
+			MaxTextBytes: ariadneconfig.DefaultClipboardMaxBytes,
+			Timeout:      time.Duration(ariadneconfig.DefaultClipboardTimeoutMS) * time.Millisecond,
+			Backend:      platformclipboard.NewSystemBackend(),
+		},
 	}
 }
 
@@ -65,6 +84,25 @@ func (configuration Config) withDefaults() (Config, error) {
 	}
 	if configuration.MaxConnections < 1 {
 		return Config{}, fmt.Errorf("%w: MaxConnections must be positive", ErrInvalidConfig)
+	}
+	if configuration.Clipboard.ReadPolicy == "" {
+		configuration.Clipboard.ReadPolicy = ariadneconfig.ClipboardAsk
+	}
+	if configuration.Clipboard.WritePolicy == "" {
+		configuration.Clipboard.WritePolicy = ariadneconfig.ClipboardAsk
+	}
+	if configuration.Clipboard.MaxTextBytes == 0 {
+		configuration.Clipboard.MaxTextBytes = ariadneconfig.DefaultClipboardMaxBytes
+	}
+	if configuration.Clipboard.Timeout == 0 {
+		configuration.Clipboard.Timeout = time.Duration(ariadneconfig.DefaultClipboardTimeoutMS) * time.Millisecond
+	}
+	if configuration.Clipboard.Backend == nil {
+		configuration.Clipboard.Backend = platformclipboard.NewSystemBackend()
+	}
+	if configuration.Clipboard.MaxTextBytes < 1 || configuration.Clipboard.Timeout < 0 ||
+		!validClipboardPolicy(configuration.Clipboard.ReadPolicy) || !validClipboardPolicy(configuration.Clipboard.WritePolicy) {
+		return Config{}, fmt.Errorf("%w: invalid clipboard configuration", ErrInvalidConfig)
 	}
 	if configuration.Core.EventQueueCapacity == 0 {
 		configuration.Core = core.DefaultConfig()
@@ -80,6 +118,15 @@ func (configuration Config) withDefaults() (Config, error) {
 		configuration.Peer.Classify = classifyFrame
 	}
 	return configuration, nil
+}
+
+func validClipboardPolicy(policy ariadneconfig.ClipboardPolicy) bool {
+	switch policy {
+	case ariadneconfig.ClipboardDeny, ariadneconfig.ClipboardAsk, ariadneconfig.ClipboardAllow:
+		return true
+	default:
+		return false
+	}
 }
 
 func DefaultPTYMessageTypes() pty.MessageTypes {

@@ -18,7 +18,8 @@ import (
 )
 
 const (
-	CurrentVersion  = 1
+	CurrentVersion  = 2
+	previousVersion = 1
 	DefaultDebounce = 100 * time.Millisecond
 	DefaultMaxBytes = 16 << 20
 )
@@ -81,9 +82,12 @@ type persistentSnapshot struct {
 	NextWorkspaceID core.WorkspaceID      `json:"next_workspace_id"`
 	NextWindowID    core.WindowID         `json:"next_window_id"`
 	NextPaneID      core.PaneID           `json:"next_pane_id"`
+	NextSplitID     core.SplitID          `json:"next_split_id,omitempty"`
 	Workspaces      []persistentWorkspace `json:"workspaces"`
 	Windows         []persistentWindow    `json:"windows"`
 	Panes           []persistentPane      `json:"panes"`
+	StashedPanes    []core.StashedPane    `json:"stashed_panes,omitempty"`
+	StashedWindows  []core.StashedWindow  `json:"stashed_windows,omitempty"`
 }
 
 type persistentWorkspace struct {
@@ -101,6 +105,7 @@ type persistentWindow struct {
 
 type persistentLayout struct {
 	Kind      core.LayoutNodeKind `json:"kind"`
+	SplitID   core.SplitID        `json:"split_id,omitempty"`
 	PaneID    core.PaneID         `json:"pane_id,omitempty"`
 	Direction core.SplitDirection `json:"direction,omitempty"`
 	Children  []persistentLayout  `json:"children,omitempty"`
@@ -152,10 +157,13 @@ func Decode(data []byte, maxBytes int64) (core.Snapshot, error) {
 	if err := ensureJSONEOF(decoder); err != nil {
 		return core.Snapshot{}, err
 	}
-	if document.Version != CurrentVersion {
+	if document.Version != CurrentVersion && document.Version != previousVersion {
 		return core.Snapshot{}, fmt.Errorf("%w: got %d, want %d", ErrUnsupportedVersion, document.Version, CurrentVersion)
 	}
 	snapshot := snapshotFromPersistent(document.State)
+	if document.Version == previousVersion {
+		assignSplitIDs(&snapshot)
+	}
 	if err := core.ValidateSnapshot(snapshot); err != nil {
 		return core.Snapshot{}, fmt.Errorf("%w: %w", ErrInvalidData, err)
 	}
@@ -236,9 +244,12 @@ func persistentFromSnapshot(snapshot core.Snapshot) persistentSnapshot {
 		NextWorkspaceID: snapshot.NextWorkspaceID,
 		NextWindowID:    snapshot.NextWindowID,
 		NextPaneID:      snapshot.NextPaneID,
+		NextSplitID:     snapshot.NextSplitID,
 		Workspaces:      make([]persistentWorkspace, len(snapshot.Workspaces)),
 		Windows:         make([]persistentWindow, len(snapshot.Windows)),
 		Panes:           make([]persistentPane, len(snapshot.Panes)),
+		StashedPanes:    append([]core.StashedPane(nil), snapshot.StashedPanes...),
+		StashedWindows:  append([]core.StashedWindow(nil), snapshot.StashedWindows...),
 	}
 	for index, workspace := range snapshot.Workspaces {
 		persistent.Workspaces[index] = persistentWorkspace{
@@ -281,9 +292,12 @@ func snapshotFromPersistent(persistent persistentSnapshot) core.Snapshot {
 		NextWorkspaceID: persistent.NextWorkspaceID,
 		NextWindowID:    persistent.NextWindowID,
 		NextPaneID:      persistent.NextPaneID,
+		NextSplitID:     persistent.NextSplitID,
 		Workspaces:      make([]core.Workspace, len(persistent.Workspaces)),
 		Windows:         make([]core.Window, len(persistent.Windows)),
 		Panes:           make([]core.Pane, len(persistent.Panes)),
+		StashedPanes:    append([]core.StashedPane(nil), persistent.StashedPanes...),
+		StashedWindows:  append([]core.StashedWindow(nil), persistent.StashedWindows...),
 	}
 	for index, workspace := range persistent.Workspaces {
 		snapshot.Workspaces[index] = core.Workspace{
@@ -325,7 +339,7 @@ func persistentLayoutFromCore(layout *core.LayoutNode) *persistentLayout {
 		return nil
 	}
 	persistent := &persistentLayout{
-		Kind: layout.Kind, PaneID: layout.PaneID, Direction: layout.Direction,
+		Kind: layout.Kind, SplitID: layout.SplitID, PaneID: layout.PaneID, Direction: layout.Direction,
 		Children: make([]persistentLayout, len(layout.Children)), Weights: append([]uint32(nil), layout.Weights...),
 	}
 	for index := range layout.Children {
@@ -340,7 +354,7 @@ func coreLayoutFromPersistent(layout *persistentLayout) *core.LayoutNode {
 		return nil
 	}
 	coreLayout := &core.LayoutNode{
-		Kind: layout.Kind, PaneID: layout.PaneID, Direction: layout.Direction,
+		Kind: layout.Kind, SplitID: layout.SplitID, PaneID: layout.PaneID, Direction: layout.Direction,
 		Children: make([]core.LayoutNode, len(layout.Children)), Weights: append([]uint32(nil), layout.Weights...),
 	}
 	for index := range layout.Children {
@@ -348,6 +362,27 @@ func coreLayoutFromPersistent(layout *persistentLayout) *core.LayoutNode {
 		coreLayout.Children[index] = *child
 	}
 	return coreLayout
+}
+
+func assignSplitIDs(snapshot *core.Snapshot) {
+	next := core.SplitID(1)
+	var assign func(*core.LayoutNode)
+	assign = func(node *core.LayoutNode) {
+		if node == nil {
+			return
+		}
+		if node.Kind == core.LayoutSplit {
+			node.SplitID = next
+			next++
+		}
+		for index := range node.Children {
+			assign(&node.Children[index])
+		}
+	}
+	for index := range snapshot.Windows {
+		assign(snapshot.Windows[index].Layout)
+	}
+	snapshot.NextSplitID = next
 }
 
 func writeSnapshotAtomic(path string, snapshot core.Snapshot, maxBytes int64) error {

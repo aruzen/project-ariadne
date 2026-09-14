@@ -22,6 +22,24 @@ type CreateWindowCommand struct {
 	Name        string
 }
 
+type RenameWorkspaceCommand struct {
+	WorkspaceID WorkspaceID
+	Name        string
+}
+
+type DeleteWorkspaceCommand struct {
+	WorkspaceID WorkspaceID
+}
+
+type RenameWindowCommand struct {
+	WindowID WindowID
+	Name     string
+}
+
+type DeleteWindowCommand struct {
+	WindowID WindowID
+}
+
 // CreatePaneCommand creates the first Pane in an empty Window. Further Panes
 // are created with SplitPaneCommand so their position is unambiguous.
 type CreatePaneCommand struct {
@@ -48,11 +66,48 @@ type ClosePaneCommand struct {
 	PaneID PaneID
 }
 
+type ResizeSplitCommand struct {
+	SplitID SplitID
+	Weights []uint32
+}
+
+type StashPaneCommand struct {
+	PaneID PaneID
+}
+
+// RestorePaneCommand uses the saved placement when DestinationWindowID is
+// zero. If it is no longer usable, FrontendID selects the fallback Window.
+type RestorePaneCommand struct {
+	FrontendID          FrontendID
+	PaneID              PaneID
+	DestinationWindowID WindowID
+	TargetPaneID        PaneID
+	Direction           SplitDirection
+}
+
+type StashWindowCommand struct {
+	WindowID WindowID
+}
+
+// RestoreWindowCommand restores to the original Workspace unless WorkspaceID
+// explicitly selects another one or the original no longer exists.
+type RestoreWindowCommand struct {
+	FrontendID  FrontendID
+	WindowID    WindowID
+	WorkspaceID WorkspaceID
+}
+
 // SetFocusCommand changes only per-frontend ephemeral state. It does not
 // increment Revision and is never included in a persistent Snapshot.
 type SetFocusCommand struct {
 	FrontendID FrontendID
 	PaneID     PaneID
+}
+
+// SelectWindowCommand changes only per-frontend ephemeral state.
+type SelectWindowCommand struct {
+	FrontendID FrontendID
+	WindowID   WindowID
 }
 
 // RecordTerminalExitCommand is emitted by the daemon's PTY Manager observer
@@ -90,6 +145,13 @@ type PrepareTerminalRestartCommand struct {
 	PaneID PaneID
 }
 
+// PrepareTerminalRunCommand assigns a new launch specification to an inactive
+// Terminal Pane and reserves it before daemon I/O begins.
+type PrepareTerminalRunCommand struct {
+	PaneID PaneID
+	Launch LaunchSpec
+}
+
 // BeginTerminalStopCommand makes a user-requested stop visible before the
 // daemon waits for the process to exit.
 type BeginTerminalStopCommand struct {
@@ -113,16 +175,27 @@ type RemoveLabelsBySourceCommand struct {
 
 func (CreateWorkspaceCommand) isCommand()        {}
 func (CreateWindowCommand) isCommand()           {}
+func (RenameWorkspaceCommand) isCommand()        {}
+func (DeleteWorkspaceCommand) isCommand()        {}
+func (RenameWindowCommand) isCommand()           {}
+func (DeleteWindowCommand) isCommand()           {}
 func (CreatePaneCommand) isCommand()             {}
 func (SplitPaneCommand) isCommand()              {}
 func (MovePaneCommand) isCommand()               {}
 func (ClosePaneCommand) isCommand()              {}
+func (ResizeSplitCommand) isCommand()            {}
+func (StashPaneCommand) isCommand()              {}
+func (RestorePaneCommand) isCommand()            {}
+func (StashWindowCommand) isCommand()            {}
+func (RestoreWindowCommand) isCommand()          {}
 func (SetFocusCommand) isCommand()               {}
+func (SelectWindowCommand) isCommand()           {}
 func (RecordTerminalExitCommand) isCommand()     {}
 func (ForgetTerminalSessionCommand) isCommand()  {}
 func (ActivateTerminalCommand) isCommand()       {}
 func (FailTerminalStartCommand) isCommand()      {}
 func (PrepareTerminalRestartCommand) isCommand() {}
+func (PrepareTerminalRunCommand) isCommand()     {}
 func (BeginTerminalStopCommand) isCommand()      {}
 func (SetLabelCommand) isCommand()               {}
 func (RemoveLabelCommand) isCommand()            {}
@@ -134,6 +207,25 @@ type CreateWorkspaceResult struct {
 
 type CreateWindowResult struct {
 	Window Window `json:"window"`
+}
+
+type WorkspaceResult struct {
+	Workspace Workspace `json:"workspace"`
+}
+
+type DeleteWorkspaceResult struct {
+	Workspace     Workspace `json:"workspace"`
+	RemovedLabels []Label   `json:"removed_labels,omitempty"`
+}
+
+type WindowResult struct {
+	Window Window `json:"window"`
+}
+
+type DeleteWindowResult struct {
+	Window        Window    `json:"window"`
+	Workspace     Workspace `json:"workspace"`
+	RemovedLabels []Label   `json:"removed_labels,omitempty"`
 }
 
 type CreatePaneResult struct {
@@ -150,6 +242,34 @@ type MovePaneResult struct {
 type ClosePaneResult struct {
 	Pane   Pane   `json:"pane"`
 	Window Window `json:"window"`
+}
+
+type ResizeSplitResult struct {
+	Window Window `json:"window"`
+}
+
+type StashPaneResult struct {
+	Pane    Pane        `json:"pane"`
+	Window  Window      `json:"window"`
+	Stashed StashedPane `json:"stashed"`
+}
+
+type RestorePaneResult struct {
+	Pane    Pane        `json:"pane"`
+	Window  Window      `json:"window"`
+	Stashed StashedPane `json:"stashed"`
+}
+
+type StashWindowResult struct {
+	Window    Window        `json:"window"`
+	Workspace Workspace     `json:"workspace"`
+	Stashed   StashedWindow `json:"stashed"`
+}
+
+type RestoreWindowResult struct {
+	Window    Window        `json:"window"`
+	Workspace Workspace     `json:"workspace"`
+	Stashed   StashedWindow `json:"stashed"`
 }
 
 type SetFocusResult struct {
@@ -181,6 +301,34 @@ func cloneCommand(command Command) (Command, error) {
 	case CreateWindowCommand:
 		return value, nil
 	case *CreateWindowCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case RenameWorkspaceCommand:
+		return value, nil
+	case *RenameWorkspaceCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case DeleteWorkspaceCommand:
+		return value, nil
+	case *DeleteWorkspaceCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case RenameWindowCommand:
+		return value, nil
+	case *RenameWindowCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case DeleteWindowCommand:
+		return value, nil
+	case *DeleteWindowCommand:
 		if value == nil {
 			return nil, ErrInvalidCommand
 		}
@@ -219,9 +367,54 @@ func cloneCommand(command Command) (Command, error) {
 			return nil, ErrInvalidCommand
 		}
 		return *value, nil
+	case ResizeSplitCommand:
+		value.Weights = append([]uint32(nil), value.Weights...)
+		return value, nil
+	case *ResizeSplitCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		copy := *value
+		copy.Weights = append([]uint32(nil), value.Weights...)
+		return copy, nil
+	case StashPaneCommand:
+		return value, nil
+	case *StashPaneCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case RestorePaneCommand:
+		return value, nil
+	case *RestorePaneCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case StashWindowCommand:
+		return value, nil
+	case *StashWindowCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case RestoreWindowCommand:
+		return value, nil
+	case *RestoreWindowCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
 	case SetFocusCommand:
 		return value, nil
 	case *SetFocusCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		return *value, nil
+	case SelectWindowCommand:
+		return value, nil
+	case *SelectWindowCommand:
 		if value == nil {
 			return nil, ErrInvalidCommand
 		}
@@ -261,6 +454,16 @@ func cloneCommand(command Command) (Command, error) {
 			return nil, ErrInvalidCommand
 		}
 		return *value, nil
+	case PrepareTerminalRunCommand:
+		value.Launch = cloneLaunch(value.Launch)
+		return value, nil
+	case *PrepareTerminalRunCommand:
+		if value == nil {
+			return nil, ErrInvalidCommand
+		}
+		copy := *value
+		copy.Launch = cloneLaunch(copy.Launch)
+		return copy, nil
 	case BeginTerminalStopCommand:
 		return value, nil
 	case *BeginTerminalStopCommand:

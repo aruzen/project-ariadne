@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 
+	ariadneconfig "github.com/aruzen/ariadne/internal/config"
 	"github.com/aruzen/ariadne/internal/core"
 	"github.com/aruzen/ariadne/internal/vt/libghostty"
 )
@@ -17,6 +18,10 @@ const (
 
 type Options struct {
 	PaneFrame PaneFrameMode
+	Shell     string
+	CWD       string
+	Env       []string
+	Clipboard ariadneconfig.ClipboardOptions
 }
 
 func DefaultOptions() Options {
@@ -115,6 +120,76 @@ func (content *terminalPaneContent) WritePTY(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("TUI terminal content is unavailable")
 	}
 	return content.terminal.WriteWithResponse(data)
+}
+
+func (content *terminalPaneContent) setClipboardHandler(handler libghostty.ClipboardHandler, maxBytes int) {
+	if content.terminal != nil {
+		_ = content.terminal.SetClipboardHandler(handler)
+		_ = content.terminal.SetClipboardMaxBytes(maxBytes)
+	}
+}
+
+func (content *terminalPaneContent) scroll(delta int) error {
+	if content.terminal == nil {
+		return fmt.Errorf("TUI terminal content is unavailable")
+	}
+	return content.terminal.Scroll(delta)
+}
+
+func (content *terminalPaneContent) scrollTop() error {
+	if content.terminal == nil {
+		return fmt.Errorf("TUI terminal content is unavailable")
+	}
+	return content.terminal.ScrollTop()
+}
+
+func (content *terminalPaneContent) scrollBottom() error {
+	if content.terminal == nil {
+		return fmt.Errorf("TUI terminal content is unavailable")
+	}
+	return content.terminal.ScrollBottom()
+}
+
+func (content *terminalPaneContent) beginSelection(x, y int) error {
+	if content.terminal == nil {
+		return fmt.Errorf("TUI terminal content is unavailable")
+	}
+	return content.terminal.BeginSelection(x, y)
+}
+
+func (content *terminalPaneContent) adjustSelection(adjustment libghostty.SelectionAdjust) error {
+	if content.terminal == nil {
+		return fmt.Errorf("TUI terminal content is unavailable")
+	}
+	return content.terminal.AdjustSelection(adjustment)
+}
+
+func (content *terminalPaneContent) clearSelection() error {
+	if content.terminal == nil {
+		return nil
+	}
+	return content.terminal.ClearSelection()
+}
+
+func (content *terminalPaneContent) selectionText() (string, error) {
+	if content.terminal == nil {
+		return "", fmt.Errorf("TUI terminal content is unavailable")
+	}
+	return content.terminal.SelectionText()
+}
+
+func (content *terminalPaneContent) paste(data []byte, allowUnsafe bool) ([]byte, error) {
+	if content.terminal == nil {
+		return nil, fmt.Errorf("TUI terminal content is unavailable")
+	}
+	return content.terminal.Paste(data, allowUnsafe)
+}
+
+func (content *terminalPaneContent) search(query string, next bool) (int, int, error) {
+	if content.terminal == nil {
+		return 0, 0, fmt.Errorf("TUI terminal content is unavailable")
+	}
+	return content.terminal.Search(query, next)
 }
 
 func (content *terminalPaneContent) Draw(surface *Surface, rect Rect, _ core.Pane, focused bool, _ Style) (Cursor, error) {

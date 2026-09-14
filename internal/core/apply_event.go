@@ -15,16 +15,25 @@ func ApplyEvent(snapshot Snapshot, event Event) (Snapshot, error) {
 		if payload.Workspace.ID >= next.NextWorkspaceID {
 			next.NextWorkspaceID = payload.Workspace.ID + 1
 		}
+	case WorkspaceEvent:
+		upsertWorkspace(&next, payload.Workspace)
+	case WorkspaceDeletedEvent:
+		removeWorkspace(&next, payload.Workspace.ID)
+		for _, label := range payload.RemovedLabels {
+			removeSnapshotLabel(&next, label)
+		}
 	case WindowCreatedEvent:
 		next.Windows = append(next.Windows, cloneWindow(payload.Window))
 		if payload.Window.ID >= next.NextWindowID {
 			next.NextWindowID = payload.Window.ID + 1
 		}
-		for index := range next.Workspaces {
-			if next.Workspaces[index].ID == payload.Window.WorkspaceID {
-				next.Workspaces[index].WindowIDs = append(next.Workspaces[index].WindowIDs, payload.Window.ID)
-				break
-			}
+	case WindowEvent:
+		upsertWindow(&next, payload.Window)
+	case WindowDeletedEvent:
+		removeWindow(&next, payload.Window.ID)
+		upsertWorkspace(&next, payload.Workspace)
+		for _, label := range payload.RemovedLabels {
+			removeSnapshotLabel(&next, label)
 		}
 	case PaneCreatedEvent:
 		next.Panes = append(next.Panes, clonePane(payload.Pane))
@@ -32,10 +41,13 @@ func ApplyEvent(snapshot Snapshot, event Event) (Snapshot, error) {
 			next.NextPaneID = payload.Pane.ID + 1
 		}
 		upsertWindow(&next, payload.Window)
+		bumpNextSplitID(&next, payload.Window)
 	case PaneMovedEvent:
 		upsertPane(&next, payload.Pane)
 		upsertWindow(&next, payload.SourceWindow)
 		upsertWindow(&next, payload.DestinationWindow)
+		bumpNextSplitID(&next, payload.SourceWindow)
+		bumpNextSplitID(&next, payload.DestinationWindow)
 	case PaneClosedEvent:
 		for index := range next.Panes {
 			if next.Panes[index].ID == payload.Pane.ID {
@@ -43,9 +55,33 @@ func ApplyEvent(snapshot Snapshot, event Event) (Snapshot, error) {
 				break
 			}
 		}
-		upsertWindow(&next, payload.Window)
+		removeStashedPane(&next, payload.Pane.ID)
+		if payload.Window.ID != 0 {
+			upsertWindow(&next, payload.Window)
+		}
 		for _, label := range payload.RemovedLabels {
 			removeSnapshotLabel(&next, label)
+		}
+	case PaneStashEvent:
+		upsertPane(&next, payload.Pane)
+		upsertWindow(&next, payload.Window)
+		if event.Kind == EventPaneStashed {
+			upsertStashedPane(&next, payload.Stashed)
+		} else if event.Kind == EventPaneRestored {
+			removeStashedPane(&next, payload.Pane.ID)
+			bumpNextSplitID(&next, payload.Window)
+		} else {
+			return Snapshot{}, fmt.Errorf("%w: event %q has pane stash payload", ErrInvalidState, event.Kind)
+		}
+	case WindowStashEvent:
+		upsertWindow(&next, payload.Window)
+		upsertWorkspace(&next, payload.Workspace)
+		if event.Kind == EventWindowStashed {
+			upsertStashedWindow(&next, payload.Stashed)
+		} else if event.Kind == EventWindowRestored {
+			removeStashedWindow(&next, payload.Window.ID)
+		} else {
+			return Snapshot{}, fmt.Errorf("%w: event %q has window stash payload", ErrInvalidState, event.Kind)
 		}
 	case TerminalEvent:
 		upsertPane(&next, payload.Pane)
@@ -89,8 +125,48 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 	for index, pane := range snapshot.Panes {
 		result.Panes[index] = clonePane(pane)
 	}
+	result.StashedPanes = append([]StashedPane(nil), snapshot.StashedPanes...)
+	result.StashedWindows = append([]StashedWindow(nil), snapshot.StashedWindows...)
 	result.Labels = append([]Label(nil), snapshot.Labels...)
 	return result
+}
+
+func upsertStashedPane(snapshot *Snapshot, stashed StashedPane) {
+	for index := range snapshot.StashedPanes {
+		if snapshot.StashedPanes[index].PaneID == stashed.PaneID {
+			snapshot.StashedPanes[index] = stashed
+			return
+		}
+	}
+	snapshot.StashedPanes = append(snapshot.StashedPanes, stashed)
+}
+
+func removeStashedPane(snapshot *Snapshot, paneID PaneID) {
+	for index := range snapshot.StashedPanes {
+		if snapshot.StashedPanes[index].PaneID == paneID {
+			snapshot.StashedPanes = append(snapshot.StashedPanes[:index], snapshot.StashedPanes[index+1:]...)
+			return
+		}
+	}
+}
+
+func upsertStashedWindow(snapshot *Snapshot, stashed StashedWindow) {
+	for index := range snapshot.StashedWindows {
+		if snapshot.StashedWindows[index].WindowID == stashed.WindowID {
+			snapshot.StashedWindows[index] = stashed
+			return
+		}
+	}
+	snapshot.StashedWindows = append(snapshot.StashedWindows, stashed)
+}
+
+func removeStashedWindow(snapshot *Snapshot, windowID WindowID) {
+	for index := range snapshot.StashedWindows {
+		if snapshot.StashedWindows[index].WindowID == windowID {
+			snapshot.StashedWindows = append(snapshot.StashedWindows[:index], snapshot.StashedWindows[index+1:]...)
+			return
+		}
+	}
 }
 
 func upsertWindow(snapshot *Snapshot, window Window) {
@@ -101,6 +177,34 @@ func upsertWindow(snapshot *Snapshot, window Window) {
 		}
 	}
 	snapshot.Windows = append(snapshot.Windows, cloneWindow(window))
+}
+
+func upsertWorkspace(snapshot *Snapshot, workspace Workspace) {
+	for index := range snapshot.Workspaces {
+		if snapshot.Workspaces[index].ID == workspace.ID {
+			snapshot.Workspaces[index] = cloneWorkspace(workspace)
+			return
+		}
+	}
+	snapshot.Workspaces = append(snapshot.Workspaces, cloneWorkspace(workspace))
+}
+
+func removeWorkspace(snapshot *Snapshot, workspaceID WorkspaceID) {
+	for index := range snapshot.Workspaces {
+		if snapshot.Workspaces[index].ID == workspaceID {
+			snapshot.Workspaces = append(snapshot.Workspaces[:index], snapshot.Workspaces[index+1:]...)
+			return
+		}
+	}
+}
+
+func removeWindow(snapshot *Snapshot, windowID WindowID) {
+	for index := range snapshot.Windows {
+		if snapshot.Windows[index].ID == windowID {
+			snapshot.Windows = append(snapshot.Windows[:index], snapshot.Windows[index+1:]...)
+			return
+		}
+	}
 }
 
 func upsertPane(snapshot *Snapshot, pane Pane) {
@@ -130,5 +234,20 @@ func removeSnapshotLabel(snapshot *Snapshot, label Label) {
 			snapshot.Labels = append(snapshot.Labels[:index], snapshot.Labels[index+1:]...)
 			return
 		}
+	}
+}
+
+func bumpNextSplitID(snapshot *Snapshot, window Window) {
+	var visit func(LayoutNode)
+	visit = func(node LayoutNode) {
+		if node.SplitID >= snapshot.NextSplitID {
+			snapshot.NextSplitID = node.SplitID + 1
+		}
+		for _, child := range node.Children {
+			visit(child)
+		}
+	}
+	if window.Layout != nil {
+		visit(*window.Layout)
 	}
 }

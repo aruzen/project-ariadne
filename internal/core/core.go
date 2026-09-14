@@ -267,8 +267,12 @@ func (c *Core) handle(operation request, frontends map[FrontendID]*frontend, nex
 }
 
 func changesPersistentState(command Command) bool {
-	_, ephemeral := command.(SetFocusCommand)
-	return !ephemeral
+	switch command.(type) {
+	case SetFocusCommand, SelectWindowCommand:
+		return false
+	default:
+		return true
+	}
 }
 
 func (c *Core) publish(event Event, frontends map[FrontendID]*frontend) {
@@ -288,14 +292,18 @@ func (c *Core) initialFrontendState(id FrontendID) FrontendState {
 		return state
 	}
 	state.WorkspaceID = c.state.workspaceOrder[0]
-	workspace := c.state.workspaces[state.WorkspaceID]
-	if len(workspace.WindowIDs) == 0 {
+	for _, workspaceID := range c.state.workspaceOrder {
+		workspace := c.state.workspaces[workspaceID]
+		if len(workspace.WindowIDs) == 0 {
+			continue
+		}
+		state.WorkspaceID = workspaceID
+		state.WindowID = workspace.WindowIDs[0]
+		window := c.state.windows[state.WindowID]
+		if window.Layout != nil {
+			state.PaneID = firstPane(*window.Layout)
+		}
 		return state
-	}
-	state.WindowID = workspace.WindowIDs[0]
-	window := c.state.windows[state.WindowID]
-	if window.Layout != nil {
-		state.PaneID = firstPane(*window.Layout)
 	}
 	return state
 }
