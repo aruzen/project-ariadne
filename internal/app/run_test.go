@@ -4,6 +4,7 @@ package app
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -15,10 +16,44 @@ func TestRunRoutesDaemonServe(t *testing.T) {
 	}
 }
 
-func TestRunRequiresCommand(t *testing.T) {
+func TestRunWithoutCommandShowsHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := Run(nil, &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Usage:\n") || !strings.Contains(stdout.String(), "ariadne help") || stderr.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestRunHelpFormsDoNotResolveIPC(t *testing.T) {
+	for _, arguments := range [][]string{
+		{"--help"},
+		{"-h"},
+		{"help"},
+		{"help", "new"},
+		{"new", "--help"},
+		{"daemon", "stop", "--help"},
+	} {
+		t.Run(strings.Join(arguments, "_"), func(t *testing.T) {
+			t.Setenv("XDG_RUNTIME_DIR", "relative-path")
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			if err := Run(arguments, &stdout, &stderr); err != nil {
+				t.Fatalf("Run(%q): %v", arguments, err)
+			}
+			if !strings.Contains(stdout.String(), "Usage:\n") || stderr.Len() != 0 {
+				t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunUnknownGlobalOptionSuggestsHelp(t *testing.T) {
 	var output bytes.Buffer
-	err := Run(nil, &output, &output)
-	if err == nil || err.Error() != "command is required" {
+	err := Run([]string{"--unknown"}, &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "ariadne --help") {
 		t.Fatalf("Run error = %v", err)
 	}
 }

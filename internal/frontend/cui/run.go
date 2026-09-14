@@ -35,15 +35,15 @@ const (
 
 // Run executes the command-line frontend against endpoint with explicitly supplied I/O.
 func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
-	if len(arguments) == 0 {
-		return errors.New("command is required")
+	if handled, err := HandleHelp(arguments, stdout); handled {
+		return err
 	}
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	command := arguments[0]
 	if !knownCommand(command) {
-		return fmt.Errorf("unknown command %q", command)
+		return fmt.Errorf("unknown command %q; run 'ariadne --help' to list commands", command)
 	}
 	if command == "init" {
 		return runInit(arguments[1:], stdout)

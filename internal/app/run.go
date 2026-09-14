@@ -4,8 +4,8 @@
 package app
 
 import (
-	"errors"
 	"flag"
+	"fmt"
 	"io"
 
 	daemonapp "github.com/aruzen/ariadne/internal/app/daemon"
@@ -16,14 +16,20 @@ import (
 // Run dispatches to either the frontend or the foreground daemon role.
 func Run(arguments []string, stdout, stderr io.Writer) error {
 	global := flag.NewFlagSet("ariadne", flag.ContinueOnError)
-	global.SetOutput(stderr)
+	global.SetOutput(io.Discard)
 	endpoint := global.String("socket", "", "local IPC endpoint")
+	showHelp := false
+	global.BoolVar(&showHelp, "help", false, "show help")
+	global.BoolVar(&showHelp, "h", false, "show help")
 	if err := global.Parse(arguments); err != nil {
-		return err
+		return fmt.Errorf("%w; run 'ariadne --help' for usage", err)
 	}
 	remaining := global.Args()
-	if len(remaining) == 0 {
-		return errors.New("command is required")
+	if showHelp {
+		return cui.WriteHelp(remaining, stdout)
+	}
+	if handled, err := cui.HandleHelp(remaining, stdout); handled {
+		return err
 	}
 	if remaining[0] == "init" {
 		return cui.Run("", remaining, stdout, stderr)

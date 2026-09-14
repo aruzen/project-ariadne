@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	platformterminal "github.com/aruzen/ariadne/internal/platform/terminal"
@@ -62,8 +63,28 @@ func TestOpenRejectsNonTTYBeforeConnecting(t *testing.T) {
 func TestUnknownCommandDoesNotConnect(t *testing.T) {
 	var output bytes.Buffer
 	err := Run(missingEndpoint(t), []string{"unknown"}, &output, &output)
-	if err == nil || err.Error() != `unknown command "unknown"` {
+	if err == nil || err.Error() != `unknown command "unknown"; run 'ariadne --help' to list commands` {
 		t.Fatalf("unknown command error = %v", err)
+	}
+}
+
+func TestCommandHelpDoesNotConnect(t *testing.T) {
+	for _, arguments := range [][]string{
+		{"tui", "--help"},
+		{"list", "-h"},
+		{"restore", "pane", "--help"},
+		{"tool", "new", "--provider", "example", "--help"},
+	} {
+		t.Run(strings.Join(arguments, "_"), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			if err := Run(missingEndpoint(t), arguments, &stdout, &stderr); err != nil {
+				t.Fatalf("Run(%q): %v", arguments, err)
+			}
+			if !strings.Contains(stdout.String(), "Usage:\n") || stderr.Len() != 0 {
+				t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
 	}
 }
 
