@@ -110,11 +110,17 @@ type session struct {
 	dirty                bool
 	daemonStatus         protocol.DaemonStatusResult
 	quitRequested        bool
+	inputDecoder         inputDecoder
+	keybindings          ariadneconfig.Keybindings
 }
 
 // Run enters the full-screen frontend using an already synchronized client.
 func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot, stdout io.Writer, options Options) (resultErr error) {
 	if err := options.validate(); err != nil {
+		return err
+	}
+	decoder, err := newInputDecoder(options.Keybindings)
+	if err != nil {
 		return err
 	}
 	output, ok := stdout.(*os.File)
@@ -157,6 +163,8 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 		shell: options.Shell, cwd: options.CWD, env: append([]string(nil), options.Env...),
 		clipboardRead: options.Clipboard.Read, clipboardWrite: options.Clipboard.Write,
 		clipboardMax: options.Clipboard.MaxTextBytes,
+		inputDecoder: decoder,
+		keybindings:  resolvedKeybindings(options.Keybindings),
 	}
 	if value.shell == "" {
 		value.shell = os.Getenv("SHELL")
@@ -195,8 +203,6 @@ func (session *session) loop(output *os.File) error {
 	defer frames.Stop()
 	clock := time.NewTicker(time.Second)
 	defer clock.Stop()
-	decoder := inputDecoder{}
-
 	for {
 		select {
 		case message, ok := <-input:
@@ -206,34 +212,7 @@ func (session *session) loop(output *os.File) error {
 			if message.err != nil {
 				return message.err
 			}
-			if session.inputMode != inputModeNormal {
-				session.handleModalInput(message.data)
-				continue
-			}
-			if session.copyMode {
-				session.handleCopyInput(message.data)
-				continue
-			}
-			for _, token := range decoder.FeedOrdered(message.data) {
-				if token.action == actionQuit {
-					return nil
-				}
-				if token.action != actionNone {
-					session.handleAction(token.action)
-					continue
-				}
-				if len(token.data) == 0 {
-					continue
-				}
-				switch {
-				case session.inputMode != inputModeNormal:
-					session.handleModalInput(token.data)
-				case session.copyMode:
-					session.handleCopyInput(token.data)
-				default:
-					session.sendInput(token.data)
-				}
-			}
+			session.processInput(message.data)
 		case event, ok := <-session.client.Events():
 			if !ok {
 				return io.EOF
@@ -314,6 +293,54 @@ func (session *session) loop(output *os.File) error {
 			return session.ctx.Err()
 		}
 	}
+}
+
+// processInput changes routing immediately when a command enters or leaves a
+// mode, even when both sides of the transition arrived in one terminal read.
+func (session *session) processInput(data []byte) {
+	forward := make([]byte, 0, len(data))
+	flush := func() {
+		if len(forward) != 0 {
+			session.sendInput(forward)
+			forward = forward[:0]
+		}
+	}
+	for index := 0; index < len(data); {
+		if session.quitRequested {
+			break
+		}
+		if session.inputMode != inputModeNormal {
+			flush()
+			size := modalInputUnitSize(data[index:])
+			session.handleModalInput(data[index : index+size])
+			index += size
+			continue
+		}
+		if session.copyMode {
+			flush()
+			session.handleCopyInput(data[index : index+1])
+			index++
+			continue
+		}
+		for _, token := range session.inputDecoder.Feed(data[index : index+1]) {
+			if len(token.data) != 0 {
+				forward = append(forward, token.data...)
+			}
+			if len(token.commands) != 0 {
+				flush()
+				session.executeCommandSequence(token.commands)
+			}
+		}
+		index++
+	}
+	flush()
+}
+
+func modalInputUnitSize(data []byte) int {
+	if len(data) >= 3 && data[0] == 0x1b && data[1] == '[' && (data[2] == 'A' || data[2] == 'B') {
+		return 3
+	}
+	return 1
 }
 
 func (session *session) selectInitialWindow() {
@@ -707,7 +734,7 @@ func (session *session) render() ([]byte, error) {
 	}
 	message := session.message
 	if message == "" || (!session.messageTime.IsZero() && time.Since(session.messageTime) > 4*time.Second) {
-		message = "^A d quit · h/j/k/l focus · z zoom · %/\" split · x close · : command"
+		message = keybindingStatus(session.keybindings)
 	}
 	if session.inputMode == inputModePrompt {
 		message = session.promptLead + session.prompt

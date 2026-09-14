@@ -20,21 +20,23 @@ const (
 )
 
 type Options struct {
-	PaneFrame PaneFrameMode
-	Shell     string
-	CWD       string
-	Env       []string
-	Clipboard ariadneconfig.ClipboardOptions
+	PaneFrame   PaneFrameMode
+	Keybindings ariadneconfig.Keybindings
+	Shell       string
+	CWD         string
+	Env         []string
+	Clipboard   ariadneconfig.ClipboardOptions
 }
 
 func DefaultOptions() Options {
-	return Options{PaneFrame: PaneFrameFull}
+	return Options{PaneFrame: PaneFrameFull, Keybindings: ariadneconfig.DefaultKeybindings()}
 }
 
 func (options Options) validate() error {
 	switch options.PaneFrame {
 	case PaneFrameFull, PaneFrameSplit, PaneFrameNone:
-		return nil
+		_, err := newInputDecoder(options.Keybindings)
+		return err
 	default:
 		return fmt.Errorf("invalid TUI Pane frame mode %q", options.PaneFrame)
 	}
@@ -524,7 +526,7 @@ func (content *builtinToolContent) lines() []string {
 		}
 		return lines
 	case "help":
-		return promptHelpLines()
+		return promptHelpLines(content.owner.keybindings)
 	case "workspace-list":
 		lines := []string{"Workspaces / Windows"}
 		for _, workspace := range content.owner.snapshot.Workspaces {

@@ -10,14 +10,22 @@ import (
 )
 
 func TestInputDecoder(t *testing.T) {
-	decoder := inputDecoder{}
-	data, actions := decoder.Feed([]byte{'a', 0x01})
-	if string(data) != "a" || len(actions) != 0 {
-		t.Fatalf("first feed = %q, %v", data, actions)
+	decoder, err := newInputDecoder(nil)
+	if err != nil {
+		t.Fatalf("newInputDecoder: %v", err)
 	}
-	data, actions = decoder.Feed([]byte{'j', 0x01, 0x01, 0x01, 'x'})
-	if string(data) != "\x01" || !reflect.DeepEqual(actions, []inputAction{actionFocusDown, actionClosePane}) {
-		t.Fatalf("second feed = %q, %v", data, actions)
+	tokens := decoder.Feed([]byte{'a', 0x01})
+	if !reflect.DeepEqual(tokens, []inputToken{{data: []byte{'a'}}}) {
+		t.Fatalf("first feed = %#v", tokens)
+	}
+	tokens = decoder.Feed([]byte{'j', 0x01, 0x01, 0x01, 'x'})
+	want := []inputToken{
+		{commands: []string{"focus down"}},
+		{commands: []string{"send-key ctrl-a"}},
+		{commands: []string{"close-confirm"}},
+	}
+	if !reflect.DeepEqual(tokens, want) {
+		t.Fatalf("second feed = %#v, want %#v", tokens, want)
 	}
 }
 
@@ -93,48 +101,66 @@ func TestDirectionalDistance(t *testing.T) {
 	}
 }
 
-func TestInputDecoderRecognizesPhaseNineBindings(t *testing.T) {
-	decoder := inputDecoder{}
-	input := []byte{
-		0x01, 0x08, 0x01, 0x0a, 0x01, 0x0b, 0x01, 0x0c,
-		0x01, 'z', 0x01, '%', 0x01, '"', 0x01, 'c', 0x01, ':',
-		0x01, 's', 0x01, 'S',
+func TestInputDecoderPreservesDataAndCommandOrdering(t *testing.T) {
+	decoder, err := newInputDecoder(nil)
+	if err != nil {
+		t.Fatalf("newInputDecoder: %v", err)
 	}
-	data, actions := decoder.Feed(input)
-	want := []inputAction{
-		actionResizeLeft, actionResizeDown, actionResizeUp, actionResizeRight,
-		actionZoom, actionSplitHorizontal, actionSplitVertical, actionNewWindow, actionCommandPrompt,
-		actionStashPane, actionListStash,
-	}
-	if len(data) != 0 || !reflect.DeepEqual(actions, want) {
-		t.Fatalf("Feed = %q, %v, want no data and %v", data, actions, want)
-	}
-}
-
-func TestInputDecoderRecognizesToolAndAttentionBindings(t *testing.T) {
-	decoder := inputDecoder{}
-	data, actions := decoder.Feed([]byte{
-		0x01, 'a', 0x01, 'A', 0x01, 'm', 0x01, '?',
-	})
-	want := []inputAction{
-		actionNextAttention, actionPreviousAttention,
-		actionAcknowledgeAttention, actionHelp,
-	}
-	if len(data) != 0 || !reflect.DeepEqual(actions, want) {
-		t.Fatalf("Feed = %q, %v, want no data and %v", data, actions, want)
-	}
-}
-
-func TestInputDecoderPreservesDataAndActionOrdering(t *testing.T) {
-	decoder := inputDecoder{}
-	tokens := decoder.FeedOrdered([]byte("before\x01:after\r"))
+	tokens := decoder.Feed([]byte("before\x01:after\r"))
 	want := []inputToken{
 		{data: []byte("before")},
-		{action: actionCommandPrompt},
+		{commands: []string{"command-prompt"}},
 		{data: []byte("after\r")},
 	}
 	if !reflect.DeepEqual(tokens, want) {
 		t.Fatalf("tokens = %#v, want %#v", tokens, want)
+	}
+}
+
+func TestInputDecoderUsesConfiguredCommandChainAndForwardsUnknownInput(t *testing.T) {
+	decoder, err := newInputDecoder(ariadneconfig.Keybindings{
+		"ctrl-b x": "focus left; zoom on",
+	})
+	if err != nil {
+		t.Fatalf("newInputDecoder: %v", err)
+	}
+	tokens := decoder.Feed([]byte("a\x02yb\x02x"))
+	want := []inputToken{
+		{data: []byte("a\x02yb")},
+		{commands: []string{"focus left", "zoom on"}},
+	}
+	if !reflect.DeepEqual(tokens, want) {
+		t.Fatalf("tokens = %#v, want %#v", tokens, want)
+	}
+}
+
+func TestInputDecoderRejectsAmbiguousAndDuplicateSequences(t *testing.T) {
+	for _, bindings := range []ariadneconfig.Keybindings{
+		{"ctrl-a": "help", "ctrl-a x": "close"},
+		{"ctrl-h": "help", "c-h": "close"},
+	} {
+		if _, err := newInputDecoder(bindings); err == nil {
+			t.Fatalf("newInputDecoder(%v) accepted conflicting bindings", bindings)
+		}
+	}
+}
+
+func TestInputDecoderRejectsMalformedOrUnknownCommands(t *testing.T) {
+	for _, command := range []string{"help;", `run "unfinished`, "typo-command"} {
+		if _, err := newInputDecoder(ariadneconfig.Keybindings{"ctrl-a q": command}); err == nil {
+			t.Fatalf("newInputDecoder accepted %q", command)
+		}
+	}
+}
+
+func TestParseKeySequence(t *testing.T) {
+	got, err := parseKeySequence("C-a ctrl+H up space alt-x f5 λ")
+	if err != nil {
+		t.Fatalf("parseKeySequence: %v", err)
+	}
+	want := append([]byte{0x01, 0x08}, []byte("\x1b[A \x1bx\x1b[15~λ")...)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sequence = % x, want % x", got, want)
 	}
 }
 
@@ -147,5 +173,17 @@ func TestModalPromptEditingAndCancel(t *testing.T) {
 	session.handleModalInput([]byte{0x1b})
 	if session.inputMode != inputModeNormal || session.prompt != "" {
 		t.Fatalf("cancelled prompt = %q mode=%d", session.prompt, session.inputMode)
+	}
+}
+
+func TestProcessInputPreservesModeTransitionsWithinOneRead(t *testing.T) {
+	decoder, err := newInputDecoder(ariadneconfig.Keybindings{"ctrl-a q": "command-prompt"})
+	if err != nil {
+		t.Fatalf("newInputDecoder: %v", err)
+	}
+	session := session{inputDecoder: decoder}
+	session.processInput([]byte{'\x01', 'q', 0x1b, '\x01', 'q'})
+	if session.inputMode != inputModePrompt {
+		t.Fatalf("input mode = %d, want prompt", session.inputMode)
 	}
 }

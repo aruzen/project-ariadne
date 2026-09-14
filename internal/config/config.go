@@ -24,6 +24,9 @@ const (
 	DefaultClipboardPolicy      = ClipboardAsk
 	DefaultClipboardMaxBytes    = 1 << 20
 	DefaultClipboardTimeoutMS   = 2000
+	MaxKeybindings              = 256
+	MaxKeySequenceBytes         = 128
+	MaxKeyCommandBytes          = 4096
 )
 
 type ClipboardPolicy string
@@ -58,13 +61,54 @@ var (
 // Config is loaded at process startup. An empty Shell selects the runtime
 // $SHELL and /bin/sh fallback chain.
 type Config struct {
-	Shell     string           `toml:"shell"`
-	DetachKey string           `toml:"detach_key"`
-	TUI       TUIOptions       `toml:"tui"`
-	Terminal  TerminalLimits   `toml:"terminal"`
-	Clipboard ClipboardOptions `toml:"clipboard"`
-	Transport TransportLimits  `toml:"transport"`
-	Attention AttentionLimits  `toml:"attention"`
+	Shell       string           `toml:"shell"`
+	DetachKey   string           `toml:"detach_key"`
+	Keybindings Keybindings      `toml:"keybindings"`
+	TUI         TUIOptions       `toml:"tui"`
+	Terminal    TerminalLimits   `toml:"terminal"`
+	Clipboard   ClipboardOptions `toml:"clipboard"`
+	Transport   TransportLimits  `toml:"transport"`
+	Attention   AttentionLimits  `toml:"attention"`
+}
+
+// Keybindings maps a portable key sequence to one or more command-prompt
+// commands. An empty command explicitly disables a default binding.
+type Keybindings map[string]string
+
+func DefaultKeybindings() Keybindings {
+	return Keybindings{
+		"ctrl-a d":      "detach",
+		"ctrl-a h":      "focus left",
+		"ctrl-a j":      "focus down",
+		"ctrl-a k":      "focus up",
+		"ctrl-a l":      "focus right",
+		"ctrl-a ctrl-h": "resize left",
+		"ctrl-a ctrl-j": "resize down",
+		"ctrl-a ctrl-k": "resize up",
+		"ctrl-a ctrl-l": "resize right",
+		"ctrl-a z":      "zoom toggle",
+		"ctrl-a ctrl-a": "send-key ctrl-a",
+		"ctrl-a %":      "split h",
+		"ctrl-a \"":     "split v",
+		"ctrl-a x":      "close-confirm",
+		"ctrl-a r":      "restart",
+		"ctrl-a c":      "new-window",
+		"ctrl-a n":      "next-window",
+		"ctrl-a p":      "previous-window",
+		"ctrl-a )":      "next-workspace",
+		"ctrl-a (":      "previous-workspace",
+		"ctrl-a :":      "command-prompt",
+		"ctrl-a ,":      "command-prompt rename-window",
+		"ctrl-a $":      "command-prompt rename-workspace",
+		"ctrl-a [":      "copy-mode",
+		"ctrl-a ]":      "paste",
+		"ctrl-a s":      "stash-pane",
+		"ctrl-a S":      "stash-list",
+		"ctrl-a a":      "attention next",
+		"ctrl-a A":      "attention prev",
+		"ctrl-a m":      "attention ack",
+		"ctrl-a ?":      "help",
+	}
 }
 
 type AttentionLimits struct {
@@ -111,8 +155,9 @@ func Default() Config {
 	stream := streammux.DefaultConfig()
 	peer := streammux.DefaultPeerConfig()
 	return Config{
-		DetachKey: DefaultDetachKey,
-		TUI:       TUIOptions{PaneFrame: DefaultTUIFrameMode},
+		DetachKey:   DefaultDetachKey,
+		Keybindings: DefaultKeybindings(),
+		TUI:         TUIOptions{PaneFrame: DefaultTUIFrameMode},
 		Terminal: TerminalLimits{
 			SuccessfulExit: DefaultSuccessfulExitPolicy,
 			HistoryBytes:   manager.HistoryBytes, MaxTotalHistoryBytes: manager.MaxTotalHistoryBytes,
@@ -203,6 +248,17 @@ func (configuration Config) validate() error {
 	}
 	if strings.ContainsRune(configuration.DetachKey, 0) {
 		return fmt.Errorf("%w: detach_key contains NUL", ErrInvalid)
+	}
+	if len(configuration.Keybindings) > MaxKeybindings {
+		return fmt.Errorf("%w: keybindings exceeds %d entries", ErrInvalid, MaxKeybindings)
+	}
+	for keys, commands := range configuration.Keybindings {
+		if strings.TrimSpace(keys) == "" || len(keys) > MaxKeySequenceBytes || strings.ContainsRune(keys, 0) {
+			return fmt.Errorf("%w: invalid keybinding sequence %q", ErrInvalid, keys)
+		}
+		if len(commands) > MaxKeyCommandBytes || strings.ContainsRune(commands, 0) {
+			return fmt.Errorf("%w: invalid keybinding command for %q", ErrInvalid, keys)
+		}
 	}
 	if configuration.Shell != "" {
 		if strings.TrimSpace(configuration.Shell) == "" {

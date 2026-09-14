@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -16,7 +17,7 @@ func TestParseDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse defaults: %v", err)
 	}
-	if configuration != Default() {
+	if !reflect.DeepEqual(configuration, Default()) {
 		t.Fatalf("defaults = %+v, want %+v", configuration, Default())
 	}
 	configuration, err = Parse([]byte("shell = \"/bin/zsh\"\ndetach_key = \"ctrl-b x\"\n"))
@@ -105,6 +106,25 @@ func TestParseTUIFrameMode(t *testing.T) {
 	}
 }
 
+func TestParseKeybindingOverridesAndUnbinds(t *testing.T) {
+	configuration, err := Parse([]byte("[keybindings]\n\"ctrl-a h\" = \"focus right; zoom on\"\n\"ctrl-a x\" = \"\"\n\"ctrl-a q\" = \"detach\"\n"))
+	if err != nil {
+		t.Fatalf("Parse keybindings: %v", err)
+	}
+	if got := configuration.Keybindings["ctrl-a h"]; got != "focus right; zoom on" {
+		t.Fatalf("overridden binding = %q", got)
+	}
+	if got := configuration.Keybindings["ctrl-a x"]; got != "" {
+		t.Fatalf("disabled binding = %q", got)
+	}
+	if got := configuration.Keybindings["ctrl-a q"]; got != "detach" {
+		t.Fatalf("new binding = %q", got)
+	}
+	if got := configuration.Keybindings["ctrl-a j"]; got != "focus down" {
+		t.Fatalf("default binding was not preserved: %q", got)
+	}
+}
+
 func TestParseAndApplyBufferLimits(t *testing.T) {
 	configuration, err := Parse([]byte(`
 [terminal]
@@ -160,7 +180,7 @@ func TestLoadMissingAndExisting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load missing: %v", err)
 	}
-	if configuration != Default() {
+	if !reflect.DeepEqual(configuration, Default()) {
 		t.Fatalf("missing config = %+v", configuration)
 	}
 	if err := os.WriteFile(path, []byte("shell = \"fish\"\n"), 0o600); err != nil {

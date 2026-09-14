@@ -111,6 +111,7 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 			options.Shell = fileConfiguration.Shell
 		}
 		options.Clipboard = fileConfiguration.Clipboard
+		options.Keybindings = fileConfiguration.Keybindings
 		return tui.Run(operationCtx, frontend, synchronized.Snapshot, stdout, options)
 	case "new":
 		return runNew(operationCtx, frontend, arguments[1:], stdout, stderr)

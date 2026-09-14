@@ -21,65 +21,6 @@ const (
 	inputModeConfirm
 )
 
-func (session *session) handleAction(action inputAction) {
-	switch action {
-	case actionFocusLeft, actionFocusDown, actionFocusUp, actionFocusRight:
-		if !session.zoom {
-			session.moveFocus(action)
-		}
-	case actionResizeLeft, actionResizeDown, actionResizeUp, actionResizeRight:
-		session.resizeFocusedPane(action)
-	case actionZoom:
-		session.setZoom("toggle")
-	case actionSplitHorizontal:
-		session.splitTerminal(core.SplitHorizontal)
-	case actionSplitVertical:
-		session.splitTerminal(core.SplitVertical)
-	case actionClosePane:
-		if session.focus != 0 {
-			session.beginConfirmation(fmt.Sprintf("close pane %d?", session.focus), func(allowed bool) {
-				if allowed {
-					session.closeFocusedPane()
-				}
-			})
-		}
-	case actionRestart:
-		session.restartFocused()
-	case actionNewWindow:
-		session.createWindow()
-	case actionNextWindow:
-		session.selectRelativeWindow(1)
-	case actionPreviousWindow:
-		session.selectRelativeWindow(-1)
-	case actionNextWorkspace:
-		session.selectRelativeWorkspace(1)
-	case actionPreviousWorkspace:
-		session.selectRelativeWorkspace(-1)
-	case actionCommandPrompt:
-		session.beginPrompt(":", "")
-	case actionRenameWindow:
-		session.beginPrompt(":", "rename-window ")
-	case actionRenameWorkspace:
-		session.beginPrompt(":", "rename-workspace ")
-	case actionCopyMode:
-		session.enterCopyMode()
-	case actionPaste:
-		session.requestPaste()
-	case actionStashPane:
-		session.stashFocusedPane()
-	case actionListStash:
-		session.openBuiltinTool("stash-list")
-	case actionNextAttention:
-		session.navigateAttention(1)
-	case actionPreviousAttention:
-		session.navigateAttention(-1)
-	case actionAcknowledgeAttention:
-		session.ackCurrentAttention()
-	case actionHelp:
-		session.openBuiltinTool("help")
-	}
-}
-
 func (session *session) beginPrompt(lead, initial string) {
 	session.inputMode = inputModePrompt
 	session.promptLead = lead
@@ -88,6 +29,15 @@ func (session *session) beginPrompt(lead, initial string) {
 	session.promptDraft = initial
 	session.promptCallback = session.executePrompt
 	session.dirty = true
+}
+
+func (session *session) executeCommandSequence(commands []string) {
+	for _, command := range commands {
+		session.executePrompt(command)
+		if session.quitRequested || session.inputMode != inputModeNormal || session.copyMode {
+			return
+		}
+	}
 }
 
 func (session *session) beginPromptWithCallback(lead, initial string, callback func(string)) {
@@ -298,6 +248,12 @@ func (session *session) executePrompt(commandLine string) {
 			return
 		}
 		session.openBuiltinTool("command-palette")
+	case "command-prompt", "prompt":
+		initial := strings.Join(fields[1:], " ")
+		if initial != "" {
+			initial += " "
+		}
+		session.beginPrompt(":", initial)
 	case "detach", "quit":
 		if len(fields) != 1 {
 			session.setMessage("usage: detach")
@@ -305,6 +261,17 @@ func (session *session) executePrompt(commandLine string) {
 		}
 		session.quitRequested = true
 		session.cancel()
+	case "send-key":
+		if len(fields) < 2 {
+			session.setMessage("usage: send-key KEYS...")
+			return
+		}
+		sequence, parseErr := parseKeySequence(strings.Join(fields[1:], " "))
+		if parseErr != nil {
+			session.setMessage(parseErr.Error())
+			return
+		}
+		session.sendInput(sequence)
 	case "split", "split-pane", "split-window":
 		if len(fields) < 2 || (fields[1] != "h" && fields[1] != "v") {
 			session.setMessage("usage: split h|v [-- command...]")
@@ -368,6 +335,18 @@ func (session *session) executePrompt(commandLine string) {
 			return
 		}
 		session.closePane(core.PaneID(id))
+	case "close-confirm":
+		id, ok := optionalID(fields, uint64(session.focus))
+		if !ok {
+			session.setMessage("usage: close-confirm [PANE]")
+			return
+		}
+		paneID := core.PaneID(id)
+		session.beginConfirmation(fmt.Sprintf("close pane %d?", paneID), func(allowed bool) {
+			if allowed {
+				session.closePane(paneID)
+			}
+		})
 	case "dismiss":
 		id, ok := optionalID(fields, uint64(session.focus))
 		if !ok {

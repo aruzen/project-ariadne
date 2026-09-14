@@ -18,6 +18,22 @@ func TestParsePromptCommandQuotesAndEscapes(t *testing.T) {
 	}
 }
 
+func TestSplitPromptCommands(t *testing.T) {
+	commands, err := splitPromptCommands(`:focus left; run -- sh -c "printf 'a;b'"; send-key \;`)
+	if err != nil {
+		t.Fatalf("splitPromptCommands: %v", err)
+	}
+	want := []string{"focus left", `run -- sh -c "printf 'a;b'"`, `send-key \;`}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %#v, want %#v", commands, want)
+	}
+	for _, invalid := range []string{"", "help;", "help;;zoom", `run "unfinished`} {
+		if _, err := splitPromptCommands(invalid); err == nil {
+			t.Fatalf("splitPromptCommands(%q) succeeded", invalid)
+		}
+	}
+}
+
 func TestPromptCommandHelpers(t *testing.T) {
 	for _, test := range []struct {
 		value  string
@@ -58,6 +74,17 @@ func TestExecutePromptReportsParseAndUsageErrors(t *testing.T) {
 	session.executePrompt("help split")
 	if session.message == "" {
 		t.Fatal("help did not produce a description")
+	}
+}
+
+func TestCommandSequenceStopsWhenCommandEntersAMode(t *testing.T) {
+	session := session{}
+	session.executeCommandSequence([]string{"command-prompt rename-window", "zoom on"})
+	if session.inputMode != inputModePrompt || session.prompt != "rename-window " {
+		t.Fatalf("prompt mode = %d, prompt = %q", session.inputMode, session.prompt)
+	}
+	if session.zoom {
+		t.Fatal("command after modal transition was executed")
 	}
 }
 
