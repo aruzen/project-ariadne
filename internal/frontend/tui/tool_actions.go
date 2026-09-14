@@ -55,6 +55,10 @@ func (session *session) createTool(arguments []string) {
 }
 
 func (session *session) openBuiltinTool(kind string) {
+	if !isBuiltinToolType(kind) {
+		session.setMessage("unknown built-in tool: " + kind)
+		return
+	}
 	for _, pane := range session.snapshot.Panes {
 		if pane.Tool != nil && pane.Tool.Provider == "ariadne" && pane.Tool.Type == kind && pane.Tool.Instance == "default" && !session.isStashedPane(pane.ID) {
 			selected, err := callTUI[core.SetFocusResult](session, protocol.OperationSetFocus, protocol.SetFocusParams{PaneID: pane.ID})
@@ -71,6 +75,53 @@ func (session *session) openBuiltinTool(kind string) {
 		}
 	}
 	session.createTool([]string{kind})
+}
+
+func (session *session) focusPane(paneID core.PaneID) {
+	selected, err := callTUI[core.SetFocusResult](session, protocol.OperationSetFocus, protocol.SetFocusParams{PaneID: paneID})
+	if err != nil {
+		session.setMessage(err.Error())
+		return
+	}
+	if session.previewPane != 0 {
+		session.previewPane = 0
+		session.previewPreviousFocus = 0
+	}
+	session.workspace, session.window, session.focus = selected.Focus.WorkspaceID, selected.Focus.WindowID, selected.Focus.PaneID
+	session.zoom = false
+	session.relayout()
+	session.syncViews()
+	session.dirty = true
+}
+
+func (session *session) setZoom(mode string) {
+	if session.previewPane != 0 {
+		if mode == "off" || mode == "toggle" {
+			session.exitPreview()
+			return
+		}
+		if mode == "on" {
+			return
+		}
+	}
+	if session.focus == 0 {
+		session.setMessage("no focused pane")
+		return
+	}
+	switch mode {
+	case "on":
+		session.zoom = true
+	case "off":
+		session.zoom = false
+	case "toggle":
+		session.zoom = !session.zoom
+	default:
+		session.setMessage("usage: zoom [on|off|toggle]")
+		return
+	}
+	session.relayout()
+	session.syncViews()
+	session.dirty = true
 }
 
 func (session *session) previewPaneByID(id core.PaneID) {
@@ -243,6 +294,39 @@ func (session *session) ackAttention(attention core.Attention) {
 		session.attentionCursor = 0
 	}
 	session.reportCommand(err, "attention acknowledged")
+}
+
+func (session *session) executeAttentionCommand(arguments []string) {
+	if len(arguments) == 1 {
+		switch arguments[0] {
+		case "next":
+			session.navigateAttention(1)
+			return
+		case "prev", "previous":
+			session.navigateAttention(-1)
+			return
+		case "ack":
+			session.ackCurrentAttention()
+			return
+		case "list", "status":
+			session.openBuiltinTool("agent-status")
+			return
+		}
+	}
+	if len(arguments) == 2 && arguments[0] == "ack" {
+		id, err := strconv.ParseUint(arguments[1], 10, 64)
+		if err == nil && id != 0 {
+			for _, attention := range session.snapshot.Attentions {
+				if attention.ID == id {
+					session.ackAttention(attention)
+					return
+				}
+			}
+			session.setMessage(fmt.Sprintf("attention %d not found", id))
+			return
+		}
+	}
+	session.setMessage("usage: attention next|prev|ack [ID]|list")
 }
 
 func (session *session) activateWorkspaceLine(index int) {

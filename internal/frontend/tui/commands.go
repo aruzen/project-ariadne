@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/aruzen/ariadne/internal/client"
 	"github.com/aruzen/ariadne/internal/core"
@@ -29,16 +30,7 @@ func (session *session) handleAction(action inputAction) {
 	case actionResizeLeft, actionResizeDown, actionResizeUp, actionResizeRight:
 		session.resizeFocusedPane(action)
 	case actionZoom:
-		if session.previewPane != 0 {
-			session.exitPreview()
-			return
-		}
-		if session.focus != 0 {
-			session.zoom = !session.zoom
-			session.relayout()
-			session.syncViews()
-			session.dirty = true
-		}
+		session.setZoom("toggle")
 	case actionSplitHorizontal:
 		session.splitTerminal(core.SplitHorizontal)
 	case actionSplitVertical:
@@ -92,6 +84,8 @@ func (session *session) beginPrompt(lead, initial string) {
 	session.inputMode = inputModePrompt
 	session.promptLead = lead
 	session.prompt = initial
+	session.promptHistoryIndex = len(session.promptHistory)
+	session.promptDraft = initial
 	session.promptCallback = session.executePrompt
 	session.dirty = true
 }
@@ -132,11 +126,25 @@ func (session *session) handleModalInput(data []byte) {
 		}
 		return
 	}
-	for _, value := range data {
+	for index := 0; index < len(data); index++ {
+		value := data[index]
+		if value == 0x1b && index+2 < len(data) && data[index+1] == '[' {
+			switch data[index+2] {
+			case 'A':
+				session.movePromptHistory(-1)
+				index += 2
+				continue
+			case 'B':
+				session.movePromptHistory(1)
+				index += 2
+				continue
+			}
+		}
 		switch value {
 		case '\r', '\n':
 			command := session.prompt
 			callback := session.promptCallback
+			session.recordPromptHistory(command)
 			session.clearInputMode()
 			if callback != nil {
 				callback(command)
@@ -152,6 +160,20 @@ func (session *session) handleModalInput(data []byte) {
 			if len(runes) != 0 {
 				session.prompt = string(runes[:len(runes)-1])
 			}
+		case 0x09:
+			session.completePrompt()
+		case 0x0e:
+			session.movePromptHistory(1)
+		case 0x10:
+			session.movePromptHistory(-1)
+		case 0x15:
+			session.prompt = ""
+			session.promptHistoryIndex = len(session.promptHistory)
+			session.promptDraft = ""
+		case 0x17:
+			session.prompt = strings.TrimRightFunc(session.prompt, func(value rune) bool { return unicode.IsSpace(value) })
+			session.prompt = strings.TrimRightFunc(session.prompt, func(value rune) bool { return !unicode.IsSpace(value) })
+			session.prompt = strings.TrimRightFunc(session.prompt, func(value rune) bool { return unicode.IsSpace(value) })
 		default:
 			if value >= 0x20 {
 				session.prompt += string([]byte{value})
@@ -159,6 +181,81 @@ func (session *session) handleModalInput(data []byte) {
 		}
 	}
 	session.dirty = true
+}
+
+func (session *session) recordPromptHistory(command string) {
+	if session.promptLead != ":" {
+		return
+	}
+	command = strings.TrimSpace(command)
+	if command == "" || (len(session.promptHistory) != 0 && session.promptHistory[len(session.promptHistory)-1] == command) {
+		return
+	}
+	session.promptHistory = append(session.promptHistory, command)
+	if len(session.promptHistory) > 100 {
+		session.promptHistory = append([]string(nil), session.promptHistory[len(session.promptHistory)-100:]...)
+	}
+}
+
+func (session *session) movePromptHistory(delta int) {
+	if session.promptLead != ":" || len(session.promptHistory) == 0 {
+		return
+	}
+	if session.promptHistoryIndex < 0 || session.promptHistoryIndex > len(session.promptHistory) {
+		session.promptHistoryIndex = len(session.promptHistory)
+	}
+	if session.promptHistoryIndex == len(session.promptHistory) {
+		session.promptDraft = session.prompt
+	}
+	next := session.promptHistoryIndex + delta
+	if next < 0 {
+		next = 0
+	}
+	if next > len(session.promptHistory) {
+		next = len(session.promptHistory)
+	}
+	session.promptHistoryIndex = next
+	if next == len(session.promptHistory) {
+		session.prompt = session.promptDraft
+	} else {
+		session.prompt = session.promptHistory[next]
+	}
+}
+
+func (session *session) completePrompt() {
+	if session.promptLead != ":" {
+		return
+	}
+	prefix := session.prompt
+	if prefix == "" || strings.IndexFunc(prefix, unicode.IsSpace) >= 0 {
+		return
+	}
+	matches := make([]string, 0)
+	for _, name := range promptCommandNames() {
+		if strings.HasPrefix(name, prefix) {
+			matches = append(matches, name)
+		}
+	}
+	if len(matches) == 0 {
+		return
+	}
+	completion := matches[0]
+	for _, match := range matches[1:] {
+		completion = commonPrefix(completion, match)
+	}
+	session.prompt = completion
+	if len(matches) == 1 {
+		session.prompt += " "
+	}
+}
+
+func commonPrefix(left, right string) string {
+	limit := min(len(left), len(right))
+	index := 0
+	for index < limit && left[index] == right[index] {
+		index++
+	}
+	return left[:index]
 }
 
 func (session *session) clearInputMode() {
@@ -171,40 +268,140 @@ func (session *session) clearInputMode() {
 	session.dirty = true
 }
 
-func (session *session) executePrompt(command string) {
-	fields := strings.Fields(command)
+func (session *session) executePrompt(commandLine string) {
+	fields, err := parsePromptCommand(commandLine)
+	if err != nil {
+		session.setMessage("command parse error: " + err.Error())
+		return
+	}
 	if len(fields) == 0 {
 		return
 	}
 	switch fields[0] {
-	case "split", "split-pane":
-		if len(fields) != 2 || (fields[1] != "h" && fields[1] != "v") {
-			session.setMessage("usage: split h|v")
+	case "help", "commands":
+		if len(fields) == 1 {
+			session.openBuiltinTool("help")
+			return
+		}
+		if len(fields) != 2 {
+			session.setMessage("usage: help [COMMAND]")
+			return
+		}
+		if description, ok := promptCommandDescription(fields[1]); ok {
+			session.setMessage(description)
+		} else {
+			session.setMessage("unknown command: " + fields[1])
+		}
+	case "command-palette", "palette":
+		if len(fields) != 1 {
+			session.setMessage("usage: command-palette")
+			return
+		}
+		session.openBuiltinTool("command-palette")
+	case "detach", "quit":
+		if len(fields) != 1 {
+			session.setMessage("usage: detach")
+			return
+		}
+		session.quitRequested = true
+		session.cancel()
+	case "split", "split-pane", "split-window":
+		if len(fields) < 2 || (fields[1] != "h" && fields[1] != "v") {
+			session.setMessage("usage: split h|v [-- command...]")
 			return
 		}
 		direction := core.SplitHorizontal
 		if fields[1] == "v" {
 			direction = core.SplitVertical
 		}
-		session.splitTerminal(direction)
+		arguments := fields[2:]
+		if len(arguments) != 0 && arguments[0] == "--" {
+			arguments = arguments[1:]
+		}
+		if len(fields) > 2 && len(arguments) == 0 {
+			session.setMessage("usage: split h|v [-- command...]")
+			return
+		}
+		session.splitTerminalCommand(direction, arguments)
+	case "focus", "select-pane":
+		if len(fields) != 2 {
+			session.setMessage("usage: focus left|down|up|right|PANE")
+			return
+		}
+		if action, ok := directionalAction(fields[1], false); ok {
+			if !session.zoom {
+				session.moveFocus(action)
+			}
+			return
+		}
+		id, parseErr := strconv.ParseUint(fields[1], 10, 64)
+		if parseErr != nil || id == 0 {
+			session.setMessage("usage: focus left|down|up|right|PANE")
+			return
+		}
+		session.focusPane(core.PaneID(id))
+	case "resize", "resize-pane":
+		if len(fields) != 2 {
+			session.setMessage("usage: resize left|down|up|right")
+			return
+		}
+		action, ok := directionalAction(fields[1], true)
+		if !ok {
+			session.setMessage("usage: resize left|down|up|right")
+			return
+		}
+		session.resizeFocusedPane(action)
 	case "zoom":
-		session.handleAction(actionZoom)
-	case "close", "kill":
-		session.closeFocusedPane()
+		if len(fields) > 2 {
+			session.setMessage("usage: zoom [on|off|toggle]")
+			return
+		}
+		mode := "toggle"
+		if len(fields) == 2 {
+			mode = fields[1]
+		}
+		session.setZoom(mode)
+	case "close", "kill", "kill-pane":
+		id, ok := optionalID(fields, uint64(session.focus))
+		if !ok {
+			session.setMessage("usage: close [PANE]")
+			return
+		}
+		session.closePane(core.PaneID(id))
 	case "dismiss":
-		session.dismissFocused()
+		id, ok := optionalID(fields, uint64(session.focus))
+		if !ok {
+			session.setMessage("usage: dismiss [PANE]")
+			return
+		}
+		session.dismissPane(core.PaneID(id))
 	case "restart":
-		session.restartFocused()
+		id, ok := optionalID(fields, uint64(session.focus))
+		if !ok {
+			session.setMessage("usage: restart [PANE]")
+			return
+		}
+		session.restartPane(core.PaneID(id))
 	case "run":
 		arguments := fields[1:]
+		paneID := session.focus
+		if len(arguments) >= 2 && arguments[1] == "--" {
+			id, parseErr := strconv.ParseUint(arguments[0], 10, 64)
+			if parseErr != nil || id == 0 {
+				session.setMessage("usage: run [PANE --] command [args...]")
+				return
+			}
+			paneID = core.PaneID(id)
+			arguments = arguments[2:]
+		}
 		if len(arguments) != 0 && arguments[0] == "--" {
 			arguments = arguments[1:]
 		}
 		if len(arguments) == 0 {
-			session.setMessage("usage: run [--] command [args...]")
+			session.setMessage("usage: run [PANE --] command [args...]")
 			return
 		}
-		session.runFocused(arguments)
+		session.runPane(paneID, arguments)
 	case "new-window":
 		name := ""
 		if len(fields) > 1 {
@@ -212,10 +409,16 @@ func (session *session) executePrompt(command string) {
 		}
 		session.createNamedWindow(name)
 	case "next-window":
+		if !session.requireNoArguments(fields, "next-window") {
+			return
+		}
 		session.selectRelativeWindow(1)
 	case "previous-window":
+		if !session.requireNoArguments(fields, "previous-window") {
+			return
+		}
 		session.selectRelativeWindow(-1)
-	case "window":
+	case "window", "select-window":
 		id, ok := parseID(fields)
 		if !ok {
 			session.setMessage("usage: window ID")
@@ -223,12 +426,22 @@ func (session *session) executePrompt(command string) {
 		}
 		session.selectWindow(core.WindowID(id))
 	case "new-workspace":
-		if len(fields) < 2 {
+		if len(fields) < 2 || strings.TrimSpace(strings.Join(fields[1:], " ")) == "" {
 			session.setMessage("usage: new-workspace NAME")
 			return
 		}
 		session.createWorkspace(strings.Join(fields[1:], " "))
-	case "workspace":
+	case "next-workspace":
+		if !session.requireNoArguments(fields, "next-workspace") {
+			return
+		}
+		session.selectRelativeWorkspace(1)
+	case "previous-workspace", "prev-workspace":
+		if !session.requireNoArguments(fields, "previous-workspace") {
+			return
+		}
+		session.selectRelativeWorkspace(-1)
+	case "workspace", "select-workspace":
 		id, ok := parseID(fields)
 		if !ok {
 			session.setMessage("usage: workspace ID")
@@ -236,28 +449,40 @@ func (session *session) executePrompt(command string) {
 		}
 		session.selectWorkspace(core.WorkspaceID(id))
 	case "rename-window":
-		if len(fields) < 2 {
-			session.setMessage("usage: rename-window NAME")
+		id, name, ok := namedTarget(fields, uint64(session.window))
+		if !ok {
+			session.setMessage("usage: rename-window [ID] NAME")
 			return
 		}
 		_, err := callTUI[core.WindowResult](session, protocol.OperationRenameWindow, protocol.RenameWindowParams{
-			WindowID: session.window, Name: strings.Join(fields[1:], " "),
+			WindowID: core.WindowID(id), Name: name,
 		})
 		session.reportCommand(err, "window renamed")
 	case "rename-workspace":
-		if len(fields) < 2 {
-			session.setMessage("usage: rename-workspace NAME")
+		id, name, ok := namedTarget(fields, uint64(session.workspace))
+		if !ok {
+			session.setMessage("usage: rename-workspace [ID] NAME")
 			return
 		}
 		_, err := callTUI[core.WorkspaceResult](session, protocol.OperationRenameWorkspace, protocol.RenameWorkspaceParams{
-			WorkspaceID: session.workspace, Name: strings.Join(fields[1:], " "),
+			WorkspaceID: core.WorkspaceID(id), Name: name,
 		})
 		session.reportCommand(err, "workspace renamed")
 	case "delete-window":
-		_, err := callTUI[core.DeleteWindowResult](session, protocol.OperationDeleteWindow, protocol.DeleteWindowParams{WindowID: session.window})
+		id, ok := optionalID(fields, uint64(session.window))
+		if !ok {
+			session.setMessage("usage: delete-window [ID]")
+			return
+		}
+		_, err := callTUI[core.DeleteWindowResult](session, protocol.OperationDeleteWindow, protocol.DeleteWindowParams{WindowID: core.WindowID(id)})
 		session.reportCommand(err, "window deleted")
 	case "delete-workspace":
-		_, err := callTUI[core.DeleteWorkspaceResult](session, protocol.OperationDeleteWorkspace, protocol.DeleteWorkspaceParams{WorkspaceID: session.workspace})
+		id, ok := optionalID(fields, uint64(session.workspace))
+		if !ok {
+			session.setMessage("usage: delete-workspace [ID]")
+			return
+		}
+		_, err := callTUI[core.DeleteWorkspaceResult](session, protocol.OperationDeleteWorkspace, protocol.DeleteWorkspaceParams{WorkspaceID: core.WorkspaceID(id)})
 		session.reportCommand(err, "workspace deleted")
 	case "move-pane":
 		session.moveFocusedPane(fields[1:])
@@ -290,6 +515,14 @@ func (session *session) executePrompt(command string) {
 		}
 		session.stashWindow(windowID)
 	case "stash-list", "list-stash":
+		if !session.requireNoArguments(fields, "stash-list") {
+			return
+		}
+		session.openBuiltinTool("stash-list")
+	case "stash-show":
+		if !session.requireNoArguments(fields, "stash-show") {
+			return
+		}
 		session.showStash()
 	case "restore-pane":
 		session.restorePane(fields[1:])
@@ -297,6 +530,27 @@ func (session *session) executePrompt(command string) {
 		session.restoreWindow(fields[1:])
 	case "tool":
 		session.createTool(fields[1:])
+	case "open-tool":
+		if len(fields) != 2 {
+			session.setMessage("usage: open-tool TYPE")
+			return
+		}
+		session.openBuiltinTool(fields[1])
+	case "workspaces", "windows":
+		if !session.requireNoArguments(fields, fields[0]) {
+			return
+		}
+		session.openBuiltinTool("workspace-list")
+	case "agent-status":
+		if !session.requireNoArguments(fields, "agent-status") {
+			return
+		}
+		session.openBuiltinTool("agent-status")
+	case "diagnostics", "status":
+		if !session.requireNoArguments(fields, fields[0]) {
+			return
+		}
+		session.openBuiltinTool("diagnostics")
 	case "preview-pane":
 		id, ok := parseID(fields)
 		if !ok {
@@ -304,15 +558,106 @@ func (session *session) executePrompt(command string) {
 			return
 		}
 		session.previewPaneByID(core.PaneID(id))
+	case "preview-exit":
+		if len(fields) != 1 {
+			session.setMessage("usage: preview-exit")
+			return
+		}
+		session.exitPreview()
 	case "attention-next":
+		if !session.requireNoArguments(fields, "attention-next") {
+			return
+		}
 		session.navigateAttention(1)
 	case "attention-prev", "attention-previous":
+		if !session.requireNoArguments(fields, "attention-prev") {
+			return
+		}
 		session.navigateAttention(-1)
 	case "attention-ack":
+		if !session.requireNoArguments(fields, "attention-ack") {
+			return
+		}
 		session.ackCurrentAttention()
+	case "attention":
+		session.executeAttentionCommand(fields[1:])
+	case "copy-mode":
+		if len(fields) != 1 {
+			session.setMessage("usage: copy-mode")
+			return
+		}
+		session.enterCopyMode()
+	case "paste":
+		if len(fields) != 1 {
+			session.setMessage("usage: paste")
+			return
+		}
+		session.requestPaste()
 	default:
 		session.setMessage("unknown command: " + fields[0])
 	}
+}
+
+func directionalAction(value string, resize bool) (inputAction, bool) {
+	if resize {
+		switch value {
+		case "left", "h":
+			return actionResizeLeft, true
+		case "down", "j":
+			return actionResizeDown, true
+		case "up", "k":
+			return actionResizeUp, true
+		case "right", "l":
+			return actionResizeRight, true
+		}
+	}
+	switch value {
+	case "left", "h":
+		return actionFocusLeft, true
+	case "down", "j":
+		return actionFocusDown, true
+	case "up", "k":
+		return actionFocusUp, true
+	case "right", "l":
+		return actionFocusRight, true
+	default:
+		return actionNone, false
+	}
+}
+
+func optionalID(fields []string, fallback uint64) (uint64, bool) {
+	if len(fields) == 1 {
+		return fallback, fallback != 0
+	}
+	if len(fields) != 2 {
+		return 0, false
+	}
+	id, err := strconv.ParseUint(fields[1], 10, 64)
+	return id, err == nil && id != 0
+}
+
+func namedTarget(fields []string, fallback uint64) (uint64, string, bool) {
+	if len(fields) < 2 {
+		return 0, "", false
+	}
+	id := fallback
+	nameStart := 1
+	if len(fields) >= 3 {
+		if parsed, err := strconv.ParseUint(fields[1], 10, 64); err == nil && parsed != 0 {
+			id = parsed
+			nameStart = 2
+		}
+	}
+	name := strings.Join(fields[nameStart:], " ")
+	return id, name, id != 0 && strings.TrimSpace(name) != ""
+}
+
+func (session *session) requireNoArguments(fields []string, usage string) bool {
+	if len(fields) == 1 {
+		return true
+	}
+	session.setMessage("usage: " + usage)
+	return false
 }
 
 func parseID(fields []string) (uint64, bool) {
@@ -330,11 +675,18 @@ func callTUI[T any](session *session, operation protocol.Operation, params any) 
 }
 
 func (session *session) splitTerminal(direction core.SplitDirection) {
+	session.splitTerminalCommand(direction, nil)
+}
+
+func (session *session) splitTerminalCommand(direction core.SplitDirection, argv []string) {
 	if session.window == 0 {
 		session.setMessage("no active window")
 		return
 	}
 	params := session.newTerminalParams(session.window)
+	if len(argv) != 0 {
+		params.Argv = append([]string(nil), argv...)
+	}
 	if session.focus != 0 {
 		params.TargetPaneID = session.focus
 		params.Direction = direction
@@ -361,8 +713,13 @@ func (session *session) newTerminalParams(windowID core.WindowID) protocol.NewTe
 }
 
 func (session *session) closeFocusedPane() {
-	pane, exists := session.pane(session.focus)
+	session.closePane(session.focus)
+}
+
+func (session *session) closePane(paneID core.PaneID) {
+	pane, exists := session.pane(paneID)
 	if !exists {
+		session.setMessage(fmt.Sprintf("pane %d not found", paneID))
 		return
 	}
 	var err error
@@ -378,46 +735,68 @@ func (session *session) closeFocusedPane() {
 	} else {
 		_, err = callTUI[core.ClosePaneResult](session, protocol.OperationClosePane, protocol.PaneParams{PaneID: pane.ID})
 	}
-	if err == nil {
+	if err == nil && session.focus == pane.ID {
 		session.zoom = false
 	}
 	session.reportCommand(err, fmt.Sprintf("pane %d closed", pane.ID))
 }
 
 func (session *session) dismissFocused() {
-	if session.focus == 0 {
+	session.dismissPane(session.focus)
+}
+
+func (session *session) dismissPane(paneID core.PaneID) {
+	if paneID == 0 {
+		session.setMessage("no focused pane")
 		return
 	}
-	_, err := callTUI[protocol.TerminalOperationResult](session, protocol.OperationDismissTerminal, protocol.PaneParams{PaneID: session.focus})
+	_, err := callTUI[protocol.TerminalOperationResult](session, protocol.OperationDismissTerminal, protocol.PaneParams{PaneID: paneID})
 	session.reportCommand(err, "pane dismissed")
 }
 
 func (session *session) restartFocused() {
-	if session.focus == 0 {
+	session.restartPane(session.focus)
+}
+
+func (session *session) restartPane(paneID core.PaneID) {
+	if paneID == 0 {
+		session.setMessage("no focused pane")
 		return
 	}
 	result, err := callTUI[protocol.TerminalOperationResult](session, protocol.OperationRestartTerminal, protocol.RestartTerminalParams{
-		PaneID: session.focus, Env: append([]string(nil), session.env...), InitialSize: session.focusedPTYSize(),
+		PaneID: paneID, Env: append([]string(nil), session.env...), InitialSize: session.panePTYSize(paneID),
 	})
-	if err == nil {
-		session.focus = result.Pane.ID
-	}
 	session.reportCommand(err, "pane restarted")
+	if err == nil && !session.isStashedPane(result.Pane.ID) {
+		session.focusPane(result.Pane.ID)
+	}
 }
 
 func (session *session) runFocused(argv []string) {
-	if session.focus == 0 {
+	session.runPane(session.focus, argv)
+}
+
+func (session *session) runPane(paneID core.PaneID, argv []string) {
+	if paneID == 0 {
+		session.setMessage("no focused pane")
 		return
 	}
-	_, err := callTUI[protocol.TerminalOperationResult](session, protocol.OperationRunTerminal, protocol.RunTerminalParams{
-		PaneID: session.focus, Argv: append([]string(nil), argv...), FallbackCWD: session.cwd,
-		Env: append([]string(nil), session.env...), InitialSize: session.focusedPTYSize(),
+	result, err := callTUI[protocol.TerminalOperationResult](session, protocol.OperationRunTerminal, protocol.RunTerminalParams{
+		PaneID: paneID, Argv: append([]string(nil), argv...), FallbackCWD: session.cwd,
+		Env: append([]string(nil), session.env...), InitialSize: session.panePTYSize(paneID),
 	})
 	session.reportCommand(err, "command started")
+	if err == nil && !session.isStashedPane(result.Pane.ID) {
+		session.focusPane(result.Pane.ID)
+	}
 }
 
 func (session *session) focusedPTYSize() pty.Size {
-	if placement, exists := placementFor(session.placements, session.focus); exists {
+	return session.panePTYSize(session.focus)
+}
+
+func (session *session) panePTYSize(paneID core.PaneID) pty.Size {
+	if placement, exists := placementFor(session.placements, paneID); exists {
 		return pty.Size{Cols: max(1, placement.Rect.W), Rows: max(1, placement.Rect.H)}
 	}
 	return pty.Size{Cols: 80, Rows: 24}

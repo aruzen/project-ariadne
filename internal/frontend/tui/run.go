@@ -84,6 +84,9 @@ type session struct {
 	inputMode            tuiInputMode
 	prompt               string
 	promptLead           string
+	promptHistory        []string
+	promptHistoryIndex   int
+	promptDraft          string
 	confirm              string
 	confirmCallback      func(bool)
 	promptCallback       func(string)
@@ -106,6 +109,7 @@ type session struct {
 	outerClipboard       []byte
 	dirty                bool
 	daemonStatus         protocol.DaemonStatusResult
+	quitRequested        bool
 }
 
 // Run enters the full-screen frontend using an already synchronized client.
@@ -210,15 +214,25 @@ func (session *session) loop(output *os.File) error {
 				session.handleCopyInput(message.data)
 				continue
 			}
-			data, actions := decoder.Feed(message.data)
-			for _, action := range actions {
-				if action == actionQuit {
+			for _, token := range decoder.FeedOrdered(message.data) {
+				if token.action == actionQuit {
 					return nil
 				}
-				session.handleAction(action)
-			}
-			if len(data) != 0 {
-				session.sendInput(data)
+				if token.action != actionNone {
+					session.handleAction(token.action)
+					continue
+				}
+				if len(token.data) == 0 {
+					continue
+				}
+				switch {
+				case session.inputMode != inputModeNormal:
+					session.handleModalInput(token.data)
+				case session.copyMode:
+					session.handleCopyInput(token.data)
+				default:
+					session.sendInput(token.data)
+				}
 			}
 		case event, ok := <-session.client.Events():
 			if !ok {
@@ -294,6 +308,9 @@ func (session *session) loop(output *os.File) error {
 			}
 			return io.EOF
 		case <-session.ctx.Done():
+			if session.quitRequested {
+				return nil
+			}
 			return session.ctx.Err()
 		}
 	}

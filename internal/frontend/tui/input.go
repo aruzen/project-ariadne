@@ -40,73 +40,91 @@ type inputDecoder struct {
 	prefix bool
 }
 
-func (decoder *inputDecoder) Feed(input []byte) ([]byte, []inputAction) {
+type inputToken struct {
+	data   []byte
+	action inputAction
+}
+
+// FeedOrdered preserves the ordering between PTY bytes and prefix actions.
+// This matters for pasted input such as "text^A:command", where bytes before
+// the prefix belong to the Pane and bytes after it belong to the prompt.
+func (decoder *inputDecoder) FeedOrdered(input []byte) []inputToken {
+	var tokens []inputToken
 	data := make([]byte, 0, len(input))
-	var actions []inputAction
+	flush := func() {
+		if len(data) != 0 {
+			tokens = append(tokens, inputToken{data: append([]byte(nil), data...)})
+			data = data[:0]
+		}
+	}
+	action := func(value inputAction) {
+		flush()
+		tokens = append(tokens, inputToken{action: value})
+	}
 	for _, value := range input {
 		if decoder.prefix {
 			decoder.prefix = false
 			switch value {
 			case 'd':
-				actions = append(actions, actionQuit)
+				action(actionQuit)
 			case 'h':
-				actions = append(actions, actionFocusLeft)
+				action(actionFocusLeft)
 			case 'j':
-				actions = append(actions, actionFocusDown)
+				action(actionFocusDown)
 			case 'k':
-				actions = append(actions, actionFocusUp)
+				action(actionFocusUp)
 			case 'l':
-				actions = append(actions, actionFocusRight)
+				action(actionFocusRight)
 			case 0x08:
-				actions = append(actions, actionResizeLeft)
+				action(actionResizeLeft)
 			case 0x0a:
-				actions = append(actions, actionResizeDown)
+				action(actionResizeDown)
 			case 0x0b:
-				actions = append(actions, actionResizeUp)
+				action(actionResizeUp)
 			case 0x0c:
-				actions = append(actions, actionResizeRight)
+				action(actionResizeRight)
 			case 'z':
-				actions = append(actions, actionZoom)
+				action(actionZoom)
 			case '%':
-				actions = append(actions, actionSplitHorizontal)
+				action(actionSplitHorizontal)
 			case '"':
-				actions = append(actions, actionSplitVertical)
+				action(actionSplitVertical)
 			case 'x':
-				actions = append(actions, actionClosePane)
+				action(actionClosePane)
 			case 'r':
-				actions = append(actions, actionRestart)
+				action(actionRestart)
 			case 'c':
-				actions = append(actions, actionNewWindow)
+				action(actionNewWindow)
 			case 'n':
-				actions = append(actions, actionNextWindow)
+				action(actionNextWindow)
 			case 'p':
-				actions = append(actions, actionPreviousWindow)
+				action(actionPreviousWindow)
 			case ')':
-				actions = append(actions, actionNextWorkspace)
+				action(actionNextWorkspace)
 			case '(':
-				actions = append(actions, actionPreviousWorkspace)
+				action(actionPreviousWorkspace)
 			case ':':
-				actions = append(actions, actionCommandPrompt)
+				action(actionCommandPrompt)
 			case ',':
-				actions = append(actions, actionRenameWindow)
+				action(actionRenameWindow)
 			case '$':
-				actions = append(actions, actionRenameWorkspace)
+				action(actionRenameWorkspace)
 			case '[':
-				actions = append(actions, actionCopyMode)
+				action(actionCopyMode)
 			case ']':
-				actions = append(actions, actionPaste)
+				action(actionPaste)
 			case 's':
-				actions = append(actions, actionStashPane)
+				action(actionStashPane)
 			case 'S':
-				actions = append(actions, actionListStash)
+				action(actionListStash)
 			case 'a':
-				actions = append(actions, actionNextAttention)
+				action(actionNextAttention)
 			case 'A':
-				actions = append(actions, actionPreviousAttention)
+				action(actionPreviousAttention)
 			case 'm':
-				actions = append(actions, actionAcknowledgeAttention)
+				action(actionAcknowledgeAttention)
 			case '?':
-				actions = append(actions, actionHelp)
+				action(actionHelp)
 			case 0x01:
 				data = append(data, value)
 			default:
@@ -119,6 +137,19 @@ func (decoder *inputDecoder) Feed(input []byte) ([]byte, []inputAction) {
 			continue
 		}
 		data = append(data, value)
+	}
+	flush()
+	return tokens
+}
+
+func (decoder *inputDecoder) Feed(input []byte) ([]byte, []inputAction) {
+	data := make([]byte, 0, len(input))
+	var actions []inputAction
+	for _, token := range decoder.FeedOrdered(input) {
+		data = append(data, token.data...)
+		if token.action != actionNone {
+			actions = append(actions, token.action)
+		}
 	}
 	return data, actions
 }

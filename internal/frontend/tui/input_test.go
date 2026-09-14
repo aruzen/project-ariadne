@@ -125,6 +125,19 @@ func TestInputDecoderRecognizesToolAndAttentionBindings(t *testing.T) {
 	}
 }
 
+func TestInputDecoderPreservesDataAndActionOrdering(t *testing.T) {
+	decoder := inputDecoder{}
+	tokens := decoder.FeedOrdered([]byte("before\x01:after\r"))
+	want := []inputToken{
+		{data: []byte("before")},
+		{action: actionCommandPrompt},
+		{data: []byte("after\r")},
+	}
+	if !reflect.DeepEqual(tokens, want) {
+		t.Fatalf("tokens = %#v, want %#v", tokens, want)
+	}
+}
+
 func TestModalPromptEditingAndCancel(t *testing.T) {
 	session := session{inputMode: inputModePrompt, promptLead: ":", prompt: "abc"}
 	session.handleModalInput([]byte{0x7f, 'd'})

@@ -252,9 +252,20 @@ func (renderer toolPaneRenderer) NewContent(owner *session, pane core.Pane) pane
 	return factory(owner, pane)
 }
 
+var builtinToolTypes = []string{"command-palette", "stash-list", "help", "workspace-list", "agent-status", "diagnostics"}
+
+func isBuiltinToolType(kind string) bool {
+	for _, candidate := range builtinToolTypes {
+		if candidate == kind {
+			return true
+		}
+	}
+	return false
+}
+
 func defaultToolFactories() map[toolRendererKey]toolContentFactory {
 	result := make(map[toolRendererKey]toolContentFactory)
-	for _, kind := range []string{"command-palette", "stash-list", "help", "workspace-list", "agent-status", "diagnostics"} {
+	for _, kind := range builtinToolTypes {
 		key := toolRendererKey{provider: "ariadne", kind: kind}
 		result[key] = func(owner *session, pane core.Pane) paneContent {
 			return &builtinToolContent{owner: owner, descriptor: *pane.Tool, selected: 1}
@@ -340,6 +351,7 @@ type builtinToolContent struct {
 	owner      *session
 	descriptor core.ToolDescriptor
 	selected   int
+	scroll     int
 	query      string
 	cols, rows int
 }
@@ -353,7 +365,8 @@ func (content *builtinToolContent) Close() {}
 func (content *builtinToolContent) Draw(surface *Surface, rect Rect, _ core.Pane, focused bool, style Style) (Cursor, error) {
 	lines := content.lines()
 	content.clampSelection(len(lines))
-	start := 0
+	content.clampScroll(len(lines), rect.H)
+	start := content.scroll
 	if content.selectable() && content.selected >= rect.H {
 		start = content.selected - rect.H + 1
 	}
@@ -402,31 +415,24 @@ func (content *builtinToolContent) HandleInput(data []byte) (bool, error) {
 	}
 	switch {
 	case bytes.Equal(data, []byte("\x1b[A")):
-		content.selected--
-		content.clampSelection(len(content.lines()))
+		content.move(-1)
 		return true, nil
 	case bytes.Equal(data, []byte("\x1b[B")):
-		content.selected++
-		content.clampSelection(len(content.lines()))
+		content.move(1)
 		return true, nil
 	case bytes.Equal(data, []byte("\x1b[5~")):
-		content.selected -= max(1, content.rows-1)
-		if content.selected < 1 {
-			content.selected = 1
-		}
-		content.clampSelection(len(content.lines()))
+		content.move(-max(1, content.rows-1))
 		return true, nil
 	case bytes.Equal(data, []byte("\x1b[6~")):
-		content.selected += max(1, content.rows-1)
-		content.clampSelection(len(content.lines()))
+		content.move(max(1, content.rows-1))
 		return true, nil
 	}
 	for _, value := range data {
 		switch value {
 		case 'j':
-			content.selected++
+			content.move(1)
 		case 'k':
-			content.selected--
+			content.move(-1)
 		case 'm':
 			if content.descriptor.Type == "agent-status" {
 				content.owner.ackAttentionAt(content.selected)
@@ -457,6 +463,29 @@ func (content *builtinToolContent) clampSelection(lineCount int) {
 	}
 }
 
+func (content *builtinToolContent) move(delta int) {
+	lines := content.lines()
+	if content.selectable() {
+		content.selected += delta
+		content.clampSelection(len(lines))
+		return
+	}
+	if content.scrollable() {
+		content.scroll += delta
+		content.clampScroll(len(lines), content.rows)
+	}
+}
+
+func (content *builtinToolContent) clampScroll(lineCount, height int) {
+	maximum := max(0, lineCount-max(1, height))
+	if content.scroll < 0 {
+		content.scroll = 0
+	}
+	if content.scroll > maximum {
+		content.scroll = maximum
+	}
+}
+
 func (content *builtinToolContent) selectable() bool {
 	switch content.descriptor.Type {
 	case "stash-list", "workspace-list", "agent-status":
@@ -466,6 +495,10 @@ func (content *builtinToolContent) selectable() bool {
 	}
 }
 
+func (content *builtinToolContent) scrollable() bool {
+	return content.descriptor.Type == "help" || content.descriptor.Type == "diagnostics"
+}
+
 func (content *builtinToolContent) lines() []string {
 	if content.owner == nil {
 		return []string{"tool unavailable"}
@@ -473,9 +506,8 @@ func (content *builtinToolContent) lines() []string {
 	switch content.descriptor.Type {
 	case "command-palette":
 		lines := []string{"Command palette", "> " + content.query}
-		commands := []string{"split h", "split v", "zoom", "close", "restart", "new-window", "next-window", "previous-window", "new-workspace", "workspace", "window", "move-pane", "stash-pane", "stash-window", "stash-list", "restore-pane", "restore-window", "tool", "preview-pane", "attention-next", "attention-prev", "attention-ack"}
 		query := strings.ToLower(strings.TrimSpace(content.query))
-		for _, command := range commands {
+		for _, command := range promptCommandUsages() {
 			if query == "" || strings.Contains(strings.ToLower(command), query) {
 				lines = append(lines, command)
 			}
@@ -492,7 +524,7 @@ func (content *builtinToolContent) lines() []string {
 		}
 		return lines
 	case "help":
-		return []string{"Ariadne help", "^A h/j/k/l focus   ^A ^H/^J/^K/^L resize", "^A % / ^A \" split   ^A z zoom", "^A s stash   ^A S stash list", "^A a/A attention next/previous   ^A m acknowledge", "^A : command   ^A d detach"}
+		return promptHelpLines()
 	case "workspace-list":
 		lines := []string{"Workspaces / Windows"}
 		for _, workspace := range content.owner.snapshot.Workspaces {
