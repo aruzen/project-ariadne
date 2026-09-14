@@ -61,6 +61,14 @@ func TestPromptCommandHelpers(t *testing.T) {
 	}
 }
 
+func TestNewTerminalUsesConfiguredShellArgv(t *testing.T) {
+	session := session{shell: []string{"/bin/zsh", "-l"}}
+	params := session.newTerminalParams(7)
+	if !reflect.DeepEqual(params.Argv, []string{"/bin/zsh", "-l"}) {
+		t.Fatalf("terminal argv = %#v", params.Argv)
+	}
+}
+
 func TestExecutePromptReportsParseAndUsageErrors(t *testing.T) {
 	session := session{focus: core.PaneID(1)}
 	session.executePrompt(`run "unterminated`)

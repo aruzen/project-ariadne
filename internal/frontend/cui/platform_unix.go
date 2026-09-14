@@ -18,3 +18,13 @@ func defaultShell() []string {
 	}
 	return []string{"/bin/sh"}
 }
+
+func defaultEditor() []string {
+	if editor := os.Getenv("VISUAL"); editor != "" {
+		return []string{editor}
+	}
+	if editor := os.Getenv("EDITOR"); editor != "" {
+		return []string{editor}
+	}
+	return []string{"vi"}
+}

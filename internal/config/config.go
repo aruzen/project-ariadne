@@ -58,10 +58,11 @@ var (
 	ErrInvalidInput = errors.New("config: invalid input")
 )
 
-// Config is loaded at process startup. An empty Shell selects the runtime
-// $SHELL and /bin/sh fallback chain.
+// Config is loaded at process startup. Shell is retained for compatibility;
+// Commands.Shell is the argv-capable replacement.
 type Config struct {
 	Shell       string           `toml:"shell"`
+	Commands    DefaultCommands  `toml:"commands"`
 	DetachKey   string           `toml:"detach_key"`
 	Keybindings Keybindings      `toml:"keybindings"`
 	TUI         TUIOptions       `toml:"tui"`
@@ -69,6 +70,30 @@ type Config struct {
 	Clipboard   ClipboardOptions `toml:"clipboard"`
 	Transport   TransportLimits  `toml:"transport"`
 	Attention   AttentionLimits  `toml:"attention"`
+}
+
+// DefaultCommands are argv vectors and are executed without a shell. Empty
+// vectors select the platform/environment fallback.
+type DefaultCommands struct {
+	Shell  []string `toml:"shell"`
+	Editor []string `toml:"editor"`
+}
+
+func (configuration Config) ShellCommand(fallback []string) []string {
+	if len(configuration.Commands.Shell) != 0 {
+		return append([]string(nil), configuration.Commands.Shell...)
+	}
+	if configuration.Shell != "" {
+		return []string{configuration.Shell}
+	}
+	return append([]string(nil), fallback...)
+}
+
+func (configuration Config) EditorCommand(fallback []string) []string {
+	if len(configuration.Commands.Editor) != 0 {
+		return append([]string(nil), configuration.Commands.Editor...)
+	}
+	return append([]string(nil), fallback...)
 }
 
 // Keybindings maps a portable key sequence to one or more command-prompt
@@ -268,6 +293,15 @@ func (configuration Config) validate() error {
 			return fmt.Errorf("%w: shell contains NUL", ErrInvalid)
 		}
 	}
+	if configuration.Shell != "" && len(configuration.Commands.Shell) != 0 {
+		return fmt.Errorf("%w: shell and commands.shell cannot both be set", ErrInvalid)
+	}
+	if err := validateCommand("commands.shell", configuration.Commands.Shell); err != nil {
+		return err
+	}
+	if err := validateCommand("commands.editor", configuration.Commands.Editor); err != nil {
+		return err
+	}
 	switch configuration.TUI.PaneFrame {
 	case TUIFrameFull, TUIFrameSplit, TUIFrameNone:
 	default:
@@ -317,6 +351,21 @@ func (configuration Config) validate() error {
 	}
 	if configuration.Attention.MaxEntries <= 0 || configuration.Attention.MarkerBytes <= 0 || configuration.Attention.PluginQueueBytes <= 0 {
 		return fmt.Errorf("%w: attention limits must be positive", ErrInvalid)
+	}
+	return nil
+}
+
+func validateCommand(name string, argv []string) error {
+	if len(argv) > 128 {
+		return fmt.Errorf("%w: %s has too many arguments", ErrInvalid, name)
+	}
+	for index, argument := range argv {
+		if strings.ContainsRune(argument, 0) {
+			return fmt.Errorf("%w: %s argument %d contains NUL", ErrInvalid, name, index)
+		}
+	}
+	if len(argv) != 0 && strings.TrimSpace(argv[0]) == "" {
+		return fmt.Errorf("%w: %s executable is empty", ErrInvalid, name)
 	}
 	return nil
 }

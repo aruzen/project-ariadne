@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/aruzen/ariadne/internal/client"
@@ -90,7 +91,8 @@ type session struct {
 	confirm              string
 	confirmCallback      func(bool)
 	promptCallback       func(string)
-	shell                string
+	shell                []string
+	editor               []string
 	cwd                  string
 	env                  []string
 	clipboardRead        ariadneconfig.ClipboardPolicy
@@ -160,17 +162,18 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 		snapshot: snapshot, width: cols, height: rows, views: make(map[core.PaneID]*paneView),
 		renderers: defaultPaneRendererRegistry(), ptyEvents: make(chan paneEvent, 256), clipboardRequests: make(chan clipboardRequest, 16),
 		statusBar: DefaultStatusBar(), paneFrame: options.PaneFrame, dirty: true,
-		shell: options.Shell, cwd: options.CWD, env: append([]string(nil), options.Env...),
+		shell: append([]string(nil), options.Shell...), editor: append([]string(nil), options.Editor...),
+		cwd: options.CWD, env: append([]string(nil), options.Env...),
 		clipboardRead: options.Clipboard.Read, clipboardWrite: options.Clipboard.Write,
 		clipboardMax: options.Clipboard.MaxTextBytes,
 		inputDecoder: decoder,
 		keybindings:  resolvedKeybindings(options.Keybindings),
 	}
-	if value.shell == "" {
-		value.shell = os.Getenv("SHELL")
-		if value.shell == "" {
-			value.shell = "/bin/sh"
-		}
+	if len(value.shell) == 0 {
+		value.shell = fallbackShellCommand()
+	}
+	if len(value.editor) == 0 {
+		value.editor = fallbackEditorCommand()
 	}
 	if value.cwd == "" {
 		value.cwd, _ = os.Getwd()
@@ -189,6 +192,32 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 	value.syncViews()
 	defer value.closeViews()
 	return value.loop(output)
+}
+
+func fallbackShellCommand() []string {
+	if shell := os.Getenv("SHELL"); shell != "" {
+		return []string{shell}
+	}
+	if shell := os.Getenv("COMSPEC"); shell != "" {
+		return []string{shell}
+	}
+	if runtime.GOOS == "windows" {
+		return []string{"cmd.exe"}
+	}
+	return []string{"/bin/sh"}
+}
+
+func fallbackEditorCommand() []string {
+	if editor := os.Getenv("VISUAL"); editor != "" {
+		return []string{editor}
+	}
+	if editor := os.Getenv("EDITOR"); editor != "" {
+		return []string{editor}
+	}
+	if runtime.GOOS == "windows" {
+		return []string{"notepad.exe"}
+	}
+	return []string{"vi"}
 }
 
 func (session *session) loop(output *os.File) error {

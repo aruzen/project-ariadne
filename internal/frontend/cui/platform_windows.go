@@ -23,3 +23,13 @@ func defaultShell() []string {
 	}
 	return []string{"cmd.exe"}
 }
+
+func defaultEditor() []string {
+	if editor := os.Getenv("VISUAL"); editor != "" {
+		return []string{editor}
+	}
+	if editor := os.Getenv("EDITOR"); editor != "" {
+		return []string{editor}
+	}
+	return []string{"notepad.exe"}
+}

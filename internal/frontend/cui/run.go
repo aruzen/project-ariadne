@@ -107,9 +107,8 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if fileConfiguration.Shell != "" {
-			options.Shell = fileConfiguration.Shell
-		}
+		options.Shell = fileConfiguration.ShellCommand(options.Shell)
+		options.Editor = fileConfiguration.EditorCommand(options.Editor)
 		options.Clipboard = fileConfiguration.Clipboard
 		options.Keybindings = fileConfiguration.Keybindings
 		return tui.Run(operationCtx, frontend, synchronized.Snapshot, stdout, options)
@@ -160,20 +159,10 @@ func parseTUIOptions(arguments []string, defaults ariadneconfig.TUIOptions, stde
 		if err != nil {
 			return tui.Options{}, err
 		}
-		return tui.Options{PaneFrame: mode, Shell: defaultsShell(), CWD: cwd, Env: os.Environ()}, nil
+		return tui.Options{PaneFrame: mode, Shell: defaultShell(), Editor: defaultEditor(), CWD: cwd, Env: os.Environ()}, nil
 	default:
 		return tui.Options{}, fmt.Errorf("invalid TUI Pane frame mode %q", *paneFrame)
 	}
-}
-
-func defaultsShell() string {
-	if shell := os.Getenv("SHELL"); shell != "" {
-		return shell
-	}
-	if value := os.Getenv("COMSPEC"); value != "" {
-		return value
-	}
-	return "/bin/sh"
 }
 
 func knownCommand(command string) bool {
@@ -690,10 +679,7 @@ func resolveArgv(explicit []string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if configuration.Shell != "" {
-		return []string{configuration.Shell}, nil
-	}
-	return defaultShell(), nil
+	return configuration.ShellCommand(defaultShell()), nil
 }
 
 func exactlyOnePaneID(arguments []string) (core.PaneID, error) {

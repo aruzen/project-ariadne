@@ -18,6 +18,7 @@ var promptCommandCatalog = []promptCommandInfo{
 	{Usage: "command-palette", Summary: "open the command palette"},
 	{Usage: "detach", Summary: "leave the TUI without stopping the daemon"},
 	{Usage: "send-key KEYS...", Summary: "send a portable key sequence to the focused Pane"},
+	{Usage: "edit [h|v] [-- ARGS...]", Summary: "open the configured editor in a new Pane"},
 	{Usage: "split h|v [-- command...]", Summary: "split with a shell or explicit command"},
 	{Usage: "focus left|down|up|right|PANE", Summary: "move focus by direction or Pane ID"},
 	{Usage: "resize left|down|up|right", Summary: "grow the focused Pane by one cell"},
@@ -142,7 +143,7 @@ func isPromptCommandName(name string) bool {
 		"split-pane", "split-window", "select-pane", "resize-pane",
 		"kill", "kill-pane", "select-window", "prev-workspace", "select-workspace",
 		"list-stash", "windows", "status", "attention-next", "attention-prev",
-		"attention-previous", "attention-ack":
+		"attention-previous", "attention-ack", "editor":
 		return true
 	default:
 		return false

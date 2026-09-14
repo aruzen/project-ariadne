@@ -38,6 +38,9 @@ func TestParseTUIOptions(t *testing.T) {
 	if options.PaneFrame != tui.PaneFrameSplit {
 		t.Fatalf("PaneFrame = %q", options.PaneFrame)
 	}
+	if len(options.Shell) == 0 || len(options.Editor) == 0 {
+		t.Fatalf("default commands: shell=%q editor=%q", options.Shell, options.Editor)
+	}
 	if _, err := parseTUIOptions([]string{"--pane-frame", "unknown"}, ariadneconfig.TUIOptions{PaneFrame: ariadneconfig.TUIFrameFull}, io.Discard); err == nil {
 		t.Fatal("parseTUIOptions accepted unknown mode")
 	}

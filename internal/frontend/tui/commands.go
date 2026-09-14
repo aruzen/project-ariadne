@@ -272,6 +272,25 @@ func (session *session) executePrompt(commandLine string) {
 			return
 		}
 		session.sendInput(sequence)
+	case "edit", "editor":
+		direction := core.SplitHorizontal
+		arguments := fields[1:]
+		if len(arguments) != 0 && (arguments[0] == "h" || arguments[0] == "v") {
+			if arguments[0] == "v" {
+				direction = core.SplitVertical
+			}
+			arguments = arguments[1:]
+		}
+		if len(arguments) != 0 && arguments[0] == "--" {
+			arguments = arguments[1:]
+		}
+		if len(session.editor) == 0 {
+			session.setMessage("no editor configured")
+			return
+		}
+		argv := append([]string(nil), session.editor...)
+		argv = append(argv, arguments...)
+		session.splitTerminalCommand(direction, argv)
 	case "split", "split-pane", "split-window":
 		if len(fields) < 2 || (fields[1] != "h" && fields[1] != "v") {
 			session.setMessage("usage: split h|v [-- command...]")
@@ -686,7 +705,7 @@ func (session *session) newTerminalParams(windowID core.WindowID) protocol.NewTe
 		cols, rows = max(1, placement.Rect.W), max(1, placement.Rect.H)
 	}
 	return protocol.NewTerminalParams{
-		WindowID: windowID, Argv: []string{session.shell}, CWD: session.cwd,
+		WindowID: windowID, Argv: append([]string(nil), session.shell...), CWD: session.cwd,
 		Env: append([]string(nil), session.env...), InitialSize: pty.Size{Cols: cols, Rows: rows},
 	}
 }

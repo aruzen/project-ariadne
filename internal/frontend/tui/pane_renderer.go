@@ -22,7 +22,8 @@ const (
 type Options struct {
 	PaneFrame   PaneFrameMode
 	Keybindings ariadneconfig.Keybindings
-	Shell       string
+	Shell       []string
+	Editor      []string
 	CWD         string
 	Env         []string
 	Clipboard   ariadneconfig.ClipboardOptions
@@ -33,6 +34,12 @@ func DefaultOptions() Options {
 }
 
 func (options Options) validate() error {
+	if err := validateFrontendCommand("shell", options.Shell); err != nil {
+		return err
+	}
+	if err := validateFrontendCommand("editor", options.Editor); err != nil {
+		return err
+	}
 	switch options.PaneFrame {
 	case PaneFrameFull, PaneFrameSplit, PaneFrameNone:
 		_, err := newInputDecoder(options.Keybindings)
@@ -40,6 +47,18 @@ func (options Options) validate() error {
 	default:
 		return fmt.Errorf("invalid TUI Pane frame mode %q", options.PaneFrame)
 	}
+}
+
+func validateFrontendCommand(name string, argv []string) error {
+	if len(argv) != 0 && strings.TrimSpace(argv[0]) == "" {
+		return fmt.Errorf("invalid TUI %s command", name)
+	}
+	for _, argument := range argv {
+		if strings.ContainsRune(argument, 0) {
+			return fmt.Errorf("invalid TUI %s command", name)
+		}
+	}
+	return nil
 }
 
 // paneChrome owns decoration and determines the content viewport. Pane content
@@ -551,7 +570,16 @@ func (content *builtinToolContent) lines() []string {
 		return lines
 	case "diagnostics":
 		status := content.owner.daemonStatus
-		lines := []string{"Diagnostics", fmt.Sprintf("revision: %d", content.owner.snapshot.Revision), fmt.Sprintf("panes: %d", len(content.owner.snapshot.Panes)), fmt.Sprintf("attentions: %d", len(content.owner.snapshot.Attentions)), fmt.Sprintf("views: %d", len(content.owner.views)), fmt.Sprintf("connections: %d sessions: %d", status.Connections, status.Sessions)}
+		lines := []string{
+			"Diagnostics",
+			fmt.Sprintf("revision: %d", content.owner.snapshot.Revision),
+			fmt.Sprintf("panes: %d", len(content.owner.snapshot.Panes)),
+			fmt.Sprintf("attentions: %d", len(content.owner.snapshot.Attentions)),
+			fmt.Sprintf("views: %d", len(content.owner.views)),
+			fmt.Sprintf("connections: %d sessions: %d", status.Connections, status.Sessions),
+			"shell: " + strings.Join(content.owner.shell, " "),
+			"editor: " + strings.Join(content.owner.editor, " "),
+		}
 		for _, plugin := range status.Plugins {
 			state := "enabled"
 			if !plugin.Enabled {

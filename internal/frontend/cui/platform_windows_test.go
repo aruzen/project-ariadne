@@ -11,8 +11,12 @@ import (
 
 func TestWindowsPlatformDefaults(t *testing.T) {
 	t.Setenv("COMSPEC", `C:\Windows\System32\cmd.exe`)
+	t.Setenv("VISUAL", `C:\Tools\editor.exe`)
 	if got := defaultShell(); len(got) != 1 || got[0] != `C:\Windows\System32\cmd.exe` {
 		t.Fatalf("defaultShell = %q", got)
+	}
+	if got := defaultEditor(); len(got) != 1 || got[0] != `C:\Tools\editor.exe` {
+		t.Fatalf("defaultEditor = %q", got)
 	}
 	command := exec.Command("ariadne.exe")
 	configureDetachedProcess(command)

@@ -106,6 +106,39 @@ func TestParseTUIFrameMode(t *testing.T) {
 	}
 }
 
+func TestDefaultCommandArgvAndLegacyShell(t *testing.T) {
+	configuration, err := Parse([]byte("[commands]\nshell = [\"/bin/zsh\", \"-l\"]\neditor = [\"nvim\", \"-f\"]\n"))
+	if err != nil {
+		t.Fatalf("Parse commands: %v", err)
+	}
+	if got := configuration.ShellCommand([]string{"fallback"}); !reflect.DeepEqual(got, []string{"/bin/zsh", "-l"}) {
+		t.Fatalf("shell command = %#v", got)
+	}
+	if got := configuration.EditorCommand([]string{"fallback"}); !reflect.DeepEqual(got, []string{"nvim", "-f"}) {
+		t.Fatalf("editor command = %#v", got)
+	}
+
+	legacy, err := Parse([]byte("shell = \"fish\"\n"))
+	if err != nil {
+		t.Fatalf("Parse legacy shell: %v", err)
+	}
+	if got := legacy.ShellCommand(nil); !reflect.DeepEqual(got, []string{"fish"}) {
+		t.Fatalf("legacy shell command = %#v", got)
+	}
+}
+
+func TestDefaultCommandValidation(t *testing.T) {
+	for _, data := range []string{
+		"[commands]\nshell = [\"\"]\n",
+		"[commands]\neditor = [\"vi\\u0000bad\"]\n",
+		"shell = \"sh\"\n[commands]\nshell = [\"zsh\"]\n",
+	} {
+		if _, err := Parse([]byte(data)); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("Parse(%q) error = %v", data, err)
+		}
+	}
+}
+
 func TestParseKeybindingOverridesAndUnbinds(t *testing.T) {
 	configuration, err := Parse([]byte("[keybindings]\n\"ctrl-a h\" = \"focus right; zoom on\"\n\"ctrl-a x\" = \"\"\n\"ctrl-a q\" = \"detach\"\n"))
 	if err != nil {
