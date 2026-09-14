@@ -17,17 +17,23 @@ import (
 func Run(arguments []string, stdout, stderr io.Writer) error {
 	global := flag.NewFlagSet("ariadne", flag.ContinueOnError)
 	global.SetOutput(stderr)
-	defaultEndpoint, err := localipc.DefaultEndpoint()
-	if err != nil {
-		return err
-	}
-	endpoint := global.String("socket", defaultEndpoint, "local IPC endpoint")
+	endpoint := global.String("socket", "", "local IPC endpoint")
 	if err := global.Parse(arguments); err != nil {
 		return err
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
 		return errors.New("command is required")
+	}
+	if remaining[0] == "init" {
+		return cui.Run("", remaining, stdout, stderr)
+	}
+	if *endpoint == "" {
+		defaultEndpoint, err := localipc.DefaultEndpoint()
+		if err != nil {
+			return err
+		}
+		*endpoint = defaultEndpoint
 	}
 	if remaining[0] == "daemon" && len(remaining) >= 2 && remaining[1] == "serve" {
 		daemonArguments := append([]string{"-socket", *endpoint}, remaining[2:]...)

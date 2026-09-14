@@ -45,6 +45,9 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 	if !knownCommand(command) {
 		return fmt.Errorf("unknown command %q", command)
 	}
+	if command == "init" {
+		return runInit(arguments[1:], stdout)
+	}
 	if command == "daemon" {
 		if len(arguments) == 1 {
 			return errors.New("daemon subcommand is required")
@@ -167,11 +170,26 @@ func parseTUIOptions(arguments []string, defaults ariadneconfig.TUIOptions, stde
 
 func knownCommand(command string) bool {
 	switch command {
-	case "tui", "new", "open", "attach", "list", "restart", "run", "kill", "dismiss", "stash", "restore", "tool", "attention", "daemon":
+	case "init", "tui", "new", "open", "attach", "list", "restart", "run", "kill", "dismiss", "stash", "restore", "tool", "attention", "daemon":
 		return true
 	default:
 		return false
 	}
+}
+
+func runInit(arguments []string, stdout io.Writer) error {
+	if len(arguments) != 0 {
+		return errors.New("usage: init")
+	}
+	path, err := paths.DefaultConfigPath()
+	if err != nil {
+		return err
+	}
+	if err := ariadneconfig.WriteTemplate(path); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "initialized %s\n", path)
+	return err
 }
 
 func runTool(ctx context.Context, frontend *client.Client, snapshot core.Snapshot, arguments []string, stdout, stderr io.Writer) error {

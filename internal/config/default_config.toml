@@ -1,0 +1,52 @@
+# Ariadne configuration
+#
+# All options are optional. Uncomment only values you want to override so that
+# new built-in defaults can take effect after an upgrade.
+
+# detach_key = "ctrl-a d"
+
+[commands]
+# Commands are argv arrays and are executed directly, without a shell.
+# shell = ["/bin/zsh", "-l"]
+# editor = ["nvim"]
+# Windows examples:
+# shell = ["pwsh.exe", "-NoLogo"]
+# editor = ["notepad.exe"]
+
+[tui]
+# pane_frame = "full" # "full", "split", or "none"
+
+[terminal]
+# successful_exit = "retain" # "retain" or "close"
+# Set both history limits to 0 to disable history retention.
+# history_bytes = 16777216
+# max_total_history_bytes = 536870912
+# read_buffer_bytes = 32768
+# attachment_queue_bytes = 4194304
+# observer_queue_bytes = 4194304
+
+[clipboard]
+# read = "ask"  # "deny", "ask", or "allow"
+# write = "ask" # "deny", "ask", or "allow"
+# max_text_bytes = 1048576
+# command_timeout_ms = 2000
+
+[transport]
+# max_frame_bytes = 4194304
+# write_queue_frames = 64
+# outbound_queue_bytes = 16777216
+# outbound_queue_frames = 4096
+# per_stream_queue_bytes = 1048576
+# per_stream_queue_frames = 256
+
+[attention]
+# max_entries = 1024
+# marker_bytes = 8192
+# plugin_queue_bytes = 1048576
+
+[keybindings]
+# A value is one or more command-prompt commands separated by semicolons.
+# An empty value disables a built-in binding.
+# "ctrl-a h" = "focus left"
+# "ctrl-a g" = "focus left; zoom on"
+# "ctrl-a x" = ""

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -235,6 +236,52 @@ func TestLoadRejectsOversize(t *testing.T) {
 	}
 	if _, err := Load(path); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("Load error = %v", err)
+	}
+}
+
+func TestTemplateParsesAsDefaults(t *testing.T) {
+	configuration, err := Parse([]byte(Template()))
+	if err != nil {
+		t.Fatalf("Parse template: %v", err)
+	}
+	if !reflect.DeepEqual(configuration, Default()) {
+		t.Fatalf("template configuration = %+v, want defaults", configuration)
+	}
+}
+
+func TestWriteTemplateCreatesAndDoesNotReplace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "config.toml")
+	if err := WriteTemplate(path); err != nil {
+		t.Fatalf("WriteTemplate: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != Template() {
+		t.Fatal("created file does not contain the embedded template")
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("Stat: %v", err)
+		}
+		if permission := info.Mode().Perm(); permission != 0o600 {
+			t.Fatalf("file permission = %o, want 600", permission)
+		}
+	}
+	if err := WriteTemplate(path); !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("second WriteTemplate error = %v", err)
+	}
+	dataAfter, err := os.ReadFile(path)
+	if err != nil || string(dataAfter) != string(data) {
+		t.Fatalf("existing file changed: data=%q error=%v", dataAfter, err)
+	}
+}
+
+func TestWriteTemplateRejectsEmptyPath(t *testing.T) {
+	if err := WriteTemplate(""); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("WriteTemplate error = %v", err)
 	}
 }
 

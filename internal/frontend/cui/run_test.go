@@ -5,10 +5,39 @@ package cui
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	platformterminal "github.com/aruzen/ariadne/internal/platform/terminal"
 )
+
+func TestInitCreatesTemplateWithoutConnecting(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv("ARIADNE_CONFIG_PATH", directory)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := Run(missingEndpoint(t), []string{"init"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	path := filepath.Join(directory, "config.toml")
+	if stdout.String() != "initialized "+path+"\n" || stderr.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("Stat config: %v", err)
+	}
+	if err := Run(missingEndpoint(t), []string{"init"}, &stdout, &stderr); err == nil {
+		t.Fatal("second init unexpectedly succeeded")
+	}
+}
+
+func TestInitRejectsArgumentsBeforeConnecting(t *testing.T) {
+	var output bytes.Buffer
+	if err := Run(missingEndpoint(t), []string{"init", "extra"}, &output, &output); err == nil || err.Error() != "usage: init" {
+		t.Fatalf("init error = %v", err)
+	}
+}
 
 func TestDaemonStatusReportsStoppedWithoutAutoStart(t *testing.T) {
 	var stdout bytes.Buffer

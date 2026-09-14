@@ -22,3 +22,13 @@ func TestRunRequiresCommand(t *testing.T) {
 		t.Fatalf("Run error = %v", err)
 	}
 }
+
+func TestRunInitDoesNotResolveIPC(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv("ARIADNE_CONFIG_PATH", directory)
+	t.Setenv("XDG_RUNTIME_DIR", "relative-path")
+	var output bytes.Buffer
+	if err := Run([]string{"init"}, &output, &output); err != nil {
+		t.Fatalf("Run init: %v", err)
+	}
+}
