@@ -141,20 +141,20 @@ func TestDefaultCommandValidation(t *testing.T) {
 }
 
 func TestParseKeybindingOverridesAndUnbinds(t *testing.T) {
-	configuration, err := Parse([]byte("[keybindings]\n\"ctrl-a h\" = \"focus right; zoom on\"\n\"ctrl-a x\" = \"\"\n\"ctrl-a q\" = \"detach\"\n"))
+	configuration, err := Parse([]byte("[keybindings.normal]\n\"ctrl-a h\" = \"focus right; zoom on\"\n\"ctrl-a x\" = \"\"\n\"ctrl-a q\" = \"detach\"\n"))
 	if err != nil {
 		t.Fatalf("Parse keybindings: %v", err)
 	}
-	if got := configuration.Keybindings["ctrl-a h"]; got != "focus right; zoom on" {
+	if got := configuration.Keybindings.Normal["ctrl-a h"]; got != "focus right; zoom on" {
 		t.Fatalf("overridden binding = %q", got)
 	}
-	if got := configuration.Keybindings["ctrl-a x"]; got != "" {
+	if got := configuration.Keybindings.Normal["ctrl-a x"]; got != "" {
 		t.Fatalf("disabled binding = %q", got)
 	}
-	if got := configuration.Keybindings["ctrl-a q"]; got != "detach" {
+	if got := configuration.Keybindings.Normal["ctrl-a q"]; got != "detach" {
 		t.Fatalf("new binding = %q", got)
 	}
-	if got := configuration.Keybindings["ctrl-a j"]; got != "focus down" {
+	if got := configuration.Keybindings.Normal["ctrl-a j"]; got != "focus down" {
 		t.Fatalf("default binding was not preserved: %q", got)
 	}
 }

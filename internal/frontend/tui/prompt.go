@@ -13,6 +13,9 @@ type promptCommandInfo struct {
 }
 
 var promptCommandCatalog = []promptCommandInfo{
+	{Usage: "list [pane|window|workspace]", Summary: "open a resource list (default: window)"},
+	{Usage: "delete [pane|window|workspace] [ID]", Summary: "delete an inactive Pane or empty container"},
+	{Usage: "kill [PANE]", Summary: "stop a terminal and retain its Pane"},
 	{Usage: "help [COMMAND]", Summary: "show commands or one command's usage"},
 	{Usage: "command-prompt [INITIAL...]", Summary: "open the command prompt with optional initial text"},
 	{Usage: "command-palette", Summary: "open the command palette"},
@@ -25,7 +28,7 @@ var promptCommandCatalog = []promptCommandInfo{
 	{Usage: "zoom [on|off|toggle]", Summary: "change the frontend-local zoom state"},
 	{Usage: "close [PANE]", Summary: "kill or dismiss a Pane according to its state"},
 	{Usage: "close-confirm [PANE]", Summary: "confirm before closing a Pane"},
-	{Usage: "dismiss [PANE]", Summary: "remove an exited Pane"},
+	{Usage: "dismiss [PANE]", Summary: "deprecated alias for delete pane"},
 	{Usage: "restart [PANE]", Summary: "restart from the saved LaunchSpec"},
 	{Usage: "run [PANE --] command [args...]", Summary: "run a new command in an exited Pane"},
 	{Usage: "new-window [NAME]", Summary: "create a Window and its first terminal"},

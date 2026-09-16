@@ -15,6 +15,108 @@
 
 [tui]
 # pane_frame = "full" # "full", "split", or "none"
+# pane_title = "auto" # "auto": manual name > OSC 0/2 > command; "terminal": OSC first; "pane": ignore OSC
+# mouse = true
+# min_pane_width = 2  # Content cells, excluding chrome/separators
+# min_pane_height = 1
+
+[tui.cwd]
+# Widget cwd precedence: widget > provider/type > pane kind > defaults.
+# Sources: "pane", "startup", or an absolute directory.
+# terminal = "pane" # Local OSC 7 cwd, falling back to LaunchSpec.CWD
+# tool = "startup"
+# [tui.cwd.kinds]
+# terminal = "pane"
+# tool = "startup"
+# [tui.cwd.tools]
+# "ariadne/diagnostics" = "startup"
+# OSC 7 hooks are opt-in; Ariadne never changes your shell configuration.
+# Bash PROMPT_COMMAND example (preserve any existing hooks):
+# printf '\033]7;file://%s%s\033\\' "$HOSTNAME" "$PWD"
+# Percent-encode spaces and non-ASCII paths in a production hook.
+
+[tui.status]
+# Builtins: brand, workspace, window, pane, attention, state, clock, cwd.
+# left = ["brand", "workspace", "pane"]
+# right = ["attention", "state", "clock"]
+# Prompt/confirmation remain visible even if both lists are empty.
+# [tui.status.widgets.clock]
+# format = " {value} "
+# style = "status" # Any semantic theme token
+# [tui.status.widgets.git]
+# command = ["git", "branch", "--show-current"] # Direct argv; no implicit shell
+# format = " {output} " # Also: {workspace}, {window}, {pane}, {title}, {cwd}, {state}
+# {title} uses tui.pane_title; {pane_title} is the manual name; {terminal_title} is OSC 0/2.
+# style = "accent"
+# cwd = "pane"
+# interval_ms = 5000
+# timeout_ms = 1000
+# max_bytes = 4096 # stdout; stripped control sequences, one line
+# External widgets: one process/widget, up to four total; children are cleaned up.
+
+[tui.theme.base]
+# foreground = "#dcdcdc"
+# background = "#121418"
+# bold = false
+# italic = false
+[tui.theme.border]
+# foreground = "#555a64"
+# background = "#121418"
+# bold = false
+# italic = false
+[tui.theme.focused_border]
+# foreground = "#6eb4ff"
+# background = "#121418"
+# bold = true
+# italic = false
+[tui.theme.status]
+# foreground = "#e6e6e6"
+# background = "#262a30"
+# bold = false
+# italic = false
+[tui.theme.accent]
+# foreground = "#14181c"
+# background = "#6eb4ff"
+# bold = false
+# italic = false
+[tui.theme.muted]
+# foreground = "#a0a5af"
+# background = "#262a30"
+# bold = false
+# italic = false
+[tui.theme.warning]
+# foreground = "#ffd278"
+# background = "#262a30"
+# bold = false
+# italic = false
+[tui.theme.error]
+# foreground = "#ff6e6e"
+# background = "#262a30"
+# bold = false
+# italic = false
+[tui.theme.selection]
+# foreground = "#dcdcdc"
+# background = "#506e96"
+# bold = false
+# italic = false
+[tui.theme.prompt]
+# foreground = "#e6e6e6"
+# background = "#262a30"
+# bold = false
+# italic = false
+[tui.theme.lines]
+# Each glyph must be exactly one single-cell grapheme.
+# horizontal = "─"
+# vertical = "│"
+# top_left = "┌"
+# top_right = "┐"
+# bottom_left = "└"
+# bottom_right = "┘"
+# cross = "┼"
+# left_join = "├"
+# right_join = "┤"
+# top_join = "┬"
+# bottom_join = "┴"
 
 [terminal]
 # successful_exit = "retain" # "retain" or "close"
@@ -44,9 +146,26 @@
 # marker_bytes = 8192
 # plugin_queue_bytes = 1048576
 
-[keybindings]
+[keybindings.normal]
 # A value is one or more command-prompt commands separated by semicolons.
 # An empty value disables a built-in binding.
 # "ctrl-a h" = "focus left"
 # "ctrl-a g" = "focus left; zoom on"
 # "ctrl-a x" = ""
+
+[keybindings.copy]
+# Mode-local actions, optionally separated by semicolons:
+# cancel, left, down, up, right, half-up/down, page-up/down, top, bottom,
+# select, copy, search, search-next, search-previous.
+# "space" = "select"
+# "enter" = "copy"
+# "v" = "select"
+
+[keybindings.prompt]
+# Actions: accept, cancel, backspace, complete, history-next/previous,
+# clear, delete-word. Ordinary committed UTF-8 input is inserted as text.
+# "ctrl-g" = "cancel"
+# "up" = "history-previous"
+# Escape versus escape-prefixed terminal keys uses a 50ms timeout.
+# Confirmation keys are fixed (y=yes, n/Escape/Enter=no).
+# Legacy flat [keybindings] entries must migrate to [keybindings.normal].

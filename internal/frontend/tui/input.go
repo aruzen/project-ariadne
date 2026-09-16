@@ -29,24 +29,30 @@ type inputToken struct {
 }
 
 type inputDecoder struct {
-	bindings map[string][]string
-	prefixes map[string]struct{}
-	pending  []byte
+	bindings      map[string][]string
+	prefixes      map[string]struct{}
+	pending       []byte
+	escapeTimeout bool
 }
 
 func newInputDecoder(bindings ariadneconfig.Keybindings) (inputDecoder, error) {
 	bindings = resolvedKeybindings(bindings)
+	return newBindingDecoder(bindings, isPromptCommandName, false)
+}
+
+func newBindingDecoder(bindings ariadneconfig.Keybindings, valid func(string) bool, escapeTimeout bool) (inputDecoder, error) {
 	decoder := inputDecoder{
-		bindings: make(map[string][]string),
-		prefixes: make(map[string]struct{}),
+		bindings:      make(map[string][]string),
+		prefixes:      make(map[string]struct{}),
+		escapeTimeout: escapeTimeout,
 	}
 	for specification, commandText := range bindings {
-		if strings.TrimSpace(commandText) == "" {
-			continue
-		}
 		sequence, err := parseKeySequence(specification)
 		if err != nil {
 			return inputDecoder{}, fmt.Errorf("keybinding %q: %w", specification, err)
+		}
+		if strings.TrimSpace(commandText) == "" {
+			continue
 		}
 		commands, err := splitPromptCommands(commandText)
 		if err != nil {
@@ -58,7 +64,7 @@ func newInputDecoder(bindings ariadneconfig.Keybindings) (inputDecoder, error) {
 			if len(fields) != 0 {
 				name = fields[0]
 			}
-			if !isPromptCommandName(name) {
+			if !valid(name) || (escapeTimeout && len(fields) != 1) {
 				return inputDecoder{}, fmt.Errorf("keybinding %q: unknown command %q", specification, name)
 			}
 		}
@@ -73,6 +79,9 @@ func newInputDecoder(bindings ariadneconfig.Keybindings) (inputDecoder, error) {
 	}
 	for sequence := range decoder.bindings {
 		if _, conflict := decoder.prefixes[sequence]; conflict {
+			if escapeTimeout && sequence == "\x1b" {
+				continue
+			}
 			return inputDecoder{}, fmt.Errorf("keybinding sequence %q is a prefix of another binding", printableKeySequence([]byte(sequence)))
 		}
 	}
@@ -107,6 +116,9 @@ func (decoder *inputDecoder) Feed(input []byte) []inputToken {
 		for len(decoder.pending) != 0 {
 			key := string(decoder.pending)
 			if commands, exists := decoder.bindings[key]; exists {
+				if _, prefix := decoder.prefixes[key]; prefix && decoder.escapeTimeout && key == "\x1b" {
+					break
+				}
 				flushData()
 				tokens = append(tokens, inputToken{commands: append([]string(nil), commands...)})
 				decoder.pending = decoder.pending[:0]

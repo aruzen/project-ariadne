@@ -19,6 +19,7 @@ import (
 	"github.com/aruzen/ariadne/internal/daemon"
 	platformterminal "github.com/aruzen/ariadne/internal/platform/terminal"
 	"github.com/aruzen/ariadne/internal/protocol"
+	"github.com/aruzen/ariadne/internal/vt/libghostty"
 	"github.com/aruzen/streammux/pty"
 )
 
@@ -39,6 +40,8 @@ type paneView struct {
 	ptyCols      int
 	ptyRows      int
 	errorMessage string
+	inputQueue   []paneInput
+	inputBytes   int
 }
 
 type paneEvent struct {
@@ -114,6 +117,17 @@ type session struct {
 	quitRequested        bool
 	inputDecoder         inputDecoder
 	keybindings          ariadneconfig.Keybindings
+	copyDecoder          inputDecoder
+	promptDecoder        inputDecoder
+	modeKeyTime          time.Time
+	presentation         ariadneconfig.TUIOptions
+	theme                presentationTheme
+	widgets              *widgetRunner
+	compact              bool
+	gesture              *mouseCapture
+	dragLayout           *core.LayoutNode
+	inputFrames          inputFramer
+	pendingViewSync      bool
 }
 
 // Run enters the full-screen frontend using an already synchronized client.
@@ -125,6 +139,19 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 	if err != nil {
 		return err
 	}
+	maps := ariadneconfig.DefaultKeymaps()
+	if options.CopyKeys == nil {
+		options.CopyKeys = maps.Copy
+	}
+	if options.PromptKeys == nil {
+		options.PromptKeys = maps.Prompt
+	}
+	copyDecoder, _ := modeDecoder(options.CopyKeys, true)
+	promptDecoder, _ := modeDecoder(options.PromptKeys, false)
+	if options.Presentation.Theme.Base.Foreground == "" {
+		options.Presentation = ariadneconfig.Default().TUI
+	}
+	theme, _ := resolveTheme(options.Presentation.Theme)
 	output, ok := stdout.(*os.File)
 	if !ok || !platformterminal.IsTerminal(os.Stdin) || !platformterminal.IsTerminal(output) {
 		return platformterminal.ErrNotTerminal
@@ -143,12 +170,16 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 		return err
 	}
 	defer func() { resultErr = errors.Join(resultErr, platformterminal.RestoreOutput(output, outputState)) }()
-	if err := writeAll(stdout, []byte("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H")); err != nil {
+	initial := "\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[2J\x1b[H"
+	if options.Presentation.Mouse {
+		initial += "\x1b[?1002h\x1b[?1006h"
+	}
+	if err := writeAll(stdout, []byte(initial)); err != nil {
 		return err
 	}
 	frameOutput := newLatestFrameWriter(stdout)
 	defer func() {
-		resultErr = errors.Join(resultErr, frameOutput.Close([]byte("\x1b[0m\x1b[?25h\x1b[?1049l")))
+		resultErr = errors.Join(resultErr, frameOutput.Close([]byte("\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[0m\x1b[0 q\x1b[?7h\x1b[?25h\x1b[?1049l")))
 	}()
 
 	ctx, cancel := context.WithCancel(parent)
@@ -168,6 +199,7 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 		clipboardMax: options.Clipboard.MaxTextBytes,
 		inputDecoder: decoder,
 		keybindings:  resolvedKeybindings(options.Keybindings),
+		copyDecoder:  copyDecoder, promptDecoder: promptDecoder, presentation: options.Presentation, theme: theme,
 	}
 	if len(value.shell) == 0 {
 		value.shell = fallbackShellCommand()
@@ -178,6 +210,15 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 	if value.cwd == "" {
 		value.cwd, _ = os.Getwd()
 	}
+	widgetOptions := make(map[string]ariadneconfig.WidgetOptions)
+	for _, name := range append(append([]string(nil), options.Presentation.Status.Left...), options.Presentation.Status.Right...) {
+		if widget, ok := options.Presentation.Status.Widgets[name]; ok {
+			widgetOptions[name] = widget
+		}
+	}
+	value.widgets = newWidgetRunner(ctx, widgetOptions)
+	defer value.widgets.close()
+	value.statusBar = value.configuredStatusBar()
 	if value.clipboardRead == "" {
 		value.clipboardRead = ariadneconfig.ClipboardAsk
 	}
@@ -296,18 +337,30 @@ func (session *session) loop(output *os.File) error {
 			session.refreshDiagnostics()
 			session.dirty = true
 		case <-frames.C:
+			for _, view := range session.views {
+				session.flushPTYInput(view)
+			}
+			if session.pendingViewSync {
+				session.syncViews()
+				session.dirty = true
+			}
+			session.flushInputFrames()
+			session.flushModeEscape()
+			session.refreshWidgets(time.Now())
 			if session.dirty {
-				frame, err := session.render()
+				surface, cursor, err := session.render()
 				if err != nil {
 					return err
 				}
-				if err = session.output.Submit(frame); err != nil {
+				if err = session.output.SubmitSurface(surface, cursor); err != nil {
 					return err
 				}
 				session.dirty = false
 			}
 		case <-session.output.Done():
 			return session.output.Err()
+		case result := <-session.widgets.results:
+			session.applyWidgetResult(result)
 		case received := <-termination:
 			return fmt.Errorf("received %s", received)
 		case <-session.client.Done():
@@ -326,7 +379,7 @@ func (session *session) loop(output *os.File) error {
 
 // processInput changes routing immediately when a command enters or leaves a
 // mode, even when both sides of the transition arrived in one terminal read.
-func (session *session) processInput(data []byte) {
+func (session *session) processKeys(data []byte) {
 	forward := make([]byte, 0, len(data))
 	flush := func() {
 		if len(forward) != 0 {
@@ -341,13 +394,17 @@ func (session *session) processInput(data []byte) {
 		if session.inputMode != inputModeNormal {
 			flush()
 			size := modalInputUnitSize(data[index:])
-			session.handleModalInput(data[index : index+size])
+			if session.inputMode == inputModeConfirm {
+				session.handleModalInput(data[index : index+size])
+			} else {
+				session.modeInput(data[index:index+size], false)
+			}
 			index += size
 			continue
 		}
 		if session.copyMode {
 			flush()
-			session.handleCopyInput(data[index : index+1])
+			session.modeInput(data[index:index+1], true)
 			index++
 			continue
 		}
@@ -391,6 +448,7 @@ func (session *session) selectInitialWindow() {
 }
 
 func (session *session) relayout() {
+	session.validateMouseCapture()
 	window, exists := session.currentWindow()
 	if !exists {
 		session.placements = nil
@@ -398,17 +456,21 @@ func (session *session) relayout() {
 		session.separators = nil
 		return
 	}
-	contentHeight := session.height - 1
+	contentHeight := session.contentHeight()
 	if contentHeight < 0 {
 		contentHeight = 0
 	}
 	available := Rect{W: session.width, H: contentHeight}
+	root := window.Layout
+	if session.dragLayout != nil {
+		root = session.dragLayout
+	}
 	if session.paneFrame == PaneFrameSplit {
-		layout := CalculateSplitLayout(window.Layout, available)
+		layout := CalculateSplitLayout(root, available)
 		session.allPlacements = layout.Placements
 		session.separators = layout.Separators
 	} else {
-		session.allPlacements = CalculateLayout(window.Layout, available)
+		session.allPlacements = CalculateLayout(root, available)
 		session.separators = nil
 	}
 	if session.previewPane != 0 {
@@ -417,13 +479,29 @@ func (session *session) relayout() {
 		return
 	}
 	if _, exists := placementFor(session.allPlacements, session.focus); !exists {
-		session.focus = session.preferredFocus()
-		session.zoom = false
-		session.copyMode = false
-		session.copySelecting = false
+		if !session.currentLayoutContains(session.focus) {
+			session.focus = session.preferredFocus()
+			if session.focus == 0 && window.Layout != nil {
+				session.focus = firstLayoutPane(*window.Layout)
+			}
+			session.zoom = false
+			session.copyMode = false
+			session.copySelecting = false
+		}
 	}
 	session.placements = session.allPlacements
-	if session.zoom && session.focus != 0 {
+	session.compact = false
+	if window.Layout != nil {
+		w, h := session.nodeMinimum(*window.Layout)
+		session.compact = available.W < w || available.H < h
+		for _, placement := range session.allPlacements {
+			if !session.placementFits(placement) {
+				session.compact = true
+				break
+			}
+		}
+	}
+	if (session.zoom || session.compact) && session.focus != 0 {
 		session.placements = []Placement{{PaneID: session.focus, Rect: available}}
 		session.separators = nil
 	}
@@ -454,6 +532,7 @@ func (session *session) preferredFocus() core.PaneID {
 }
 
 func (session *session) syncViews() {
+	session.pendingViewSync = false
 	placements := session.viewPlacements()
 	wanted := make(map[core.PaneID]Placement, len(placements))
 	for _, placement := range placements {
@@ -466,7 +545,7 @@ func (session *session) syncViews() {
 			wanted[placement.PaneID] = placement
 		}
 	}
-	if session.zoom {
+	if session.zoom || session.compact {
 		if placement, exists := placementFor(session.placements, session.focus); exists {
 			wanted[session.focus] = placement
 		}
@@ -505,7 +584,7 @@ func (session *session) syncViews() {
 			}
 			session.views[paneID] = view
 		}
-		content := chromeForMode(pane, renderer, session.paneFrame).ContentRect(placement.Rect)
+		content := session.chrome(pane, renderer, placement.Rect).ContentRect(placement.Rect)
 		cols, rows := content.W, content.H
 		if cols < 1 || rows < 1 {
 			continue
@@ -516,6 +595,10 @@ func (session *session) syncViews() {
 		}
 		if view.cols != cols || view.rows != rows {
 			if err := safeResizePane(view.content, cols, rows); err != nil {
+				if errors.Is(err, libghostty.ErrBusy) {
+					session.pendingViewSync = true
+					continue
+				}
 				view.errorMessage = err.Error()
 				continue
 			}
@@ -595,7 +678,9 @@ func (session *session) handlePTYEvent(message paneEvent) error {
 			return message.err
 		}
 		if len(message.response) != 0 {
-			session.sendPTYInput(view, message.response)
+			// VT replies are protocol traffic, not user input. They must not wait
+			// behind a paste whose encoding is waiting for the VT writer.
+			session.writePTYInput(view, message.response)
 		}
 		if session.copyMode && message.paneID == session.focus {
 			session.copyNewOutput = true
@@ -634,12 +719,21 @@ func (session *session) sendInput(data []byte) {
 }
 
 func (session *session) sendPTYInput(view *paneView, data []byte) {
+	if len(view.inputQueue) != 0 {
+		session.queuePTYInput(view, paneInput{data: data})
+		return
+	}
+	session.writePTYInput(view, data)
+}
+
+func (session *session) writePTYInput(view *paneView, data []byte) error {
 	ctx, cancel := context.WithTimeout(session.ctx, commandTimeout)
 	err := session.pty.Input(ctx, view.terminalID, data)
 	cancel()
 	if err != nil {
 		session.setMessage(err.Error())
 	}
+	return err
 }
 
 func (session *session) moveFocus(action inputAction) {
@@ -697,9 +791,13 @@ func directionalDistance(action inputAction, cx, cy, x, y int) (int, int, bool) 
 	}
 }
 
-func (session *session) render() ([]byte, error) {
-	base := Style{Foreground: Color{R: 220, G: 220, B: 220}, Background: Color{R: 18, G: 20, B: 24}}
+func (session *session) render() (*Surface, Cursor, error) {
+	if session.theme.styles == nil {
+		session.theme, _ = resolveTheme(ariadneconfig.DefaultTheme())
+	}
+	base := session.theme.styles["base"]
 	surface := NewSurface(session.width, session.height, base)
+	surface.Theme = &session.theme
 	cursor := Cursor{}
 	if len(session.placements) == 0 && session.height > 1 {
 		surface.Text(2, 1, max(0, session.width-4), "No panes. Run `ariadne new -- <command>` from another shell.", base)
@@ -715,8 +813,8 @@ func (session *session) render() ([]byte, error) {
 			session.setMessage(err.Error())
 			continue
 		}
-		chrome := chromeForMode(pane, renderer, session.paneFrame)
-		title := paneTitle(pane)
+		chrome := session.chrome(pane, renderer, placement.Rect)
+		title := session.displayPaneTitle(pane)
 		if count, _ := session.paneAttention(pane.ID); count != 0 {
 			title = fmt.Sprintf("!%d %s", count, title)
 		}
@@ -748,7 +846,8 @@ func (session *session) render() ([]byte, error) {
 			cursor = Cursor{X: content.X + session.copyX, Y: content.Y + session.copyY, Visible: true}
 		}
 		if view.errorMessage != "" {
-			warning := Style{Foreground: Color{R: 255, G: 210, B: 120}, Background: base.Background}
+			warning := session.theme.styles["warning"]
+			warning.Background = base.Background
 			surface.Text(content.X, content.Y, content.W, fitText(view.errorMessage, content.W), warning)
 		}
 	}
@@ -775,16 +874,29 @@ func (session *session) render() ([]byte, error) {
 			message += " · new output"
 		}
 	}
-	session.statusBar.Draw(surface, session.height-1, StatusContext{
-		Workspace: workspaceName, Window: windowName, PaneID: pane.ID, PaneTitle: pane.Title,
-		State: state, Message: message, Now: time.Now(), UnreadAttention: unreadAttentionCount(session.snapshot.Attentions), AttentionSeverity: highestAttentionSeverity(session.snapshot.Attentions),
-	})
-	frame := EncodeFrame(surface, cursor)
+	if session.height > 1 {
+		session.statusBar.Draw(surface, session.height-1, StatusContext{
+			Workspace: workspaceName, Window: windowName, PaneID: pane.ID, PaneTitle: session.displayPaneTitle(pane),
+			ManualPaneTitle: sanitizeWidgetText(pane.Title), TerminalTitle: session.terminalTitle(pane),
+			State: state, Message: message, Now: time.Now(), UnreadAttention: unreadAttentionCount(session.snapshot.Attentions), AttentionSeverity: highestAttentionSeverity(session.snapshot.Attentions),
+			CWD: session.paneCWD(pane),
+		})
+	}
+	if session.inputMode != inputModeNormal || session.copyMode {
+		surface.Text(0, session.height-1, session.width, fitText(message, session.width), session.theme.styles["prompt"])
+		if session.inputMode == inputModePrompt {
+			cursor = Cursor{Visible: true, X: min(max(0, session.width-1), textWidth(session.promptLead+session.prompt)), Y: session.height - 1, Shape: 6}
+		} else if session.inputMode == inputModeConfirm {
+			cursor = Cursor{}
+		}
+	}
 	if len(session.outerClipboard) != 0 {
-		frame = append(frame, session.outerClipboard...)
+		if err := session.output.SubmitControl(session.outerClipboard); err != nil {
+			return nil, Cursor{}, err
+		}
 		session.outerClipboard = nil
 	}
-	return frame, nil
+	return surface, cursor, nil
 }
 
 func (session *session) paneAttention(id core.PaneID) (int, core.AttentionSeverity) {
@@ -821,9 +933,20 @@ func highestAttentionSeverity(values []core.Attention) core.AttentionSeverity {
 }
 
 func drawCopySelection(surface *Surface, content Rect, startX, startY, endX, endY int) {
+	if content.W <= 0 || content.H <= 0 {
+		return
+	}
 	start, end := startY*content.W+startX, endY*content.W+endX
 	if start > end {
 		start, end = end, start
+	}
+	start = max(0, start)
+	end = min(content.W*content.H-1, end)
+	if surface.At(content.X+start%content.W, content.Y+start/content.W).Width == 0 && start%content.W > 0 {
+		start--
+	}
+	if surface.At(content.X+end%content.W, content.Y+end/content.W).Width == 2 && end%content.W+1 < content.W {
+		end++
 	}
 	for index := start; index <= end; index++ {
 		x, y := content.X+index%content.W, content.Y+index/content.W
@@ -833,9 +956,11 @@ func drawCopySelection(surface *Surface, content Rect, startX, startY, endX, end
 		cell := surface.At(x, y)
 		cell.Style.Foreground, cell.Style.Background = cell.Style.Background, cell.Style.Foreground
 		if cell.Style.Foreground == cell.Style.Background {
-			cell.Style.Background = Color{R: 80, G: 110, B: 150}
+			cell.Style.Background = surface.themeStyle("selection").Background
 		}
-		surface.Set(x, y, cell)
+		if x >= 0 && x < surface.Width && y >= 0 && y < surface.Height {
+			surface.Cells[y*surface.Width+x] = cell
+		}
 	}
 }
 
@@ -843,19 +968,19 @@ func drawPaneBorder(surface *Surface, rect Rect, title string, focused bool) {
 	if rect.W <= 0 || rect.H <= 0 {
 		return
 	}
-	style := paneFrameStyle(focused)
+	style := surface.frameStyle(focused)
 	for x := rect.X; x < rect.X+rect.W; x++ {
-		surface.Set(x, rect.Y, Cell{Text: "─", Width: 1, Style: style})
-		surface.Set(x, rect.Y+rect.H-1, Cell{Text: "─", Width: 1, Style: style})
+		surface.Set(x, rect.Y, Cell{Text: surface.lineGlyph("─"), Width: 1, Style: style})
+		surface.Set(x, rect.Y+rect.H-1, Cell{Text: surface.lineGlyph("─"), Width: 1, Style: style})
 	}
 	for y := rect.Y; y < rect.Y+rect.H; y++ {
-		surface.Set(rect.X, y, Cell{Text: "│", Width: 1, Style: style})
-		surface.Set(rect.X+rect.W-1, y, Cell{Text: "│", Width: 1, Style: style})
+		surface.Set(rect.X, y, Cell{Text: surface.lineGlyph("│"), Width: 1, Style: style})
+		surface.Set(rect.X+rect.W-1, y, Cell{Text: surface.lineGlyph("│"), Width: 1, Style: style})
 	}
-	surface.Set(rect.X, rect.Y, Cell{Text: "┌", Width: 1, Style: style})
-	surface.Set(rect.X+rect.W-1, rect.Y, Cell{Text: "┐", Width: 1, Style: style})
-	surface.Set(rect.X, rect.Y+rect.H-1, Cell{Text: "└", Width: 1, Style: style})
-	surface.Set(rect.X+rect.W-1, rect.Y+rect.H-1, Cell{Text: "┘", Width: 1, Style: style})
+	surface.Set(rect.X, rect.Y, Cell{Text: surface.lineGlyph("┌"), Width: 1, Style: style})
+	surface.Set(rect.X+rect.W-1, rect.Y, Cell{Text: surface.lineGlyph("┐"), Width: 1, Style: style})
+	surface.Set(rect.X, rect.Y+rect.H-1, Cell{Text: surface.lineGlyph("└"), Width: 1, Style: style})
+	surface.Set(rect.X+rect.W-1, rect.Y+rect.H-1, Cell{Text: surface.lineGlyph("┘"), Width: 1, Style: style})
 	if rect.W > 4 {
 		surface.Text(rect.X+2, rect.Y, rect.W-4, fitText(" "+title+" ", rect.W-4), style)
 	}
@@ -895,7 +1020,7 @@ func drawSplitSeparators(surface *Surface, separators []Separator, placements []
 		right := cells[separatorPoint{x: point.x + 1, y: point.y}].horizontal
 		up := cells[separatorPoint{x: point.x, y: point.y - 1}].vertical
 		down := cells[separatorPoint{x: point.x, y: point.y + 1}].vertical
-		surface.Set(point.x, point.y, Cell{Text: separatorGlyph(cell, left, right, up, down), Width: 1, Style: paneFrameStyle(cell.focused)})
+		surface.Set(point.x, point.y, Cell{Text: surface.lineGlyph(separatorGlyph(cell, left, right, up, down)), Width: 1, Style: surface.frameStyle(cell.focused)})
 	}
 }
 
@@ -951,15 +1076,6 @@ func separatorGlyph(cell separatorCell, left, right, up, down bool) string {
 	default:
 		return "│"
 	}
-}
-
-func paneFrameStyle(focused bool) Style {
-	style := Style{Foreground: Color{R: 85, G: 90, B: 100}, Background: Color{R: 18, G: 20, B: 24}}
-	if focused {
-		style.Foreground = Color{R: 110, G: 180, B: 255}
-		style.Bold = true
-	}
-	return style
 }
 
 func (session *session) currentWindow() (core.Window, bool) {
@@ -1039,6 +1155,7 @@ func (session *session) setMessage(message string) {
 }
 
 func (session *session) detachView(view *paneView) {
+	view.inputQueue, view.inputBytes = nil, 0
 	if view.attachment == nil {
 		return
 	}

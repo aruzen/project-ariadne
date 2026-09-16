@@ -22,6 +22,8 @@ const (
 )
 
 func (session *session) beginPrompt(lead, initial string) {
+	session.cancelMouseCapture()
+	session.promptDecoder.pending = nil
 	session.inputMode = inputModePrompt
 	session.promptLead = lead
 	session.prompt = initial
@@ -29,6 +31,10 @@ func (session *session) beginPrompt(lead, initial string) {
 	session.promptDraft = initial
 	session.promptCallback = session.executePrompt
 	session.dirty = true
+	if session.height <= 1 {
+		session.relayout()
+		session.syncViews()
+	}
 }
 
 func (session *session) executeCommandSequence(commands []string) {
@@ -46,10 +52,15 @@ func (session *session) beginPromptWithCallback(lead, initial string, callback f
 }
 
 func (session *session) beginConfirmation(message string, callback func(bool)) {
+	session.cancelMouseCapture()
 	session.inputMode = inputModeConfirm
 	session.confirm = message
 	session.confirmCallback = callback
 	session.dirty = true
+	if session.height <= 1 {
+		session.relayout()
+		session.syncViews()
+	}
 }
 
 func (session *session) handleModalInput(data []byte) {
@@ -106,10 +117,7 @@ func (session *session) handleModalInput(data []byte) {
 			session.resumeClipboardRequests()
 			return
 		case 0x08, 0x7f:
-			runes := []rune(session.prompt)
-			if len(runes) != 0 {
-				session.prompt = string(runes[:len(runes)-1])
-			}
+			session.prompt = deleteLastGrapheme(session.prompt)
 		case 0x09:
 			session.completePrompt()
 		case 0x0e:
@@ -216,6 +224,10 @@ func (session *session) clearInputMode() {
 	session.confirmCallback = nil
 	session.promptCallback = nil
 	session.dirty = true
+	if session.height <= 1 {
+		session.relayout()
+		session.syncViews()
+	}
 }
 
 func (session *session) executePrompt(commandLine string) {
@@ -228,6 +240,28 @@ func (session *session) executePrompt(commandLine string) {
 		return
 	}
 	switch fields[0] {
+	case "list":
+		unit := client.ResourceWindow
+		if len(fields) > 2 {
+			session.setMessage("usage: list [pane|window|workspace]")
+			return
+		}
+		if len(fields) == 2 {
+			var err error
+			unit, err = client.ParseResourceUnit(fields[1])
+			if err != nil {
+				session.setMessage(err.Error())
+				return
+			}
+		}
+		session.openResourceList(unit)
+	case "delete":
+		unit, id, err := client.ParseResourceTarget(fields[1:], map[client.ResourceUnit]uint64{client.ResourcePane: uint64(session.focus), client.ResourceWindow: uint64(session.window), client.ResourceWorkspace: uint64(session.workspace)})
+		if err != nil {
+			session.setMessage(err.Error())
+			return
+		}
+		session.deleteResource(unit, id)
 	case "help", "commands":
 		if len(fields) == 1 {
 			session.openBuiltinTool("help")
@@ -347,7 +381,15 @@ func (session *session) executePrompt(commandLine string) {
 			mode = fields[1]
 		}
 		session.setZoom(mode)
-	case "close", "kill", "kill-pane":
+	case "kill", "kill-pane":
+		id, ok := optionalID(fields, uint64(session.focus))
+		if !ok {
+			session.setMessage("usage: kill [PANE]")
+			return
+		}
+		_, err := callTUI[protocol.TerminalOperationResult](session, protocol.OperationStopTerminal, protocol.PaneParams{PaneID: core.PaneID(id)})
+		session.reportCommand(err, "terminal stopped")
+	case "close":
 		id, ok := optionalID(fields, uint64(session.focus))
 		if !ok {
 			session.setMessage("usage: close [PANE]")
@@ -686,6 +728,9 @@ func (session *session) splitTerminalCommand(direction core.SplitDirection, argv
 		params.Argv = append([]string(nil), argv...)
 	}
 	if session.focus != 0 {
+		if !session.canSplit(direction, core.Pane{Kind: core.PaneTerminal, Presentation: params.Presentation}) {
+			return
+		}
 		params.TargetPaneID = session.focus
 		params.Direction = direction
 	}
@@ -748,8 +793,21 @@ func (session *session) dismissPane(paneID core.PaneID) {
 		session.setMessage("no focused pane")
 		return
 	}
-	_, err := callTUI[protocol.TerminalOperationResult](session, protocol.OperationDismissTerminal, protocol.PaneParams{PaneID: paneID})
-	session.reportCommand(err, "pane dismissed")
+	_, err := callTUI[protocol.TerminalOperationResult](session, protocol.OperationDeletePane, protocol.PaneParams{PaneID: paneID})
+	session.reportCommand(err, "pane deleted")
+}
+
+func (session *session) deleteResource(unit client.ResourceUnit, id uint64) {
+	var err error
+	switch unit {
+	case client.ResourcePane:
+		_, err = callTUI[protocol.TerminalOperationResult](session, protocol.OperationDeletePane, protocol.PaneParams{PaneID: core.PaneID(id)})
+	case client.ResourceWindow:
+		_, err = callTUI[core.DeleteWindowResult](session, protocol.OperationDeleteWindow, protocol.DeleteWindowParams{WindowID: core.WindowID(id)})
+	case client.ResourceWorkspace:
+		_, err = callTUI[core.DeleteWorkspaceResult](session, protocol.OperationDeleteWorkspace, protocol.DeleteWorkspaceParams{WorkspaceID: core.WorkspaceID(id)})
+	}
+	session.reportCommand(err, fmt.Sprintf("%s %d deleted", unit, id))
 }
 
 func (session *session) restartFocused() {

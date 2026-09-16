@@ -6,9 +6,20 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/aruzen/ariadne/internal/client"
 	"github.com/aruzen/ariadne/internal/core"
 	"github.com/aruzen/ariadne/internal/protocol"
 )
+
+func (session *session) openResourceList(unit client.ResourceUnit) {
+	for _, pane := range session.snapshot.Panes {
+		if pane.Tool != nil && pane.Tool.Provider == "ariadne" && pane.Tool.Type == "resource-list" && pane.Tool.Instance == string(unit) && !session.isStashedPane(pane.ID) {
+			session.focusPane(pane.ID)
+			return
+		}
+	}
+	session.createTool([]string{"resource-list", string(unit)})
+}
 
 func (session *session) createTool(arguments []string) {
 	if len(arguments) < 1 || len(arguments) > 3 {
@@ -36,6 +47,9 @@ func (session *session) createTool(arguments []string) {
 		}
 	}
 	params := protocol.CreatePaneParams{WindowID: session.window, Kind: core.PaneTool, Title: descriptor.Type, Tool: &tool}
+	if !session.canSplit(direction, core.Pane{Kind: core.PaneTool}) {
+		return
+	}
 	var pane core.Pane
 	var err error
 	if session.focus == 0 {

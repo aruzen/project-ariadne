@@ -48,6 +48,16 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 	if command == "init" {
 		return runInit(arguments[1:], stdout)
 	}
+	if command == "list" {
+		if _, _, err := parseListOptions(arguments[1:], stderr); err != nil {
+			return err
+		}
+	}
+	if command == "delete" {
+		if _, _, err := client.ParseResourceTarget(arguments[1:], nil); err != nil {
+			return err
+		}
+	}
 	if command == "daemon" {
 		if len(arguments) == 1 {
 			return errors.New("daemon subcommand is required")
@@ -113,7 +123,10 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 		options.Shell = fileConfiguration.ShellCommand(options.Shell)
 		options.Editor = fileConfiguration.EditorCommand(options.Editor)
 		options.Clipboard = fileConfiguration.Clipboard
-		options.Keybindings = fileConfiguration.Keybindings
+		options.Keybindings = fileConfiguration.Keybindings.Normal
+		options.CopyKeys = fileConfiguration.Keybindings.Copy
+		options.PromptKeys = fileConfiguration.Keybindings.Prompt
+		options.Presentation = fileConfiguration.TUI
 		return tui.Run(operationCtx, frontend, synchronized.Snapshot, stdout, options)
 	case "new":
 		return runNew(operationCtx, frontend, arguments[1:], stdout, stderr)
@@ -122,15 +135,17 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 	case "attach":
 		return runAttach(operationCtx, frontend, arguments[1:], stdout)
 	case "list":
-		return runList(operationCtx, frontend, arguments[1:], stdout, stderr)
+		return runList(synchronized.Snapshot, arguments[1:], stdout, stderr)
+	case "delete":
+		return runDelete(operationCtx, frontend, arguments[1:], stdout)
 	case "restart":
 		return runRestart(operationCtx, frontend, arguments[1:], stdout, stderr)
 	case "run":
 		return runTerminal(operationCtx, frontend, arguments[1:], stdout, stderr)
 	case "kill":
-		return runPaneCommand(operationCtx, frontend, protocol.OperationKillTerminal, arguments[1:], stdout, "killed")
+		return runPaneCommand(operationCtx, frontend, protocol.OperationStopTerminal, arguments[1:], stdout, "stopped")
 	case "dismiss":
-		return runPaneCommand(operationCtx, frontend, protocol.OperationDismissTerminal, arguments[1:], stdout, "dismissed")
+		return runPaneCommand(operationCtx, frontend, protocol.OperationDeletePane, arguments[1:], stdout, "dismissed")
 	case "stash":
 		return runStash(operationCtx, frontend, arguments[1:], stdout)
 	case "restore":
@@ -170,7 +185,7 @@ func parseTUIOptions(arguments []string, defaults ariadneconfig.TUIOptions, stde
 
 func knownCommand(command string) bool {
 	switch command {
-	case "init", "tui", "new", "open", "attach", "list", "restart", "run", "kill", "dismiss", "stash", "restore", "tool", "attention", "daemon":
+	case "init", "tui", "new", "open", "attach", "list", "delete", "restart", "run", "kill", "dismiss", "stash", "restore", "tool", "attention", "daemon":
 		return true
 	default:
 		return false
@@ -561,48 +576,72 @@ func runPaneCommand(ctx context.Context, frontend *client.Client, operation prot
 	return err
 }
 
-func runList(ctx context.Context, frontend *client.Client, arguments []string, stdout, stderr io.Writer) error {
+func parseListOptions(arguments []string, stderr io.Writer) (client.ResourceUnit, bool, error) {
+	unit := client.ResourceWindow
+	if len(arguments) != 0 && !strings.HasPrefix(arguments[0], "-") {
+		candidate, err := client.ParseResourceUnit(arguments[0])
+		if err != nil {
+			return "", false, err
+		}
+		unit, arguments = candidate, arguments[1:]
+	}
 	flags := flag.NewFlagSet("list", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if err := flags.Parse(arguments); err != nil {
-		return err
+		return "", false, err
 	}
-	if flags.NArg() != 0 {
-		return errors.New("list does not accept positional arguments")
+	if flags.NArg() == 1 {
+		candidate, err := client.ParseResourceUnit(flags.Arg(0))
+		if err != nil {
+			return "", false, err
+		}
+		unit = candidate
+	} else if flags.NArg() != 0 {
+		return "", false, errors.New("usage: list [pane|window|workspace] [--json]")
 	}
-	result, err := client.Call[protocol.ListTerminalsResult](ctx, frontend, protocol.OperationListTerminals, nil)
+	return unit, *jsonOutput, nil
+}
+
+func runList(snapshot core.Snapshot, arguments []string, stdout, stderr io.Writer) error {
+	unit, jsonOutput, err := parseListOptions(arguments, stderr)
 	if err != nil {
 		return err
 	}
-	if *jsonOutput {
+	result := client.ListResources(snapshot, unit)
+	if jsonOutput {
 		encoder := json.NewEncoder(stdout)
 		encoder.SetEscapeHTML(false)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(result)
 	}
 	writer := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(writer, "PANE\tTERMINAL\tSTATE\tATTACHED\tCOMMAND\tCWD"); err != nil {
-		return err
-	}
-	for _, entry := range result.Entries {
-		terminalID := "-"
-		state := "-"
-		command := "-"
-		cwd := "-"
-		if entry.Pane.Terminal != nil {
-			state = string(entry.Pane.Terminal.State)
-			command = formatArgv(entry.Pane.Terminal.Launch.Argv)
-			cwd = entry.Pane.Terminal.Launch.CWD
-			if entry.Pane.Terminal.ID != nil {
-				terminalID = strconv.FormatUint(uint64(*entry.Pane.Terminal.ID), 10)
-			}
-		}
-		if _, err := fmt.Fprintf(writer, "%d\t%s\t%s\t%d\t%s\t%s\n", entry.Pane.ID, terminalID, state, entry.AttachmentCount, command, cwd); err != nil {
+	for _, row := range result.Rows() {
+		if _, err := fmt.Fprintln(writer, strings.Join(row, "\t")); err != nil {
 			return err
 		}
 	}
 	return writer.Flush()
+}
+
+func runDelete(ctx context.Context, frontend *client.Client, arguments []string, stdout io.Writer) error {
+	unit, id, err := client.ParseResourceTarget(arguments, nil)
+	if err != nil {
+		return err
+	}
+	switch unit {
+	case client.ResourcePane:
+		_, err = client.Call[protocol.TerminalOperationResult](ctx, frontend, protocol.OperationDeletePane, protocol.PaneParams{PaneID: core.PaneID(id)})
+	case client.ResourceWindow:
+		_, err = client.Call[core.DeleteWindowResult](ctx, frontend, protocol.OperationDeleteWindow, protocol.DeleteWindowParams{WindowID: core.WindowID(id)})
+	case client.ResourceWorkspace:
+		_, err = client.Call[core.DeleteWorkspaceResult](ctx, frontend, protocol.OperationDeleteWorkspace, protocol.DeleteWorkspaceParams{WorkspaceID: core.WorkspaceID(id)})
+	}
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "deleted %s %d\n", unit, id)
+	return err
 }
 
 func runDaemon(ctx context.Context, frontend *client.Client, arguments []string, stdout, stderr io.Writer) error {

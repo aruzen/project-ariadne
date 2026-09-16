@@ -20,7 +20,7 @@ func (session *session) resizeFocusedPane(action inputAction) {
 	if !exists || window.Layout == nil || session.focus == 0 {
 		return
 	}
-	contentHeight := max(0, session.height-1)
+	contentHeight := session.contentHeight()
 	rootRect := Rect{W: session.width, H: contentHeight}
 	separatorCells := session.paneFrame == PaneFrameSplit
 	path, found := layoutPath(*window.Layout, rootRect, session.focus, separatorCells, nil)
@@ -46,7 +46,10 @@ func (session *session) resizeFocusedPane(action inputAction) {
 			separators = min(len(ancestor.node.Children)-1, max(0, axis-1))
 		}
 		lengths := weightedLengths(axis-separators, ancestor.node.Weights, len(ancestor.node.Children))
-		minimum := minimumAxisSize(ancestor.node.Children[neighbor], direction, session.paneFrame)
+		minimum, mh := session.nodeMinimum(ancestor.node.Children[neighbor])
+		if direction == core.SplitVertical {
+			minimum = mh
+		}
 		if lengths[neighbor] <= minimum {
 			session.setMessage(errPaneMinimumSize.Error())
 			return
@@ -112,33 +115,4 @@ func layoutPath(node core.LayoutNode, rect Rect, paneID core.PaneID, separatorCe
 		}
 	}
 	return nil, false
-}
-
-func minimumAxisSize(node core.LayoutNode, direction core.SplitDirection, frame PaneFrameMode) int {
-	leafMinimum := 1
-	if frame == PaneFrameFull {
-		leafMinimum = 3
-	}
-	if node.Kind == core.LayoutPane {
-		return leafMinimum
-	}
-	values := make([]int, len(node.Children))
-	for index, child := range node.Children {
-		values[index] = minimumAxisSize(child, direction, frame)
-	}
-	if node.Direction == direction {
-		total := 0
-		for _, value := range values {
-			total += value
-		}
-		if frame == PaneFrameSplit {
-			total += len(values) - 1
-		}
-		return total
-	}
-	maximum := 0
-	for _, value := range values {
-		maximum = max(maximum, value)
-	}
-	return maximum
 }

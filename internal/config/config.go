@@ -64,7 +64,7 @@ type Config struct {
 	Shell       string           `toml:"shell"`
 	Commands    DefaultCommands  `toml:"commands"`
 	DetachKey   string           `toml:"detach_key"`
-	Keybindings Keybindings      `toml:"keybindings"`
+	Keybindings Keymaps          `toml:"keybindings"`
 	TUI         TUIOptions       `toml:"tui"`
 	Terminal    TerminalLimits   `toml:"terminal"`
 	Clipboard   ClipboardOptions `toml:"clipboard"`
@@ -151,7 +151,14 @@ type ClipboardOptions struct {
 
 // TUIOptions controls local presentation and is not sent to the daemon.
 type TUIOptions struct {
-	PaneFrame TUIFrameMode `toml:"pane_frame"`
+	PaneTitle     PaneTitleMode `toml:"pane_title"`
+	PaneFrame     TUIFrameMode  `toml:"pane_frame"`
+	Mouse         bool          `toml:"mouse"`
+	MinPaneWidth  int           `toml:"min_pane_width"`
+	MinPaneHeight int           `toml:"min_pane_height"`
+	Theme         Theme         `toml:"theme"`
+	Status        StatusOptions `toml:"status"`
+	CWD           CWDOptions    `toml:"cwd"`
 }
 
 // TerminalLimits bounds PTY output retained or queued by the daemon.
@@ -181,8 +188,8 @@ func Default() Config {
 	peer := streammux.DefaultPeerConfig()
 	return Config{
 		DetachKey:   DefaultDetachKey,
-		Keybindings: DefaultKeybindings(),
-		TUI:         TUIOptions{PaneFrame: DefaultTUIFrameMode},
+		Keybindings: DefaultKeymaps(),
+		TUI:         TUIOptions{PaneFrame: DefaultTUIFrameMode, PaneTitle: PaneTitleAuto, Mouse: true, MinPaneWidth: 2, MinPaneHeight: 1, Theme: DefaultTheme(), Status: DefaultStatusOptions(), CWD: CWDOptions{Terminal: "pane", Tool: "startup"}},
 		Terminal: TerminalLimits{
 			SuccessfulExit: DefaultSuccessfulExitPolicy,
 			HistoryBytes:   manager.HistoryBytes, MaxTotalHistoryBytes: manager.MaxTotalHistoryBytes,
@@ -234,6 +241,16 @@ func Parse(data []byte) (Config, error) {
 		return Config{}, fmt.Errorf("%w: %d bytes", ErrTooLarge, len(data))
 	}
 	configuration := Default()
+	var raw map[string]any
+	if err := toml.Unmarshal(data, &raw); err == nil {
+		if bindings, ok := raw["keybindings"].(map[string]any); ok {
+			for name, value := range bindings {
+				if _, flat := value.(string); flat {
+					return Config{}, fmt.Errorf("%w: flat keybindings %q is no longer supported; move it to [keybindings.normal]", ErrInvalid, name)
+				}
+			}
+		}
+	}
 	decoder := toml.NewDecoder(bytes.NewReader(data)).DisallowUnknownFields()
 	if err := decoder.Decode(&configuration); err != nil {
 		return Config{}, fmt.Errorf("%w: %w", ErrInvalid, err)
@@ -274,16 +291,8 @@ func (configuration Config) validate() error {
 	if strings.ContainsRune(configuration.DetachKey, 0) {
 		return fmt.Errorf("%w: detach_key contains NUL", ErrInvalid)
 	}
-	if len(configuration.Keybindings) > MaxKeybindings {
-		return fmt.Errorf("%w: keybindings exceeds %d entries", ErrInvalid, MaxKeybindings)
-	}
-	for keys, commands := range configuration.Keybindings {
-		if strings.TrimSpace(keys) == "" || len(keys) > MaxKeySequenceBytes || strings.ContainsRune(keys, 0) {
-			return fmt.Errorf("%w: invalid keybinding sequence %q", ErrInvalid, keys)
-		}
-		if len(commands) > MaxKeyCommandBytes || strings.ContainsRune(commands, 0) {
-			return fmt.Errorf("%w: invalid keybinding command for %q", ErrInvalid, keys)
-		}
+	if err := configuration.validatePresentation(); err != nil {
+		return err
 	}
 	if configuration.Shell != "" {
 		if strings.TrimSpace(configuration.Shell) == "" {

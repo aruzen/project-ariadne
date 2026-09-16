@@ -2,10 +2,12 @@ package tui
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/aruzen/ariadne/internal/client"
 	ariadneconfig "github.com/aruzen/ariadne/internal/config"
 	"github.com/aruzen/ariadne/internal/core"
 	"github.com/aruzen/ariadne/internal/vt/libghostty"
@@ -20,20 +22,50 @@ const (
 )
 
 type Options struct {
-	PaneFrame   PaneFrameMode
-	Keybindings ariadneconfig.Keybindings
-	Shell       []string
-	Editor      []string
-	CWD         string
-	Env         []string
-	Clipboard   ariadneconfig.ClipboardOptions
+	PaneFrame    PaneFrameMode
+	Keybindings  ariadneconfig.Keybindings
+	CopyKeys     ariadneconfig.Keybindings
+	PromptKeys   ariadneconfig.Keybindings
+	Presentation ariadneconfig.TUIOptions
+	Shell        []string
+	Editor       []string
+	CWD          string
+	Env          []string
+	Clipboard    ariadneconfig.ClipboardOptions
 }
 
 func DefaultOptions() Options {
-	return Options{PaneFrame: PaneFrameFull, Keybindings: ariadneconfig.DefaultKeybindings()}
+	defaults := ariadneconfig.Default()
+	return Options{PaneFrame: PaneFrameFull, Keybindings: defaults.Keybindings.Normal, CopyKeys: defaults.Keybindings.Copy, PromptKeys: defaults.Keybindings.Prompt, Presentation: defaults.TUI}
 }
 
 func (options Options) validate() error {
+	if mode := options.Presentation.PaneTitle; mode != "" && !mode.Valid() {
+		return fmt.Errorf("tui.pane_title must be auto, pane, or terminal")
+	}
+	presentation := options.Presentation
+	if presentation.Theme.Base.Foreground == "" {
+		presentation = ariadneconfig.Default().TUI
+	}
+	if _, err := resolveTheme(presentation.Theme); err != nil {
+		return err
+	}
+	for _, copy := range []bool{true, false} {
+		keys := options.PromptKeys
+		if copy {
+			keys = options.CopyKeys
+		}
+		if keys == nil {
+			maps := ariadneconfig.DefaultKeymaps()
+			keys = maps.Prompt
+			if copy {
+				keys = maps.Copy
+			}
+		}
+		if _, err := modeDecoder(keys, copy); err != nil {
+			return err
+		}
+	}
 	if err := validateFrontendCommand("shell", options.Shell); err != nil {
 		return err
 	}
@@ -118,6 +150,7 @@ type terminalPaneContent struct {
 	terminal *libghostty.Terminal
 	cols     int
 	rows     int
+	screen   libghostty.Screen
 }
 
 func (content *terminalPaneContent) Resize(cols, rows int) error {
@@ -220,7 +253,13 @@ func (content *terminalPaneContent) Draw(surface *Surface, rect Rect, _ core.Pan
 	if content.terminal == nil || rect.W <= 0 || rect.H <= 0 {
 		return Cursor{}, nil
 	}
-	screen, err := content.terminal.Screen()
+	screen, err := content.terminal.TryScreen()
+	if errors.Is(err, libghostty.ErrBusy) {
+		screen = content.screen
+		err = nil
+	} else if err == nil {
+		content.screen = screen
+	}
 	if err != nil {
 		return Cursor{}, err
 	}
@@ -228,18 +267,22 @@ func (content *terminalPaneContent) Draw(surface *Surface, rect Rect, _ core.Pan
 		for x := 0; x < rect.W && x < screen.Cols; x++ {
 			source := screen.At(x, y)
 			style := Style{
+				UnderlineStyle: source.Style.UnderlineStyle, UnderlineColor: colorFromGhostty(source.Style.UnderlineColor), HasUnderlineColor: source.Style.HasUnderlineColor,
 				Foreground: colorFromGhostty(source.Style.Foreground), Background: colorFromGhostty(source.Style.Background),
 				Bold: source.Style.Bold, Italic: source.Style.Italic, Underline: source.Style.Underline,
 				Strikethrough: source.Style.Strikethrough, Faint: source.Style.Faint, Blink: source.Style.Blink,
 			}
 			target := (rect.Y+y)*surface.Width + rect.X + x
 			if target >= 0 && target < len(surface.Cells) {
+				if source.Width == 2 && x+1 >= rect.W {
+					source.Text, source.Width = " ", 1
+				}
 				surface.Cells[target] = Cell{Text: source.Text, Width: source.Width, Style: style}
 			}
 		}
 	}
 	if focused && screen.Cursor.Visible && screen.Cursor.X < rect.W && screen.Cursor.Y < rect.H {
-		return Cursor{X: rect.X + screen.Cursor.X, Y: rect.Y + screen.Cursor.Y, Visible: true}, nil
+		return Cursor{X: rect.X + screen.Cursor.X, Y: rect.Y + screen.Cursor.Y, Visible: true, Shape: screen.Cursor.Shape}, nil
 	}
 	return Cursor{}, nil
 }
@@ -273,7 +316,7 @@ func (renderer toolPaneRenderer) NewContent(owner *session, pane core.Pane) pane
 	return factory(owner, pane)
 }
 
-var builtinToolTypes = []string{"command-palette", "stash-list", "help", "workspace-list", "agent-status", "diagnostics"}
+var builtinToolTypes = []string{"command-palette", "stash-list", "help", "workspace-list", "resource-list", "agent-status", "diagnostics"}
 
 func isBuiltinToolType(kind string) bool {
 	for _, candidate := range builtinToolTypes {
@@ -509,7 +552,7 @@ func (content *builtinToolContent) clampScroll(lineCount, height int) {
 
 func (content *builtinToolContent) selectable() bool {
 	switch content.descriptor.Type {
-	case "stash-list", "workspace-list", "agent-status":
+	case "stash-list", "workspace-list", "resource-list", "agent-status":
 		return true
 	default:
 		return false
@@ -525,6 +568,16 @@ func (content *builtinToolContent) lines() []string {
 		return []string{"tool unavailable"}
 	}
 	switch content.descriptor.Type {
+	case "resource-list":
+		unit, err := client.ParseResourceUnit(content.descriptor.Instance)
+		if err != nil {
+			return []string{err.Error()}
+		}
+		lines := []string{}
+		for _, row := range client.ListResources(content.owner.snapshot, unit).Rows() {
+			lines = append(lines, strings.Join(row, "  "))
+		}
+		return lines
 	case "command-palette":
 		lines := []string{"Command palette", "> " + content.query}
 		query := strings.ToLower(strings.TrimSpace(content.query))
@@ -596,6 +649,29 @@ func (content *builtinToolContent) lines() []string {
 func (content *builtinToolContent) activate() {
 	index := content.selected - 1
 	switch content.descriptor.Type {
+	case "resource-list":
+		unit, err := client.ParseResourceUnit(content.descriptor.Instance)
+		if err != nil {
+			return
+		}
+		list := client.ListResources(content.owner.snapshot, unit)
+		if index < 0 || index >= len(list.Entries) {
+			return
+		}
+		entry := list.Entries[index]
+		if entry.Pane != nil {
+			if entry.Stashed {
+				content.owner.previewPaneByID(entry.Pane.ID)
+			} else {
+				content.owner.focusPane(entry.Pane.ID)
+			}
+		}
+		if entry.Window != nil && !entry.Stashed {
+			content.owner.selectWindow(entry.Window.ID)
+		}
+		if entry.Workspace != nil && len(entry.Workspace.WindowIDs) != 0 {
+			content.owner.selectWindow(entry.Workspace.WindowIDs[0])
+		}
 	case "stash-list":
 		content.owner.previewStashAt(index)
 	case "workspace-list":

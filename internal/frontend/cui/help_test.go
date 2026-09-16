@@ -10,7 +10,7 @@ import (
 
 func TestEveryCommandHasHelp(t *testing.T) {
 	for _, command := range []string{
-		"init", "tui", "new", "open", "attach", "list", "restart", "run", "kill", "dismiss",
+		"init", "tui", "new", "open", "attach", "list", "delete", "restart", "run", "kill", "dismiss",
 		"stash", "restore", "tool", "attention", "daemon",
 	} {
 		var output bytes.Buffer

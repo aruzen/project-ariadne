@@ -63,6 +63,104 @@ func TestCLIEndToEnd(t *testing.T) {
 	runtime.testRestart(t)
 	runtime.testDaemonRestartRestoresPlaceholder(t)
 	runtime.testOpenDetachReattachResize(t)
+	runtime.testTUIInputMouseAndCompactResize(t)
+}
+
+func (runtime *e2eRuntime) testTUIInputMouseAndCompactResize(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	output, err := runtime.run(ctx, "new", "--", "/bin/sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := parseTerminalResult(t, output, "created")
+	command, terminal := runtime.startPTY(t, ctx, "tui", "--pane-frame", "split")
+	defer terminal.Close()
+	readUntil(t, terminal, "\x1b[?1002h")
+	if _, err := terminal.Write([]byte("\x1b[200~printf 'phase14-界é\\n'\r\x1b[201~")); err != nil {
+		t.Fatal(err)
+	}
+	readUntil(t, terminal, "phase14-界é")
+	// Leave enough room for the title alongside the default status key hints.
+	if err := pty.Setsize(terminal.File, &pty.Winsize{Cols: 160, Rows: 30}); err != nil {
+		t.Fatal(err)
+	}
+	// Split the title in argv so a shell echo cannot satisfy the rendered-title check.
+	if _, err := terminal.Write([]byte("\x1b[200~printf '\\033]2;osc-title-%s\\007' '界'\r\x1b[201~")); err != nil {
+		t.Fatal(err)
+	}
+	readUntil(t, terminal, "osc-title-界")
+	if err := pty.Setsize(terminal.File, &pty.Winsize{Cols: 90, Rows: 30}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	// OSC 52 ask holds the VT writer. Drawing/resize must still accept denial.
+	_, _ = terminal.Write([]byte("\x1b[200~printf '\\033]52;c;aGk=\\007'\r\x1b[201~"))
+	readUntil(t, terminal, "[y/N]")
+	if err := pty.Setsize(terminal.File, &pty.Winsize{Cols: 4, Rows: 2}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if err := pty.Setsize(terminal.File, &pty.Winsize{Cols: 90, Rows: 30}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	_, _ = terminal.Write([]byte("n"))
+	if _, err := terminal.Write([]byte{0x01, '%'}); err != nil {
+		t.Fatal(err)
+	}
+	listed := runtime.waitForEntries(t, ctx, func(result listResult) bool { return len(result.Entries) == 2 })
+	readUntil(t, terminal, "│")
+	var second uint64
+	for _, entry := range listed.Entries {
+		if entry.Pane.ID != first {
+			second = entry.Pane.ID
+		}
+	}
+	// First click only focuses the left pane; drag updates core once on release.
+	_, _ = terminal.Write([]byte("\x1b[<0;2;2M\x1b[<0;2;2m\x1b[<0;45;4M\x1b[<32;60;4M\x1b[<0;60;4m"))
+	var windows struct {
+		Unit    string `json:"unit"`
+		Entries []struct {
+			Window struct {
+				Layout *struct {
+					Weights []uint32 `json:"weights"`
+				} `json:"layout"`
+			} `json:"window"`
+		} `json:"entries"`
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		output, err := runtime.run(ctx, "list", "--json")
+		if err == nil {
+			err = json.Unmarshal([]byte(output), &windows)
+		}
+		if err == nil && windows.Unit == "window" && len(windows.Entries) > 0 && windows.Entries[0].Window.Layout != nil && len(windows.Entries[0].Window.Layout.Weights) == 2 && windows.Entries[0].Window.Layout.Weights[0] > windows.Entries[0].Window.Layout.Weights[1] {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("mouse resize did not update default-window list: %q %v", output, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := pty.Setsize(terminal.File, &pty.Winsize{Cols: 4, Rows: 2}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if err := pty.Setsize(terminal.File, &pty.Winsize{Cols: 90, Rows: 30}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	_, _ = terminal.Write([]byte{0x01, 'd'})
+	readUntil(t, terminal, "\x1b[?1002l")
+	waitCommand(t, command, 5*time.Second)
+	if err := runtime.stopAndDelete(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.stopAndDelete(ctx, second); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (runtime *e2eRuntime) testStashRestore(t *testing.T) {
@@ -84,7 +182,7 @@ func (runtime *e2eRuntime) testStashRestore(t *testing.T) {
 	if _, err := runtime.run(ctx, "restore", "pane", fmt.Sprint(paneID)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runtime.run(ctx, "kill", fmt.Sprint(paneID)); err != nil {
+	if err := runtime.stopAndDelete(ctx, paneID); err != nil {
 		t.Fatal(err)
 	}
 	runtime.waitForEntries(t, ctx, func(result listResult) bool { return len(result.Entries) == 0 })
@@ -179,7 +277,7 @@ func (runtime *e2eRuntime) testConcurrentAutoStart(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			output, err := runtime.run(ctx, "list", "--json")
+			output, err := runtime.run(ctx, "list", "pane", "--json")
 			if err == nil {
 				var result listResult
 				err = json.Unmarshal([]byte(output), &result)
@@ -214,7 +312,7 @@ func (runtime *e2eRuntime) testNewKill(t *testing.T) {
 		t.Fatal(err)
 	}
 	paneID, _ := parseTerminalResult(t, output, "created")
-	if _, err := runtime.run(ctx, "kill", fmt.Sprint(paneID)); err != nil {
+	if err := runtime.stopAndDelete(ctx, paneID); err != nil {
 		t.Fatal(err)
 	}
 	runtime.waitForEntries(t, ctx, func(result listResult) bool { return len(result.Entries) == 0 })
@@ -267,7 +365,7 @@ func (runtime *e2eRuntime) testRestart(t *testing.T) {
 			result.Entries[0].Pane.Terminal.ID != nil && *result.Entries[0].Pane.Terminal.ID == newTerminalID &&
 			result.Entries[0].Pane.Terminal.State == "running"
 	})
-	if _, err := runtime.run(ctx, "kill", fmt.Sprint(paneID)); err != nil {
+	if err := runtime.stopAndDelete(ctx, paneID); err != nil {
 		t.Fatal(err)
 	}
 	runtime.waitForEntries(t, ctx, func(result listResult) bool { return len(result.Entries) == 0 })
@@ -314,7 +412,7 @@ func (runtime *e2eRuntime) testDaemonRestartRestoresPlaceholder(t *testing.T) {
 			result.Entries[0].Pane.Terminal.ID != nil && *result.Entries[0].Pane.Terminal.ID == terminalID &&
 			result.Entries[0].Pane.Terminal.State == "running"
 	})
-	if _, err := runtime.run(ctx, "kill", fmt.Sprint(paneID)); err != nil {
+	if err := runtime.stopAndDelete(ctx, paneID); err != nil {
 		t.Fatal(err)
 	}
 	runtime.waitForEntries(t, ctx, func(result listResult) bool { return len(result.Entries) == 0 })
@@ -391,7 +489,7 @@ func (runtime *e2eRuntime) startPTY(t *testing.T, ctx context.Context, arguments
 }
 
 func (runtime *e2eRuntime) list(ctx context.Context) (listResult, error) {
-	output, err := runtime.run(ctx, "list", "--json")
+	output, err := runtime.run(ctx, "list", "pane", "--json")
 	if err != nil {
 		return listResult{}, err
 	}
@@ -400,6 +498,27 @@ func (runtime *e2eRuntime) list(ctx context.Context) (listResult, error) {
 		return listResult{}, fmt.Errorf("decode list output %q: %w", output, err)
 	}
 	return result, nil
+}
+
+func (runtime *e2eRuntime) stopAndDelete(ctx context.Context, paneID uint64) error {
+	if _, err := runtime.run(ctx, "kill", fmt.Sprint(paneID)); err != nil {
+		return err
+	}
+	listed, err := runtime.list(ctx)
+	if err != nil {
+		return err
+	}
+	retained := false
+	for _, entry := range listed.Entries {
+		if uint64(entry.Pane.ID) == paneID && entry.Pane.Terminal.State == "exited" {
+			retained = true
+		}
+	}
+	if !retained {
+		return fmt.Errorf("kill did not retain pane %d", paneID)
+	}
+	_, err = runtime.run(ctx, "delete", "pane", fmt.Sprint(paneID))
+	return err
 }
 
 func (runtime *e2eRuntime) waitForEntries(t *testing.T, ctx context.Context, predicate func(listResult) bool) listResult {

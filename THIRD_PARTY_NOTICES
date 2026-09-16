@@ -24,3 +24,7 @@ github.com/pelletier/go-toml/v2 v2.4.3
 golang.org/x/sys v0.47.0
   License: BSD-3-Clause
   License file: third_party/go/golang.org/x/sys/LICENSE
+
+github.com/rivo/uniseg v0.4.7
+  License: MIT
+  License file: third_party/go/github.com/rivo/uniseg/LICENSE

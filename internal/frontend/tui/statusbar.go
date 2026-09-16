@@ -8,10 +8,13 @@ import (
 )
 
 type StatusContext struct {
+	CWD               string
 	Workspace         string
 	Window            string
 	PaneID            core.PaneID
 	PaneTitle         string
+	ManualPaneTitle   string
+	TerminalTitle     string
 	State             core.TerminalState
 	Message           string
 	Now               time.Time
@@ -20,6 +23,7 @@ type StatusContext struct {
 }
 
 type Segment struct {
+	Tag   string
 	Text  string
 	Style Style
 }
@@ -103,6 +107,13 @@ func (bar StatusBar) Draw(surface *Surface, y int, context StatusContext) {
 	surface.Text(0, y, surface.Width, "", bar.Background)
 	left := flattenWidgets(bar.Left, context)
 	right := flattenWidgets(bar.Right, context)
+	for _, tag := range []string{"clock", "pane-title", "brand"} {
+		if segmentsWidth(left)+segmentsWidth(right) <= surface.Width {
+			break
+		}
+		left = withoutTag(left, tag)
+		right = withoutTag(right, tag)
+	}
 	rightWidth := segmentsWidth(right)
 	leftLimit := surface.Width - rightWidth
 	position := 0
@@ -111,8 +122,8 @@ func (bar StatusBar) Draw(surface *Surface, y int, context StatusContext) {
 			break
 		}
 		value := fitText(segment.Text, leftLimit-position)
-		surface.Text(position, y, len([]rune(value)), value, segment.Style)
-		position += len([]rune(value))
+		surface.Text(position, y, textWidth(value), value, segment.Style)
+		position += textWidth(value)
 	}
 	position = surface.Width - rightWidth
 	if position < 0 {
@@ -123,8 +134,8 @@ func (bar StatusBar) Draw(surface *Surface, y int, context StatusContext) {
 			break
 		}
 		value := fitText(segment.Text, surface.Width-position)
-		surface.Text(position, y, len([]rune(value)), value, segment.Style)
-		position += len([]rune(value))
+		surface.Text(position, y, textWidth(value), value, segment.Style)
+		position += textWidth(value)
 	}
 }
 
@@ -141,7 +152,17 @@ func flattenWidgets(widgets []StatusWidget, context StatusContext) []Segment {
 func segmentsWidth(segments []Segment) int {
 	total := 0
 	for _, segment := range segments {
-		total += len([]rune(segment.Text))
+		total += textWidth(cleanText(segment.Text))
 	}
 	return total
+}
+
+func withoutTag(segments []Segment, tag string) []Segment {
+	result := make([]Segment, 0, len(segments))
+	for _, segment := range segments {
+		if segment.Tag != tag {
+			result = append(result, segment)
+		}
+	}
+	return result
 }

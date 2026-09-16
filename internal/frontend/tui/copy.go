@@ -112,6 +112,7 @@ func (session *session) resumeClipboardRequests() {
 }
 
 func (session *session) enterCopyMode() {
+	session.copyDecoder.pending = nil
 	content := session.activeTerminalContent()
 	if content == nil {
 		session.setMessage("focused pane has no terminal view")

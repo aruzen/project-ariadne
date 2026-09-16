@@ -26,18 +26,18 @@ func TestLayoutPathChoosesNearestDirectionalAncestor(t *testing.T) {
 	}
 }
 
-func TestMinimumAxisSizeIncludesNestedSplitSeparators(t *testing.T) {
+func TestMinimumSizeIncludesContentAndSplitSeparators(t *testing.T) {
 	node := core.LayoutNode{
 		Kind: core.LayoutSplit, SplitID: 1, Direction: core.SplitHorizontal, Weights: []uint32{1, 1},
 		Children: []core.LayoutNode{{Kind: core.LayoutPane, PaneID: 1}, {Kind: core.LayoutPane, PaneID: 2}},
 	}
-	if got := minimumAxisSize(node, core.SplitHorizontal, PaneFrameSplit); got != 3 {
-		t.Fatalf("split minimum = %d, want 3", got)
+	s := session{paneFrame: PaneFrameSplit, renderers: defaultPaneRendererRegistry()}
+	if w, h := s.nodeMinimum(node); w != 5 || h != 1 {
+		t.Fatalf("split minimum = %dx%d, want 5x1", w, h)
 	}
-	if got := minimumAxisSize(node, core.SplitHorizontal, PaneFrameFull); got != 6 {
-		t.Fatalf("full-frame minimum = %d, want 6", got)
-	}
-	if got := minimumAxisSize(node, core.SplitVertical, PaneFrameFull); got != 3 {
-		t.Fatalf("orthogonal minimum = %d, want 3", got)
+	s.paneFrame = PaneFrameFull
+	s.snapshot.Panes = []core.Pane{{ID: 1, Kind: core.PaneTerminal}, {ID: 2, Kind: core.PaneTerminal}}
+	if w, h := s.nodeMinimum(node); w != 8 || h != 3 {
+		t.Fatalf("full-frame minimum = %dx%d, want 8x3", w, h)
 	}
 }

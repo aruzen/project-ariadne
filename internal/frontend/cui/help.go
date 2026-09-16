@@ -22,11 +22,12 @@ Terminal commands:
   new         Create a terminal without attaching
   open        Create and attach to a terminal
   attach      Attach to an existing terminal
-  list        List panes and terminals
+  list        List windows (or panes/workspaces)
+  delete      Delete an inactive pane or empty window/workspace
   restart     Restart a retained or placeholder pane
   run         Start a new command in an existing pane
-  kill        Stop a terminal and remove its pane
-  dismiss     Remove a retained pane and its history
+  kill        Stop a terminal, retaining its pane and history
+  dismiss     Alias for 'delete pane'
 
 Workspace commands:
   stash       Stash a pane or window
@@ -98,13 +99,23 @@ If COMMAND is omitted, the configured default shell is used.
 Usage:
   ariadne attach TERMINAL_ID
 `,
-	"list": `List panes and terminals.
+	"list": `List resources, including stashed resources.
 
 Usage:
-  ariadne list [options]
+  ariadne list [pane|window|workspace] [options]
+
+The default unit is window.
 
 Options:
   --json  Emit machine-readable JSON
+`,
+	"delete": `Delete an inactive pane or empty window/workspace.
+
+Usage:
+  ariadne delete [pane|window|workspace] ID
+
+The default unit is window. Running panes must be stopped first with kill.
+Nonempty/stashed windows and the last workspace cannot be deleted.
 `,
 	"restart": `Restart a retained or placeholder pane with its previous command.
 
@@ -119,10 +130,12 @@ Usage:
 Options:
   --cwd DIR  Working directory; defaults to the pane's previous directory
 `,
-	"kill": `Stop a terminal and remove its pane.
+	"kill": `Stop a terminal, retaining its pane, command and history.
 
 Usage:
   ariadne kill PANE_ID
+
+Use restart/run to reuse the pane, or delete pane to remove it.
 `,
 	"dismiss": `Remove a retained pane and its terminal history.
 
