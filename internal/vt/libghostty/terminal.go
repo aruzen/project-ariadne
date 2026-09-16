@@ -9,7 +9,8 @@ package libghostty
 
 typedef struct {
 	uint8_t bytes[64];
-	uint8_t length;
+	uint8_t* extra_bytes;
+	size_t length;
 	uint8_t width;
 	uint8_t foreground_r;
 	uint8_t foreground_g;
@@ -18,6 +19,7 @@ typedef struct {
 	uint8_t background_g;
 	uint8_t background_b;
 	uint8_t flags;
+	uint8_t underline_style, underline_r, underline_g, underline_b, underline_color;
 } AriadneGhosttyCell;
 
 enum {
@@ -35,6 +37,7 @@ typedef struct {
 	uint16_t cursor_x;
 	uint16_t cursor_y;
 	uint8_t cursor_visible;
+	uint8_t cursor_shape;
 	AriadneGhosttyCell* cells;
 } AriadneGhosttyScreen;
 
@@ -360,8 +363,63 @@ static int ariadne_ghostty_terminal_search(
 
 static void ariadne_ghostty_screen_free(AriadneGhosttyScreen* screen) {
 	if (screen == NULL) return;
+	if (screen->cells) {
+		for (size_t i = 0; i < (size_t)screen->cols * screen->rows; i++) free(screen->cells[i].extra_bytes);
+	}
 	free(screen->cells);
 	memset(screen, 0, sizeof(*screen));
+}
+
+static GhosttyString ariadne_ghostty_pwd(AriadneGhosttyTerminal* value) {
+	GhosttyString pwd = {0};
+	ghostty_terminal_get(value->terminal, GHOSTTY_TERMINAL_DATA_PWD, &pwd);
+	return pwd;
+}
+
+static GhosttyString ariadne_ghostty_title(AriadneGhosttyTerminal* value) {
+	GhosttyString title = {0};
+	ghostty_terminal_get(value->terminal, GHOSTTY_TERMINAL_DATA_TITLE, &title);
+	return title;
+}
+
+static int ariadne_ghostty_select_range(AriadneGhosttyTerminal* value, uint16_t x1, uint32_t y1, uint16_t x2, uint32_t y2) {
+	GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
+	GhosttyPoint point = {0}; point.tag = GHOSTTY_POINT_TAG_VIEWPORT;
+	point.value.coordinate.x = x1; point.value.coordinate.y = y1;
+	int result = ghostty_terminal_grid_ref(value->terminal, point, &selection.start);
+	if (result != GHOSTTY_SUCCESS) return result;
+	point.value.coordinate.x = x2; point.value.coordinate.y = y2;
+	result = ghostty_terminal_grid_ref(value->terminal, point, &selection.end);
+	if (result != GHOSTTY_SUCCESS) return result;
+	return ghostty_terminal_set(value->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection);
+}
+
+static bool ariadne_ghostty_mouse_tracking(AriadneGhosttyTerminal* value) {
+	bool tracking = false;
+	ghostty_terminal_get(value->terminal, GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &tracking);
+	return tracking;
+}
+
+static int ariadne_ghostty_mouse(AriadneGhosttyTerminal* value, int action, int button, int mods,
+	int x, int y, int cols, int rows, bool pressed, char* out, size_t cap, size_t* length) {
+	GhosttyMouseEncoder encoder = NULL; GhosttyMouseEvent event = NULL;
+	int result = ghostty_mouse_encoder_new(NULL, &encoder);
+	if (result != GHOSTTY_SUCCESS) return result;
+	result = ghostty_mouse_event_new(NULL, &event);
+	if (result != GHOSTTY_SUCCESS) { ghostty_mouse_encoder_free(encoder); return result; }
+	ghostty_mouse_encoder_setopt_from_terminal(encoder, value->terminal);
+	GhosttyMouseEncoderSize size = GHOSTTY_INIT_SIZED(GhosttyMouseEncoderSize);
+	size.screen_width = cols; size.screen_height = rows; size.cell_width = 1; size.cell_height = 1;
+	ghostty_mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size);
+	ghostty_mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &pressed);
+	ghostty_mouse_event_set_action(event, (GhosttyMouseAction)action);
+	if (button) ghostty_mouse_event_set_button(event, (GhosttyMouseButton)button);
+	ghostty_mouse_event_set_mods(event, (GhosttyMods)mods);
+	GhosttyMousePosition position = { .x = x, .y = y };
+	ghostty_mouse_event_set_position(event, position);
+	result = ghostty_mouse_encoder_encode(encoder, event, out, cap, length);
+	ghostty_mouse_event_free(event); ghostty_mouse_encoder_free(encoder);
+	return result;
 }
 
 static int ariadne_ghostty_terminal_snapshot(
@@ -389,6 +447,9 @@ static int ariadne_ghostty_terminal_snapshot(
 		out->cursor_x = cursor.viewport_x;
 		out->cursor_y = cursor.viewport_y;
 	}
+	out->cursor_shape = cursor.visual_style == GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR ? 6 :
+		cursor.visual_style == GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE ? 4 : 2;
+	if (cursor.blinking) out->cursor_shape--;
 
 	size_t count = (size_t)out->cols * (size_t)out->rows;
 	out->cells = calloc(count, sizeof(AriadneGhosttyCell));
@@ -424,10 +485,15 @@ static int ariadne_ghostty_terminal_snapshot(
 			result = ghostty_render_state_row_cells_get(
 				value->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8, &text);
 			if (result == GHOSTTY_SUCCESS) {
-				target->length = (uint8_t)text.len;
+				target->length = text.len;
 			} else if (result == GHOSTTY_OUT_OF_SPACE) {
-				target->bytes[0] = '?';
-				target->length = 1;
+				target->extra_bytes = malloc(text.len);
+				if (!target->extra_bytes) { result = GHOSTTY_OUT_OF_MEMORY; goto fail; }
+				text.ptr = target->extra_bytes; text.cap = text.len;
+				result = ghostty_render_state_row_cells_get(value->cells,
+					GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8, &text);
+				if (result != GHOSTTY_SUCCESS) goto fail;
+				target->length = text.len;
 			} else {
 				goto fail;
 			}
@@ -457,6 +523,15 @@ static int ariadne_ghostty_terminal_snapshot(
 			if (style.bold) target->flags |= ARIADNE_CELL_BOLD;
 			if (style.italic) target->flags |= ARIADNE_CELL_ITALIC;
 			if (style.underline != 0) target->flags |= ARIADNE_CELL_UNDERLINE;
+			target->underline_style = style.underline;
+			if (style.underline_color.tag != GHOSTTY_STYLE_COLOR_NONE) {
+				GhosttyColorRgb color = style.underline_color.tag == GHOSTTY_STYLE_COLOR_RGB ?
+					style.underline_color.value.rgb : colors.palette[style.underline_color.value.palette];
+				target->underline_color = 1;
+				target->underline_r = color.r;
+				target->underline_g = color.g;
+				target->underline_b = color.b;
+			}
 			if (style.strikethrough) target->flags |= ARIADNE_CELL_STRIKETHROUGH;
 			if (style.faint) target->flags |= ARIADNE_CELL_FAINT;
 			if (style.blink) target->flags |= ARIADNE_CELL_BLINK;
@@ -479,7 +554,9 @@ import (
 	"fmt"
 	"runtime"
 	"runtime/cgo"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 	"unsafe"
 )
@@ -505,15 +582,20 @@ type Color struct {
 	B uint8
 }
 
+var ErrBusy = errors.New("libghostty: terminal is busy; retry the operation")
+
 type Style struct {
-	Foreground    Color
-	Background    Color
-	Bold          bool
-	Italic        bool
-	Underline     bool
-	Strikethrough bool
-	Faint         bool
-	Blink         bool
+	UnderlineStyle    uint8
+	UnderlineColor    Color
+	HasUnderlineColor bool
+	Foreground        Color
+	Background        Color
+	Bold              bool
+	Italic            bool
+	Underline         bool
+	Strikethrough     bool
+	Faint             bool
+	Blink             bool
 }
 
 type Cell struct {
@@ -523,6 +605,7 @@ type Cell struct {
 }
 
 type Cursor struct {
+	Shape   uint8
 	X       int
 	Y       int
 	Visible bool
@@ -591,6 +674,9 @@ type Terminal struct {
 	goHandle         cgo.Handle
 	clipboardHandler ClipboardHandler
 	clipboardMax     int
+	pwd              atomic.Pointer[string]
+	title            atomic.Pointer[string]
+	mouseTracking    atomic.Bool
 }
 
 func NewTerminal(cols, rows int) (*Terminal, error) {
@@ -659,6 +745,14 @@ func (terminal *Terminal) WriteWithResponse(data []byte) ([]byte, error) {
 	result := C.ariadne_ghostty_terminal_write(
 		terminal.handle, (*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)),
 		&response, &responseLength)
+	pwd := C.ariadne_ghostty_pwd(terminal.handle)
+	workingDirectory := C.GoStringN((*C.char)(unsafe.Pointer(pwd.ptr)), C.int(pwd.len))
+	terminal.pwd.Store(&workingDirectory)
+	title := C.ariadne_ghostty_title(terminal.handle)
+	// Copy the borrowed string while holding the VT lock, with a bounded cache.
+	terminalTitle := strings.ToValidUTF8(C.GoStringN((*C.char)(unsafe.Pointer(title.ptr)), C.int(min(title.len, 4096))), "")
+	terminal.title.Store(&terminalTitle)
+	terminal.mouseTracking.Store(bool(C.ariadne_ghostty_mouse_tracking(terminal.handle)))
 	if result != 0 {
 		return nil, fmt.Errorf("ghostty_terminal_vt_write: result %d", int(result))
 	}
@@ -669,7 +763,9 @@ func (terminal *Terminal) Resize(cols, rows int) error {
 	if err := validSize(cols, rows); err != nil {
 		return err
 	}
-	terminal.mu.Lock()
+	if !terminal.mu.TryLock() {
+		return ErrBusy
+	}
 	defer terminal.mu.Unlock()
 	if terminal.handle == nil {
 		return errors.New("libghostty: terminal is closed")
@@ -693,7 +789,9 @@ func (terminal *Terminal) ScrollBottom() error {
 }
 
 func (terminal *Terminal) scroll(tag, amount int) error {
-	terminal.mu.Lock()
+	if !terminal.mu.TryLock() {
+		return ErrBusy
+	}
 	defer terminal.mu.Unlock()
 	if terminal.handle == nil {
 		return errors.New("libghostty: terminal is closed")
@@ -705,7 +803,9 @@ func (terminal *Terminal) scroll(tag, amount int) error {
 }
 
 func (terminal *Terminal) Scrollbar() (Scrollbar, error) {
-	terminal.mu.Lock()
+	if !terminal.mu.TryLock() {
+		return Scrollbar{}, ErrBusy
+	}
 	defer terminal.mu.Unlock()
 	if terminal.handle == nil {
 		return Scrollbar{}, errors.New("libghostty: terminal is closed")
@@ -721,7 +821,9 @@ func (terminal *Terminal) BeginSelection(x, y int) error {
 	if x < 0 || y < 0 || x > 65535 || uint64(y) > uint64(^uint32(0)) {
 		return errors.New("libghostty: invalid selection point")
 	}
-	terminal.mu.Lock()
+	if !terminal.mu.TryLock() {
+		return ErrBusy
+	}
 	defer terminal.mu.Unlock()
 	if terminal.handle == nil {
 		return errors.New("libghostty: terminal is closed")
@@ -736,7 +838,9 @@ func (terminal *Terminal) AdjustSelection(adjustment SelectionAdjust) error {
 	if adjustment > SelectionLineEnd {
 		return errors.New("libghostty: invalid selection adjustment")
 	}
-	terminal.mu.Lock()
+	if !terminal.mu.TryLock() {
+		return ErrBusy
+	}
 	defer terminal.mu.Unlock()
 	if terminal.handle == nil {
 		return errors.New("libghostty: terminal is closed")
@@ -748,7 +852,9 @@ func (terminal *Terminal) AdjustSelection(adjustment SelectionAdjust) error {
 }
 
 func (terminal *Terminal) ClearSelection() error {
-	terminal.mu.Lock()
+	if !terminal.mu.TryLock() {
+		return ErrBusy
+	}
 	defer terminal.mu.Unlock()
 	if terminal.handle == nil {
 		return errors.New("libghostty: terminal is closed")
@@ -760,7 +866,9 @@ func (terminal *Terminal) ClearSelection() error {
 }
 
 func (terminal *Terminal) SelectionText() (string, error) {
-	terminal.mu.Lock()
+	if !terminal.mu.TryLock() {
+		return "", ErrBusy
+	}
 	defer terminal.mu.Unlock()
 	if terminal.handle == nil {
 		return "", errors.New("libghostty: terminal is closed")
@@ -779,7 +887,9 @@ func (terminal *Terminal) SelectionText() (string, error) {
 }
 
 func (terminal *Terminal) Paste(data []byte, allowUnsafe bool) ([]byte, error) {
-	terminal.mu.Lock()
+	if !terminal.mu.TryLock() {
+		return nil, ErrBusy
+	}
 	defer terminal.mu.Unlock()
 	if terminal.handle == nil {
 		return nil, errors.New("libghostty: terminal is closed")
@@ -805,7 +915,9 @@ func (terminal *Terminal) Search(needle string, next bool) (total, selected int,
 	if needle == "" {
 		return 0, 0, errors.New("libghostty: empty search")
 	}
-	terminal.mu.Lock()
+	if !terminal.mu.TryLock() {
+		return 0, 0, ErrBusy
+	}
 	defer terminal.mu.Unlock()
 	if terminal.handle == nil {
 		return 0, 0, errors.New("libghostty: terminal is closed")
@@ -826,6 +938,19 @@ func (terminal *Terminal) Search(needle string, next bool) (total, selected int,
 func (terminal *Terminal) Screen() (Screen, error) {
 	terminal.mu.Lock()
 	defer terminal.mu.Unlock()
+	return terminal.screenLocked()
+}
+
+// TryScreen never waits behind VT writes or an interactive clipboard callback.
+func (terminal *Terminal) TryScreen() (Screen, error) {
+	if !terminal.mu.TryLock() {
+		return Screen{}, ErrBusy
+	}
+	defer terminal.mu.Unlock()
+	return terminal.screenLocked()
+}
+
+func (terminal *Terminal) screenLocked() (Screen, error) {
 	if terminal.handle == nil {
 		return Screen{}, errors.New("libghostty: terminal is closed")
 	}
@@ -837,7 +962,7 @@ func (terminal *Terminal) Screen() (Screen, error) {
 	count := int(raw.cols) * int(raw.rows)
 	result := Screen{
 		Cols: int(raw.cols), Rows: int(raw.rows), Cells: make([]Cell, count),
-		Cursor: Cursor{X: int(raw.cursor_x), Y: int(raw.cursor_y), Visible: raw.cursor_visible != 0},
+		Cursor: Cursor{X: int(raw.cursor_x), Y: int(raw.cursor_y), Visible: raw.cursor_visible != 0, Shape: uint8(raw.cursor_shape)},
 	}
 	if count == 0 {
 		return result, nil
@@ -847,18 +972,25 @@ func (terminal *Terminal) Screen() (Screen, error) {
 		source := &cells[index]
 		flags := uint8(source.flags)
 		length := int(source.length)
+		pointer := unsafe.Pointer(&source.bytes[0])
+		if source.extra_bytes != nil {
+			pointer = unsafe.Pointer(source.extra_bytes)
+		}
 		result.Cells[index] = Cell{
-			Text:  C.GoStringN((*C.char)(unsafe.Pointer(&source.bytes[0])), C.int(length)),
+			Text:  C.GoStringN((*C.char)(pointer), C.int(length)),
 			Width: uint8(source.width),
 			Style: Style{
-				Foreground:    Color{R: uint8(source.foreground_r), G: uint8(source.foreground_g), B: uint8(source.foreground_b)},
-				Background:    Color{R: uint8(source.background_r), G: uint8(source.background_g), B: uint8(source.background_b)},
-				Bold:          flags&cellBold != 0,
-				Italic:        flags&cellItalic != 0,
-				Underline:     flags&cellUnderline != 0,
-				Strikethrough: flags&cellStrikethrough != 0,
-				Faint:         flags&cellFaint != 0,
-				Blink:         flags&cellBlink != 0,
+				UnderlineStyle:    uint8(source.underline_style),
+				UnderlineColor:    Color{R: uint8(source.underline_r), G: uint8(source.underline_g), B: uint8(source.underline_b)},
+				HasUnderlineColor: source.underline_color != 0,
+				Foreground:        Color{R: uint8(source.foreground_r), G: uint8(source.foreground_g), B: uint8(source.foreground_b)},
+				Background:        Color{R: uint8(source.background_r), G: uint8(source.background_g), B: uint8(source.background_b)},
+				Bold:              flags&cellBold != 0,
+				Italic:            flags&cellItalic != 0,
+				Underline:         flags&cellUnderline != 0,
+				Strikethrough:     flags&cellStrikethrough != 0,
+				Faint:             flags&cellFaint != 0,
+				Blink:             flags&cellBlink != 0,
 			},
 		}
 	}
@@ -873,8 +1005,67 @@ func (terminal *Terminal) Close() {
 		terminal.handle = nil
 		terminal.goHandle.Delete()
 		terminal.goHandle = 0
+		terminal.pwd.Store(nil)
+		terminal.title.Store(nil)
+		terminal.mouseTracking.Store(false)
 		runtime.SetFinalizer(terminal, nil)
 	}
+}
+
+// WorkingDirectory returns the terminal-reported value, not a daemon setting.
+func (terminal *Terminal) WorkingDirectory() string {
+	if value := terminal.pwd.Load(); value != nil {
+		return *value
+	}
+	return ""
+}
+
+// Title returns the last processed OSC 0/2 title without waiting for a VT lock.
+// It is frontend metadata and does not rename or persist a core Pane.
+func (terminal *Terminal) Title() string {
+	if value := terminal.title.Load(); value != nil {
+		return *value
+	}
+	return ""
+}
+
+func (terminal *Terminal) SelectRange(x1, y1, x2, y2 int) error {
+	if min(x1, y1, x2, y2) < 0 || max(x1, x2) > 65535 {
+		return errors.New("libghostty: invalid selection range")
+	}
+	if !terminal.mu.TryLock() {
+		return ErrBusy
+	}
+	defer terminal.mu.Unlock()
+	if terminal.handle == nil {
+		return errors.New("libghostty: terminal is closed")
+	}
+	if result := C.ariadne_ghostty_select_range(terminal.handle, C.uint16_t(x1), C.uint32_t(y1), C.uint16_t(x2), C.uint32_t(y2)); result != 0 {
+		return fmt.Errorf("ghostty select range: result %d", int(result))
+	}
+	return nil
+}
+
+func (terminal *Terminal) MouseTracking() bool {
+	return terminal.mouseTracking.Load()
+}
+
+// EncodeMouse takes normalized actions (press=0/release=1/motion=2), Ghostty
+// button numbers and modifiers (Shift=1/Ctrl=2/Alt=4). Coordinates are cells.
+func (terminal *Terminal) EncodeMouse(action, button, mods, x, y, cols, rows int, pressed bool) ([]byte, error) {
+	if !terminal.mu.TryLock() {
+		return nil, ErrBusy
+	}
+	defer terminal.mu.Unlock()
+	if terminal.handle == nil {
+		return nil, errors.New("libghostty: terminal is closed")
+	}
+	var buffer [256]C.char
+	var length C.size_t
+	if result := C.ariadne_ghostty_mouse(terminal.handle, C.int(action), C.int(button), C.int(mods), C.int(x), C.int(y), C.int(cols), C.int(rows), C.bool(pressed), &buffer[0], C.size_t(len(buffer)), &length); result != 0 {
+		return nil, fmt.Errorf("ghostty mouse encode: result %d", int(result))
+	}
+	return C.GoBytes(unsafe.Pointer(&buffer[0]), C.int(length)), nil
 }
 
 func clipboardLocation(location C.int) string {

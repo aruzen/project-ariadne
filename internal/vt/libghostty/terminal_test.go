@@ -3,9 +3,122 @@
 package libghostty
 
 import (
+	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
+
+func TestBusyClipboardCannotBlockFrontendReadsOrResize(t *testing.T) {
+	terminal, err := NewTerminal(10, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer terminal.Close()
+	uri := "file:///tmp"
+	_ = terminal.Write([]byte("\x1b]7;" + uri + "\x1b\\\x1b]2;cached title\x07"))
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	_ = terminal.SetClipboardHandler(func(ClipboardRequest) ClipboardResponse { close(entered); <-release; return ClipboardResponse{} })
+	done := make(chan error, 1)
+	go func() { done <- terminal.Write([]byte("\x1b]52;c;YQ==\a")) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("clipboard callback did not start")
+	}
+	if _, err := terminal.TryScreen(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("TryScreen=%v", err)
+	}
+	if err := terminal.Resize(20, 4); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Resize=%v", err)
+	}
+	if terminal.WorkingDirectory() != uri {
+		t.Fatalf("cwd=%q", terminal.WorkingDirectory())
+	}
+	if terminal.Title() != "cached title" {
+		t.Fatalf("title=%q", terminal.Title())
+	}
+	if terminal.MouseTracking() {
+		t.Fatal("unexpected mouse tracking")
+	}
+	unblock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("clipboard denial did not release VT")
+	}
+	if _, err := terminal.TryScreen(); err != nil {
+		t.Fatal(err)
+	}
+	if err := terminal.Resize(20, 4); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTitleTracksOSCZeroAndTwoAcrossFragments(t *testing.T) {
+	terminal, err := NewTerminal(20, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer terminal.Close()
+	if terminal.Title() != "" {
+		t.Fatal("new terminal has a stale title")
+	}
+	for _, step := range []struct{ data, title string }{
+		{"text\x1b]2;build-界é\x07", "build-界é"},
+		{"\x1b]0;fragmented-", "build-界é"},
+		// The parser dispatches OSC when ESC arrives; the following '\\' completes ST.
+		{"日本語\x1b", "fragmented-日本語"},
+		{"\\", "fragmented-日本語"},
+		{"\x1b]1;icon only\x07", "fragmented-日本語"},
+		{"\x1b]2;\x07", ""},
+	} {
+		if err := terminal.Write([]byte(step.data)); err != nil {
+			t.Fatal(err)
+		}
+		if title := terminal.Title(); title != step.title {
+			t.Fatalf("data=%q title=%q want=%q", step.data, title, step.title)
+		}
+	}
+	screen, err := terminal.Screen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if screen.At(0, 0).Text != "t" || screen.At(3, 0).Text != "t" || screen.Cursor.X != 4 {
+		t.Fatal("OSC title leaked into terminal content")
+	}
+	terminal.Close()
+	if terminal.Title() != "" {
+		t.Fatal("closed terminal retained title")
+	}
+}
+
+func TestLongGraphemeUnderlineAndCursorShape(t *testing.T) {
+	terminal, err := NewTerminal(10, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer terminal.Close()
+	text := "e" + strings.Repeat("́", 40)
+	if err := terminal.Write([]byte("\x1b[4:3;58:2::10:20:30m" + text + "\x1b[6 q")); err != nil {
+		t.Fatal(err)
+	}
+	screen, err := terminal.Screen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cell := screen.At(0, 0)
+	if cell.Text != text || cell.Style.UnderlineStyle != 3 || !cell.Style.HasUnderlineColor || cell.Style.UnderlineColor != (Color{R: 10, G: 20, B: 30}) || screen.Cursor.Shape != 6 {
+		t.Fatalf("cell=%+v cursor=%+v", cell, screen.Cursor)
+	}
+}
 
 func TestTerminalScreen(t *testing.T) {
 	terminal, err := NewTerminal(8, 3)
