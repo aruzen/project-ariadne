@@ -82,6 +82,7 @@ const (
 	TerminalExitProcess  TerminalExitKind = "process"
 	TerminalExitSignal   TerminalExitKind = "signal"
 	TerminalExitPTYError TerminalExitKind = "pty_error"
+	TerminalExitKilled   TerminalExitKind = "killed"
 )
 
 // LaunchSpec is safe to persist. Environment variables are intentionally not
@@ -907,6 +908,8 @@ func validTerminal(terminal TerminalInstance) bool {
 
 func validTerminalExit(exit TerminalExit) bool {
 	switch exit.Kind {
+	case TerminalExitKilled:
+		return exit.Code == 0 && exit.Signal == "" && !strings.ContainsRune(exit.Message, 0)
 	case TerminalExitProcess:
 		return exit.Code >= 0 && exit.Signal == "" && exit.Message == ""
 	case TerminalExitSignal:

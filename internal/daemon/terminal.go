@@ -268,6 +268,10 @@ func (server *Server) KillTerminal(ctx context.Context, params ariadneprotocol.P
 func (server *Server) DismissTerminal(ctx context.Context, params ariadneprotocol.PaneParams) (ariadneprotocol.TerminalOperationResult, error) {
 	server.terminalMu.Lock()
 	defer server.terminalMu.Unlock()
+	return server.dismissTerminalLocked(ctx, params)
+}
+
+func (server *Server) dismissTerminalLocked(ctx context.Context, params ariadneprotocol.PaneParams) (ariadneprotocol.TerminalOperationResult, error) {
 	snapshot, err := server.core.Snapshot(ctx)
 	if err != nil {
 		return ariadneprotocol.TerminalOperationResult{}, err
@@ -294,6 +298,52 @@ func (server *Server) DismissTerminal(ctx context.Context, params ariadneprotoco
 		return ariadneprotocol.TerminalOperationResult{}, err
 	}
 	return ariadneprotocol.TerminalOperationResult{Pane: pane}, nil
+}
+
+func (server *Server) DeletePane(ctx context.Context, params ariadneprotocol.PaneParams) (ariadneprotocol.TerminalOperationResult, error) {
+	server.terminalMu.Lock()
+	defer server.terminalMu.Unlock()
+	snapshot, err := server.core.Snapshot(ctx)
+	if err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
+	pane, exists := paneByID(snapshot, params.PaneID)
+	if !exists {
+		return ariadneprotocol.TerminalOperationResult{}, fmt.Errorf("%w: pane %d", core.ErrNotFound, params.PaneID)
+	}
+	if pane.Terminal != nil {
+		return server.dismissTerminalLocked(ctx, params)
+	}
+	_, err = server.core.Execute(ctx, core.ClosePaneCommand{PaneID: pane.ID})
+	return ariadneprotocol.TerminalOperationResult{Pane: pane}, err
+}
+
+// StopTerminal leaves the Pane, launch metadata, and bounded retained history.
+func (server *Server) StopTerminal(ctx context.Context, params ariadneprotocol.PaneParams) (ariadneprotocol.TerminalOperationResult, error) {
+	server.terminalMu.Lock()
+	defer server.terminalMu.Unlock()
+	pane, err := server.runningPane(ctx, params.PaneID)
+	if err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
+	id := *pane.Terminal.ID
+	if _, err = server.core.Execute(ctx, core.BeginTerminalStopCommand{PaneID: pane.ID}); err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
+	if err = server.manager.Kill(ctx, id); err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
+	info, exists := server.manager.Get(id)
+	if !exists || info.Info().Exit == nil {
+		return ariadneprotocol.TerminalOperationResult{}, fmt.Errorf("%w: stopped terminal unavailable", core.ErrInvalidState)
+	}
+	status := info.Info()
+	state, exit := terminalExit(*status.Exit)
+	result, err := server.core.Execute(context.WithoutCancel(ctx), core.RecordTerminalExitCommand{TerminalID: id, State: state, Exit: exit, HistoryAvailable: status.HistoryAvailable})
+	if err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
+	return ariadneprotocol.TerminalOperationResult{Pane: result.(core.TerminalResult).Pane}, nil
 }
 
 func (server *Server) DaemonStatus(context.Context) (ariadneprotocol.DaemonStatusResult, error) {

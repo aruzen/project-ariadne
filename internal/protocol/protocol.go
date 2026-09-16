@@ -52,6 +52,8 @@ const (
 	OperationRestartTerminal      Operation = "restart_terminal"
 	OperationRunTerminal          Operation = "run_terminal"
 	OperationKillTerminal         Operation = "kill_terminal"
+	OperationStopTerminal         Operation = "stop_terminal"
+	OperationDeletePane           Operation = "delete_pane"
 	OperationDismissTerminal      Operation = "dismiss_terminal"
 	OperationDaemonStatus         Operation = "daemon_status"
 	OperationDaemonStop           Operation = "daemon_stop"
@@ -107,6 +109,12 @@ type TerminalController interface {
 
 type ResponseObserver interface {
 	AfterResponse(Operation)
+}
+
+// ResourceController owns deletion and stopping without bypassing PTY cleanup.
+type ResourceController interface {
+	StopTerminal(context.Context, PaneParams) (TerminalOperationResult, error)
+	DeletePane(context.Context, PaneParams) (TerminalOperationResult, error)
 }
 
 func DefaultConfig() Config {
@@ -572,6 +580,21 @@ func (protocol *Protocol) handleCommand(ctx context.Context, peer *streammux.Pee
 		}
 		return responseErr
 	}
+	// close_pane is a legacy core operation. A live daemon must release a retained
+	// terminal too, rather than orphaning its manager session by removing only core state.
+	if request.Operation == OperationClosePane {
+		if _, ok := protocol.config.Terminal.(ResourceController); ok {
+			request.Operation = OperationDeletePane
+			value, err := protocol.executeTerminal(ctx, request)
+			release()
+			release = nil
+			if err != nil {
+				return protocol.respondCoreError(ctx, frame, err)
+			}
+			result := value.(TerminalOperationResult)
+			return protocol.respondResult(ctx, frame, core.ClosePaneResult{Pane: result.Pane})
+		}
+	}
 	frontendID, err := protocol.frontendID()
 	if err != nil {
 		release()
@@ -623,7 +646,7 @@ func stashList(snapshot core.Snapshot) StashListResult {
 
 func isTerminalOperation(operation Operation) bool {
 	switch operation {
-	case OperationNewTerminal, OperationListTerminals, OperationRestartTerminal, OperationRunTerminal,
+	case OperationNewTerminal, OperationListTerminals, OperationRestartTerminal, OperationRunTerminal, OperationStopTerminal, OperationDeletePane,
 		OperationKillTerminal, OperationDismissTerminal, OperationDaemonStatus, OperationDaemonStop,
 		OperationClipboardRead, OperationClipboardWrite:
 		return true
@@ -640,6 +663,19 @@ func (protocol *Protocol) executeTerminal(ctx context.Context, request Request) 
 		return nil, fmt.Errorf("%w: terminal operations are unavailable", core.ErrInvalidState)
 	}
 	switch request.Operation {
+	case OperationStopTerminal, OperationDeletePane:
+		var params PaneParams
+		if err := decodeParams(request.Params, &params); err != nil {
+			return nil, err
+		}
+		controller, ok := protocol.config.Terminal.(ResourceController)
+		if !ok {
+			return nil, fmt.Errorf("%w: resource operations are unavailable", core.ErrInvalidState)
+		}
+		if request.Operation == OperationStopTerminal {
+			return controller.StopTerminal(ctx, params)
+		}
+		return controller.DeletePane(ctx, params)
 	case OperationNewTerminal:
 		var params NewTerminalParams
 		if err := decodeParams(request.Params, &params); err != nil {

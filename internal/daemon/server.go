@@ -361,7 +361,7 @@ func (server *Server) handleManagerEvent(event pty.Event, pendingRemoval map[str
 			return nil
 		}
 		state, exit := terminalExit(*event.Session.Exit)
-		if server.plugins != nil {
+		if server.plugins != nil && exit.Kind != core.TerminalExitKilled {
 			if paneID, exists := server.terminalPanes[event.Session.ID]; exists {
 				server.plugins.PublishTerminalEvent(plugin.TerminalEvent{Kind: plugin.TerminalExited, PaneID: paneID, TerminalID: event.Session.ID, Exit: &exit})
 			}
@@ -423,16 +423,17 @@ func (server *Server) guardCommand() (func(), error) {
 }
 
 func terminalExitRemovesPane(status pty.ExitStatus, closeSuccessfulExit bool) bool {
-	return status.Reason == pty.ExitReasonKilled ||
-		(closeSuccessfulExit && status.Reason == pty.ExitReasonExited && status.Code == 0)
+	return closeSuccessfulExit && status.Reason == pty.ExitReasonExited && status.Code == 0
 }
 
 func terminalExitNeedsErrorLabel(exit core.TerminalExit) bool {
-	return exit.Kind != core.TerminalExitProcess || exit.Code != 0
+	return exit.Kind != core.TerminalExitKilled && (exit.Kind != core.TerminalExitProcess || exit.Code != 0)
 }
 
 func terminalExit(status pty.ExitStatus) (core.TerminalState, core.TerminalExit) {
 	switch status.Reason {
+	case pty.ExitReasonKilled:
+		return core.TerminalExited, core.TerminalExit{Kind: core.TerminalExitKilled}
 	case pty.ExitReasonExited:
 		if status.Code >= 0 {
 			return core.TerminalExited, core.TerminalExit{Kind: core.TerminalExitProcess, Code: status.Code}

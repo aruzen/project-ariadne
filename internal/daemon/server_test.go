@@ -211,8 +211,8 @@ func TestTerminalExitMapping(t *testing.T) {
 	}{
 		{name: "success", status: pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 0},
 			state: core.TerminalExited, exit: core.TerminalExit{Kind: core.TerminalExitProcess}},
-		{name: "explicit kill", status: pty.ExitStatus{Reason: pty.ExitReasonKilled}, remove: true,
-			state: core.TerminalFailed, exit: core.TerminalExit{Kind: core.TerminalExitPTYError, Message: "killed"}},
+		{name: "explicit kill", status: pty.ExitStatus{Reason: pty.ExitReasonKilled},
+			state: core.TerminalExited, exit: core.TerminalExit{Kind: core.TerminalExitKilled}},
 		{name: "nonzero", status: pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 7},
 			state: core.TerminalExited, exit: core.TerminalExit{Kind: core.TerminalExitProcess, Code: 7}},
 		{name: "signal", status: pty.ExitStatus{Reason: pty.ExitReasonSignaled, Signal: "terminated"},
@@ -438,6 +438,42 @@ func TestTerminalOperationsNewListRestartKillAndDismiss(t *testing.T) {
 	}
 	if len(serverSnapshot(t, server).Panes) != 0 || len(server.manager.List()) != 0 {
 		t.Fatal("dismiss did not remove Pane and retained Session")
+	}
+}
+
+func TestStopRetainsPaneAndHistoryThenRestartAndDelete(t *testing.T) {
+	first, second := newTestManagedProcess(), newTestManagedProcess()
+	server, _ := openTestServer(t, &testFactory{processes: []*testManagedProcess{first, second}})
+	ctx := context.Background()
+	created, err := server.NewTerminal(ctx, ariadneprotocol.NewTerminalParams{Argv: []string{"test-command"}, CWD: "/tmp", InitialSize: pty.Size{Cols: 80, Rows: 24}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := ariadneprotocol.PaneParams{PaneID: created.Pane.ID}
+	if _, err = server.DeletePane(ctx, params); !errors.Is(err, core.ErrInvalidState) {
+		t.Fatalf("active delete=%v", err)
+	}
+	if _, err = first.writer.Write([]byte("retained output")); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := server.StopTerminal(ctx, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.Pane.Terminal.State != core.TerminalExited || stopped.Pane.Terminal.Exit.Kind != core.TerminalExitKilled || !stopped.Pane.Terminal.HistoryAvailable || len(serverSnapshot(t, server).Panes) != 1 || len(server.manager.List()) != 1 {
+		t.Fatalf("stopped=%+v", stopped.Pane.Terminal)
+	}
+	if _, err = server.RestartTerminal(ctx, ariadneprotocol.RestartTerminalParams{PaneID: params.PaneID, InitialSize: pty.Size{Cols: 80, Rows: 24}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = server.StopTerminal(ctx, params); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = server.DeletePane(ctx, params); err != nil {
+		t.Fatal(err)
+	}
+	if len(serverSnapshot(t, server).Panes) != 0 || len(server.manager.List()) != 0 {
+		t.Fatal("delete leaked retained resources")
 	}
 }
 

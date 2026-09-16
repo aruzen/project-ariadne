@@ -355,6 +355,9 @@ func (c *Core) recordTerminalExit(command RecordTerminalExitCommand) (any, *Even
 	if command.State != TerminalExited && command.State != TerminalFailed {
 		return nil, nil, fmt.Errorf("%w: terminal exit state %q", ErrInvalidArgument, command.State)
 	}
+	if pane.Terminal.Exit != nil && *pane.Terminal.Exit == command.Exit && pane.Terminal.State == command.State && pane.Terminal.HistoryAvailable == command.HistoryAvailable {
+		return TerminalResult{Pane: clonePane(pane)}, nil, nil
+	}
 	terminal := cloneTerminal(*pane.Terminal)
 	terminal.State = command.State
 	terminal.Exit = &TerminalExit{Kind: command.Exit.Kind, Code: command.Exit.Code, Signal: command.Exit.Signal, Message: command.Exit.Message}
