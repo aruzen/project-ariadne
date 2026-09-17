@@ -12,23 +12,27 @@ import (
 	"sync"
 	"time"
 
+	v1 "github.com/aruzen/ariadne/api/plugin/v1"
 	"github.com/aruzen/ariadne/internal/core"
 	"github.com/aruzen/streammux"
 	"github.com/aruzen/streammux/pty"
 )
 
 const (
-	Version             = 1
-	MessageCommand      = streammux.MessageType(0x1000)
-	MessageEvent        = streammux.MessageType(0x1001)
-	DefaultMaxJSONBytes = 1 << 20
-	DefaultSendTimeout  = 2 * time.Second
+	Version                        = 1
+	MessageCommand                 = streammux.MessageType(0x1000)
+	MessageEvent                   = streammux.MessageType(0x1001)
+	MessagePluginInteraction       = streammux.MessageType(0x1002)
+	MessagePluginInteractionCancel = streammux.MessageType(0x1003)
+	DefaultMaxJSONBytes            = 1 << 20
+	DefaultSendTimeout             = 2 * time.Second
 )
 
 type Operation string
 
 const (
 	OperationSync                 Operation = "sync"
+	OperationPlugin               Operation = "plugin"
 	OperationCreateWorkspace      Operation = "create_workspace"
 	OperationRenameWorkspace      Operation = "rename_workspace"
 	OperationDeleteWorkspace      Operation = "delete_workspace"
@@ -90,6 +94,13 @@ type Config struct {
 	// new work and wait for in-flight commands before its shutdown Snapshot.
 	CommandGuard func() (release func(), err error)
 	Terminal     TerminalController
+	Plugins      PluginController
+}
+
+// PluginController is the shared management and extension bridge for every frontend.
+type PluginController interface {
+	Manage(context.Context, uint64, v1.ManageRequest) (v1.ManageResult, error)
+	Detach(uint64)
 }
 
 // TerminalController owns operations that cross the Core/PTY I/O boundary.
@@ -465,6 +476,8 @@ type Protocol struct {
 	mu           sync.Mutex
 	subscription *core.Subscription
 	closeOnce    sync.Once
+	pluginCalls  map[string]context.CancelFunc
+	pluginBytes  int
 }
 
 func Register(peer *streammux.Peer, engine *core.Core, configuration Config) (*Protocol, error) {
@@ -476,7 +489,7 @@ func Register(peer *streammux.Peer, engine *core.Core, configuration Config) (*P
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	protocol := &Protocol{peer: peer, core: engine, config: configuration, ctx: ctx, cancel: cancel}
+	protocol := &Protocol{peer: peer, core: engine, config: configuration, ctx: ctx, cancel: cancel, pluginCalls: map[string]context.CancelFunc{}}
 	if err := peer.Register(MessageCommand, protocol.handleCommand); err != nil {
 		cancel()
 		return nil, err
@@ -499,6 +512,9 @@ func (protocol *Protocol) Close() error {
 		protocol.subscription = nil
 		protocol.mu.Unlock()
 		if subscription != nil {
+			if protocol.config.Plugins != nil {
+				protocol.config.Plugins.Detach(uint64(subscription.ID()))
+			}
 			_ = subscription.Close()
 		}
 	})
@@ -550,6 +566,76 @@ func (protocol *Protocol) handleCommand(ctx context.Context, peer *streammux.Pee
 			return err
 		}
 		go protocol.forwardEvents(subscription)
+		return nil
+	}
+	if request.Operation == OperationPlugin {
+		frontend, err := protocol.frontendID()
+		if err != nil {
+			return protocol.respondCoreError(ctx, frame, err)
+		}
+		var params v1.ManageRequest
+		if err := decodeParams(request.Params, &params); err != nil {
+			return protocol.respondCoreError(ctx, frame, err)
+		}
+		if protocol.config.Plugins == nil {
+			return protocol.respondError(ctx, frame, CodeInvalidState, "plugin manager is unavailable")
+		}
+		requestID := params.RequestID
+		if requestID == "" {
+			requestID = fmt.Sprintf("rpc-%d", frame.Header.CorrelationID)
+		}
+		if len(requestID) > 128 {
+			return protocol.respondError(ctx, frame, CodeInvalidArgument, "invalid plugin request ID")
+		}
+		if params.Action == "cancel" {
+			protocol.mu.Lock()
+			cancel := protocol.pluginCalls[requestID]
+			protocol.mu.Unlock()
+			if cancel != nil {
+				cancel()
+			}
+			return protocol.respondResult(ctx, frame, v1.ManageResult{})
+		}
+		protocol.mu.Lock()
+		_, duplicate := protocol.pluginCalls[requestID]
+		if duplicate || len(protocol.pluginCalls) >= 64 || protocol.pluginBytes+len(frame.Payload) > 16<<20 {
+			protocol.mu.Unlock()
+			return protocol.respondError(ctx, frame, CodeInvalidState, "plugin frontend request queue overflow")
+		}
+		callCtx, cancel := context.WithCancel(protocol.ctx)
+		protocol.pluginCalls[requestID] = cancel
+		protocol.pluginBytes += len(frame.Payload)
+		protocol.mu.Unlock()
+		commandRelease := release
+		release = nil
+		// streammux orders handlers on StreamID 0. Long plugin calls must leave that
+		// handler so Core events, editor operations, and cancellation can continue.
+		go func() {
+			defer func() {
+				cancel()
+				commandRelease()
+				protocol.mu.Lock()
+				delete(protocol.pluginCalls, requestID)
+				protocol.pluginBytes -= len(frame.Payload)
+				protocol.mu.Unlock()
+			}()
+			result, err := protocol.config.Plugins.Manage(callCtx, uint64(frontend), params)
+			if err != nil {
+				code, _ := classifyError(err)
+				var remote *RemoteError
+				if errors.As(err, &remote) {
+					code = remote.Code
+				}
+				_ = protocol.respondError(callCtx, frame, code, err.Error())
+				return
+			}
+			encoded, err := json.Marshal(result)
+			if err != nil || len(encoded)+64 > protocol.peer.MaxFrameBytes() {
+				_ = protocol.respondError(callCtx, frame, CodeInvalidArgument, "plugin response exceeds frontend transport limit")
+				return
+			}
+			_ = protocol.respondResult(callCtx, frame, result)
+		}()
 		return nil
 	}
 	if request.Operation == OperationListStash {

@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/aruzen/ariadne/internal/core"
 	"github.com/aruzen/ariadne/internal/plugin"
+	"github.com/aruzen/ariadne/internal/plugin/external"
 	ariadneprotocol "github.com/aruzen/ariadne/internal/protocol"
 	"github.com/aruzen/ariadne/internal/statefile"
 	"github.com/aruzen/streammux"
@@ -26,34 +28,38 @@ type listenerCleaner interface {
 }
 
 type Server struct {
-	config  Config
-	core    *core.Core
-	manager *pty.Manager
-	store   *statefile.Store
-	plugins *plugin.Host
-	load    statefile.LoadResult
+	config          Config
+	core            *core.Core
+	manager         *pty.Manager
+	store           *statefile.Store
+	plugins         *plugin.Host
+	externalPlugins *external.Manager
+	load            statefile.LoadResult
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu                sync.Mutex
-	listener          net.Listener
-	connections       map[*streammux.Peer]struct{}
-	activeConnections int
-	stopping          bool
-	closing           bool
-	closeErr          error
-	fatal             chan error
-	serveOnce         atomic.Bool
-	closeOnce         sync.Once
-	commandGate       sync.RWMutex
-	terminalMu        sync.Mutex
-	clipboardMu       sync.Mutex
-	clipboardText     []byte
-	terminalPanes     map[core.TerminalID]core.PaneID
-	stopAfterResponse atomic.Bool
-	connectionsWG     sync.WaitGroup
-	workersWG         sync.WaitGroup
+	mu                    sync.Mutex
+	listener              net.Listener
+	connections           map[*streammux.Peer]struct{}
+	activeConnections     int
+	stopping              bool
+	closing               bool
+	closeErr              error
+	fatal                 chan error
+	serveOnce             atomic.Bool
+	closeOnce             sync.Once
+	commandGate           sync.RWMutex
+	terminalMu            sync.Mutex
+	clipboardMu           sync.Mutex
+	clipboardText         []byte
+	pluginFrontends       map[uint64]pluginFrontend
+	pluginEditors         map[core.PaneID]pluginEditor
+	pluginInteractionNext atomic.Uint64
+	terminalPanes         map[core.TerminalID]core.PaneID
+	stopAfterResponse     atomic.Bool
+	connectionsWG         sync.WaitGroup
+	workersWG             sync.WaitGroup
 
 	stateSubscription   *core.Subscription
 	managerSubscription *pty.Subscription
@@ -102,6 +108,7 @@ func Open(parent context.Context, factory pty.ManagedFactory, configuration Conf
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	server := &Server{
+		pluginFrontends: map[uint64]pluginFrontend{}, pluginEditors: map[core.PaneID]pluginEditor{},
 		config: configuration, core: engine, manager: manager, store: store, load: loaded,
 		ctx: ctx, cancel: cancel, connections: make(map[*streammux.Peer]struct{}), terminalPanes: make(map[core.TerminalID]core.PaneID), fatal: make(chan error, 1),
 		stateLoopDone: make(chan struct{}), managerLoopDone: make(chan struct{}),
@@ -121,7 +128,8 @@ func Open(parent context.Context, factory pty.ManagedFactory, configuration Conf
 		_ = engine.Close()
 		return nil, loaded, err
 	}
-	if err := server.startObservers(); err != nil {
+	server.externalPlugins, err = external.NewManagerDeferred(server.ctx, engine, filepath.Join(filepath.Dir(configuration.StatePath), "plugins"), configuration.ExternalPlugin, server)
+	if err != nil {
 		cancel()
 		_ = server.plugins.Close(context.Background())
 		_ = store.Close(context.Background())
@@ -129,6 +137,16 @@ func Open(parent context.Context, factory pty.ManagedFactory, configuration Conf
 		_ = engine.Close()
 		return nil, loaded, err
 	}
+	if err := server.startObservers(); err != nil {
+		cancel()
+		_ = server.plugins.Close(context.Background())
+		_ = server.externalPlugins.Close(context.Background())
+		_ = store.Close(context.Background())
+		_ = manager.Close()
+		_ = engine.Close()
+		return nil, loaded, err
+	}
+	server.externalPlugins.StartEnabled()
 	server.workersWG.Add(1)
 	go func() {
 		defer server.workersWG.Done()
@@ -240,6 +258,7 @@ func (server *Server) serveConnection(connection net.Conn) {
 	ariadneConfig := server.config.AriadneProtocol
 	ariadneConfig.CommandGuard = server.guardCommand
 	ariadneConfig.Terminal = server
+	ariadneConfig.Plugins = &pluginController{server: server, peer: peer}
 	ariadneProtocol, err := ariadneprotocol.Register(peer, server.core, ariadneConfig)
 	if err != nil {
 		return
@@ -334,6 +353,18 @@ func (server *Server) managerLoop(subscription *pty.Subscription) {
 }
 
 func (server *Server) handleManagerEvent(event pty.Event, pendingRemoval map[streammux.StreamID]struct{}) error {
+	if server.externalPlugins != nil {
+		if paneID, ok := server.terminalPanes[event.Session.ID]; ok {
+			if event.Kind == pty.EventOutput && event.Output != nil {
+				server.externalPlugins.PublishTerminalEvent(plugin.TerminalEvent{Kind: plugin.TerminalOutput, PaneID: paneID, TerminalID: event.Session.ID, Sequence: event.Output.Sequence, Data: event.Output.Data})
+			}
+			if event.Kind == pty.EventExited && event.Session.Exit != nil {
+				_, exit := terminalExit(*event.Session.Exit)
+				server.externalPlugins.PublishTerminalEvent(plugin.TerminalEvent{Kind: plugin.TerminalExited, PaneID: paneID, TerminalID: event.Session.ID, Exit: &exit})
+			}
+		}
+	}
+
 	if event.Kind == pty.EventOutput && event.Output != nil && server.plugins != nil {
 		if paneID, exists := server.terminalPanes[event.Session.ID]; exists {
 			server.plugins.PublishTerminalEvent(plugin.TerminalEvent{Kind: plugin.TerminalOutput, PaneID: paneID, TerminalID: event.Session.ID, Sequence: event.Output.Sequence, Data: event.Output.Data})
@@ -344,7 +375,18 @@ func (server *Server) handleManagerEvent(event pty.Event, pendingRemoval map[str
 		if event.Session.Exit == nil {
 			return nil
 		}
-		if terminalExitRemovesPane(*event.Session.Exit, server.config.ClosePaneOnSuccessfulExit) {
+		server.mu.Lock()
+		_, temporary := server.pluginEditors[server.terminalPanes[event.Session.ID]]
+		server.mu.Unlock()
+		if !temporary {
+			snapshot, err := server.core.Snapshot(server.ctx)
+			if err == nil {
+				if pane, ok := snapshot.PaneByTerminalID(event.Session.ID); ok {
+					temporary = pane.Transient
+				}
+			}
+		}
+		if !temporary && terminalExitRemovesPane(*event.Session.Exit, server.config.ClosePaneOnSuccessfulExit) {
 			snapshot, err := server.core.Snapshot(server.ctx)
 			if err == nil {
 				if pane, exists := snapshot.PaneByTerminalID(event.Session.ID); exists {
@@ -493,6 +535,11 @@ func (server *Server) Close(ctx context.Context) error {
 		}
 
 		var shutdownErrors []error
+		if server.externalPlugins != nil {
+			if err := server.externalPlugins.Close(ctx); err != nil {
+				shutdownErrors = append(shutdownErrors, err)
+			}
+		}
 		if server.plugins != nil {
 			if err := server.plugins.Close(ctx); err != nil {
 				shutdownErrors = append(shutdownErrors, err)

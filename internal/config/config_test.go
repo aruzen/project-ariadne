@@ -299,3 +299,20 @@ func FuzzParse(f *testing.F) {
 		_, _ = Parse(data)
 	})
 }
+
+func TestPluginLimitsAndStatusWidgetConfiguration(t *testing.T) {
+	c, err := Parse([]byte("[plugins]\ncommand_ms=1234\ncontrol_queue=7\n[tui.status]\nright=[\"example/status\"]\n"))
+	if err != nil || c.Plugins.CommandMS != 1234 || c.Plugins.ControlQueue != 7 || c.Plugins.MessageBytes != 8<<20 {
+		t.Fatal("plugin configuration", err, c.Plugins)
+	}
+	for _, data := range []string{
+		"[plugins]\napi_ms=-1\n",
+		"[plugins]\ncommand_ms=9223372036854775807\n",
+		"[tui.status.widgets.clock]\nplugin=\"example/status\"\n",
+		"[tui.status.widgets.x]\nplugin=\"example/status\"\ncommand=[\"shell\"]\n",
+	} {
+		if _, err := Parse([]byte(data)); err == nil {
+			t.Fatal("invalid plugin limits/builtin override accepted", data)
+		}
+	}
+}

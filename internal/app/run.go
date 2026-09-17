@@ -11,10 +11,22 @@ import (
 	daemonapp "github.com/aruzen/ariadne/internal/app/daemon"
 	"github.com/aruzen/ariadne/internal/frontend/cui"
 	"github.com/aruzen/ariadne/internal/platform/localipc"
+	"github.com/aruzen/ariadne/internal/plugin/external"
+	"github.com/aruzen/ariadne/internal/plugin/native"
 )
 
 // Run dispatches to either the frontend or the foreground daemon role.
 func Run(arguments []string, stdout, stderr io.Writer) error {
+	if (len(arguments) == 2 || len(arguments) == 3) && arguments[0] == "plugin-helper" {
+		if len(arguments) == 2 {
+			return native.Run(arguments[1])
+		}
+		var configuration external.Config
+		if err := external.DecodeParameters([]byte(arguments[2]), &configuration); err != nil {
+			return err
+		}
+		return native.RunConfigured(arguments[1], configuration)
+	}
 	global := flag.NewFlagSet("ariadne", flag.ContinueOnError)
 	global.SetOutput(io.Discard)
 	endpoint := global.String("socket", "", "local IPC endpoint")

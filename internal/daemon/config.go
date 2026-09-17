@@ -9,6 +9,7 @@ import (
 	"github.com/aruzen/ariadne/internal/core"
 	platformclipboard "github.com/aruzen/ariadne/internal/platform/clipboard"
 	"github.com/aruzen/ariadne/internal/plugin"
+	"github.com/aruzen/ariadne/internal/plugin/external"
 	ariadneprotocol "github.com/aruzen/ariadne/internal/protocol"
 	"github.com/aruzen/ariadne/internal/statefile"
 	"github.com/aruzen/streammux"
@@ -45,6 +46,7 @@ type Config struct {
 	State                     statefile.Options
 	Plugins                   []plugin.Plugin
 	Plugin                    plugin.Config
+	ExternalPlugin            external.Config
 	ClosePaneOnSuccessfulExit bool
 	Clipboard                 ClipboardConfig
 	AgentMarkerBytes          int
@@ -66,7 +68,7 @@ func DefaultConfig(statePath string) Config {
 		Core: core.DefaultConfig(), Manager: manager,
 		Stream: streammux.DefaultConfig(), Peer: peer,
 		AriadneProtocol: ariadneprotocol.DefaultConfig(), PTYProtocol: ptyProtocol,
-		State: statefile.DefaultOptions(), Plugin: plugin.DefaultConfig(),
+		State: statefile.DefaultOptions(), Plugin: plugin.DefaultConfig(), ExternalPlugin: external.DefaultConfig(),
 		Clipboard: ClipboardConfig{
 			ReadPolicy: ariadneconfig.ClipboardAsk, WritePolicy: ariadneconfig.ClipboardAsk,
 			MaxTextBytes: ariadneconfig.DefaultClipboardMaxBytes,

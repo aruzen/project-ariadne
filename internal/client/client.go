@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/aruzen/ariadne/internal/core"
 	"github.com/aruzen/ariadne/internal/protocol"
@@ -29,11 +30,15 @@ func DefaultConfig() Config {
 }
 
 type Client struct {
-	peer      *streammux.Peer
-	cancel    context.CancelFunc
-	serveDone chan error
-	events    chan core.Event
-	closeOnce sync.Once
+	peer              *streammux.Peer
+	cancel            context.CancelFunc
+	serveDone         chan error
+	events            chan core.Event
+	closeOnce         sync.Once
+	pluginMu          sync.Mutex
+	pluginInteraction InteractionHandler
+	pluginNext        atomic.Uint64
+	pluginDialogues   map[string]*pluginDialogueCancel
 }
 
 func Open(parent context.Context, connection io.ReadWriteCloser, configuration Config) (*Client, error) {
@@ -55,8 +60,18 @@ func Open(parent context.Context, connection io.ReadWriteCloser, configuration C
 		_ = muxConnection.Close()
 		return nil, err
 	}
-	client := &Client{peer: peer, cancel: cancel, serveDone: make(chan error, 1), events: make(chan core.Event, configuration.EventBuffer)}
+	client := &Client{pluginDialogues: map[string]*pluginDialogueCancel{}, peer: peer, cancel: cancel, serveDone: make(chan error, 1), events: make(chan core.Event, configuration.EventBuffer)}
 	if err := peer.Register(protocol.MessageEvent, client.handleEvent); err != nil {
+		cancel()
+		_ = peer.Close()
+		return nil, err
+	}
+	if err := peer.Register(protocol.MessagePluginInteraction, client.handlePluginInteraction); err != nil {
+		cancel()
+		_ = peer.Close()
+		return nil, err
+	}
+	if err := peer.Register(protocol.MessagePluginInteractionCancel, client.handlePluginDialogueCancel); err != nil {
 		cancel()
 		_ = peer.Close()
 		return nil, err

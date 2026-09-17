@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/aruzen/ariadne/internal/plugin/external"
 	"github.com/aruzen/streammux"
 	"github.com/aruzen/streammux/pty"
 	"github.com/pelletier/go-toml/v2"
@@ -70,6 +71,7 @@ type Config struct {
 	Clipboard   ClipboardOptions `toml:"clipboard"`
 	Transport   TransportLimits  `toml:"transport"`
 	Attention   AttentionLimits  `toml:"attention"`
+	Plugins     external.Config  `toml:"plugins"`
 }
 
 // DefaultCommands are argv vectors and are executed without a shell. Empty
@@ -205,6 +207,7 @@ func Default() Config {
 			OutboundQueueBytes: peer.OutboundQueueBytes, OutboundQueueFrames: peer.OutboundQueueFrames,
 			PerStreamQueueBytes: peer.PerStreamQueueBytes, PerStreamQueueFrames: peer.PerStreamQueueFrames,
 		},
+		Plugins:   external.DefaultConfig(),
 		Attention: AttentionLimits{MaxEntries: 1024, MarkerBytes: 8 << 10, PluginQueueBytes: 1 << 20},
 	}
 }
@@ -285,6 +288,9 @@ func Load(path string) (Config, error) {
 }
 
 func (configuration Config) validate() error {
+	if _, err := configuration.Plugins.Normalize(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
 	if configuration.DetachKey == "" || strings.TrimSpace(configuration.DetachKey) == "" {
 		return fmt.Errorf("%w: detach_key is empty", ErrInvalid)
 	}

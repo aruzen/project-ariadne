@@ -96,6 +96,7 @@ type StatusOptions struct {
 }
 
 type WidgetOptions struct {
+	Plugin     string   `toml:"plugin"`
 	Command    []string `toml:"command"`
 	Format     string   `toml:"format"`
 	Style      string   `toml:"style"`
@@ -170,12 +171,18 @@ func (configuration Config) validatePresentation() error {
 		return fmt.Errorf("%w: too many status widgets", ErrInvalid)
 	}
 	for _, name := range append(append([]string(nil), t.Status.Left...), t.Status.Right...) {
-		if _, ok := t.Status.Widgets[name]; !ok && !builtins[name] {
+		if _, ok := t.Status.Widgets[name]; !ok && !builtins[name] && !strings.Contains(name, "/") {
 			return fmt.Errorf("%w: unknown status widget %q", ErrInvalid, name)
 		}
 	}
 	for name, w := range t.Status.Widgets {
-		if name == "" || (!builtins[name] && len(w.Command) == 0) {
+		if w.Plugin != "" {
+			id, widget, ok := strings.Cut(w.Plugin, "/")
+			if !ok || id == "" || widget == "" || strings.Contains(widget, "/") || len(w.Command) > 0 || builtins[name] {
+				return fmt.Errorf("%w: invalid plugin widget %q", ErrInvalid, name)
+			}
+		}
+		if name == "" || (!builtins[name] && len(w.Command) == 0 && w.Plugin == "") {
 			return fmt.Errorf("%w: widget %q needs a command", ErrInvalid, name)
 		}
 		if !knownStyles[w.Style] || !ValidCWDSource(w.CWD) || strings.ContainsRune(w.CWD, 0) {

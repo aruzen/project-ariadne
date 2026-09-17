@@ -11,7 +11,7 @@
 # editor = ["nvim"]
 # Windows examples:
 # shell = ["pwsh.exe", "-NoLogo"]
-# editor = ["notepad.exe"]
+# editor = ["notepad.exe"] # Must wait until editing completes; use the editor's wait flag if required.
 
 [tui]
 # pane_frame = "full" # "full", "split", or "none"
@@ -169,3 +169,23 @@
 # Escape versus escape-prefixed terminal keys uses a 50ms timeout.
 # Confirmation keys are fixed (y=yes, n/Escape/Enter=no).
 # Legacy flat [keybindings] entries must migrate to [keybindings.normal].
+
+[plugins]
+# Trusted external plugins run in separate processes; this is not an OS sandbox.
+# Install/enable/grants are managed by `ariadne plugin`, not by this config.
+# message_bytes = 8388608
+# control_queue = 64
+# control_bytes = 16777216
+# pty_queue_bytes = 1048576
+# initialize_ms = 5000
+# api_ms = 2000 # Native callbacks must return within this deadline too.
+# render_ms = 1000 # ToolPane and plugin widgets
+# command_ms = 30000 # Excludes host dialogue wait time
+# interaction_ms = 900000
+# shutdown_ms = 2000
+# Add "example-process/input-count" to tui.status.left/right, or use an alias:
+# [tui.status.widgets.plugin_inputs]
+# plugin = "example-process/input-count"
+# format = " {output} "
+# interval_ms = 5000
+# timeout_ms = 1000

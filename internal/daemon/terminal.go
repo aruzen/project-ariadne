@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/aruzen/ariadne/internal/core"
+	"github.com/aruzen/ariadne/internal/plugin/external"
 	ariadneprotocol "github.com/aruzen/ariadne/internal/protocol"
 	"github.com/aruzen/streammux/pty"
 )
@@ -27,11 +28,14 @@ func (server *Server) NewTerminal(ctx context.Context, params ariadneprotocol.Ne
 	if err != nil {
 		return ariadneprotocol.TerminalOperationResult{}, err
 	}
+	if err := external.CheckOperation(ctx, snapshot); err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
 	command, err := newTerminalPaneCommand(snapshot, params)
 	if err != nil {
 		return ariadneprotocol.TerminalOperationResult{}, err
 	}
-	result, err := server.core.Execute(ctx, command)
+	result, err := server.core.ExecuteChecked(ctx, command, func(current core.Snapshot) error { return external.CheckOperation(ctx, current) })
 	if err != nil {
 		return ariadneprotocol.TerminalOperationResult{}, err
 	}
@@ -50,6 +54,9 @@ func (server *Server) RestartTerminal(ctx context.Context, params ariadneprotoco
 	}
 	snapshot, err := server.core.Snapshot(ctx)
 	if err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
+	if err := external.CheckOperation(ctx, snapshot); err != nil {
 		return ariadneprotocol.TerminalOperationResult{}, err
 	}
 	pane, exists := paneByID(snapshot, params.PaneID)
@@ -94,6 +101,9 @@ func (server *Server) RunTerminal(ctx context.Context, params ariadneprotocol.Ru
 	}
 	snapshot, err := server.core.Snapshot(ctx)
 	if err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
+	if err := external.CheckOperation(ctx, snapshot); err != nil {
 		return ariadneprotocol.TerminalOperationResult{}, err
 	}
 	pane, exists := paneByID(snapshot, params.PaneID)
@@ -169,6 +179,9 @@ func (server *Server) startReservedTerminal(ctx context.Context, pane core.Pane,
 		return ariadneprotocol.TerminalOperationResult{}, errors.Join(err, recordErr)
 	}
 	server.terminalPanes[session.ID()] = pane.ID
+	if server.externalPlugins != nil {
+		server.externalPlugins.RefreshObservation(ctx)
+	}
 	return ariadneprotocol.TerminalOperationResult{Pane: result.(core.TerminalResult).Pane}, nil
 }
 
@@ -245,7 +258,7 @@ func (server *Server) KillTerminal(ctx context.Context, params ariadneprotocol.P
 	if _, exists := server.manager.Get(terminalID); !exists {
 		return ariadneprotocol.TerminalOperationResult{}, fmt.Errorf("%w: terminal %d", core.ErrInvalidState, terminalID)
 	}
-	if _, err := server.core.Execute(ctx, core.BeginTerminalStopCommand{PaneID: pane.ID}); err != nil {
+	if _, err := server.core.ExecuteChecked(ctx, core.BeginTerminalStopCommand{PaneID: pane.ID}, func(current core.Snapshot) error { return external.CheckOperation(ctx, current) }); err != nil {
 		return ariadneprotocol.TerminalOperationResult{}, err
 	}
 	if err := server.manager.Kill(ctx, terminalID); err != nil {
@@ -274,6 +287,9 @@ func (server *Server) DismissTerminal(ctx context.Context, params ariadneprotoco
 func (server *Server) dismissTerminalLocked(ctx context.Context, params ariadneprotocol.PaneParams) (ariadneprotocol.TerminalOperationResult, error) {
 	snapshot, err := server.core.Snapshot(ctx)
 	if err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
+	if err := external.CheckOperation(ctx, snapshot); err != nil {
 		return ariadneprotocol.TerminalOperationResult{}, err
 	}
 	pane, exists := paneByID(snapshot, params.PaneID)
@@ -307,6 +323,9 @@ func (server *Server) DeletePane(ctx context.Context, params ariadneprotocol.Pan
 	if err != nil {
 		return ariadneprotocol.TerminalOperationResult{}, err
 	}
+	if err := external.CheckOperation(ctx, snapshot); err != nil {
+		return ariadneprotocol.TerminalOperationResult{}, err
+	}
 	pane, exists := paneByID(snapshot, params.PaneID)
 	if !exists {
 		return ariadneprotocol.TerminalOperationResult{}, fmt.Errorf("%w: pane %d", core.ErrNotFound, params.PaneID)
@@ -327,7 +346,7 @@ func (server *Server) StopTerminal(ctx context.Context, params ariadneprotocol.P
 		return ariadneprotocol.TerminalOperationResult{}, err
 	}
 	id := *pane.Terminal.ID
-	if _, err = server.core.Execute(ctx, core.BeginTerminalStopCommand{PaneID: pane.ID}); err != nil {
+	if _, err = server.core.ExecuteChecked(ctx, core.BeginTerminalStopCommand{PaneID: pane.ID}, func(current core.Snapshot) error { return external.CheckOperation(ctx, current) }); err != nil {
 		return ariadneprotocol.TerminalOperationResult{}, err
 	}
 	if err = server.manager.Kill(ctx, id); err != nil {
@@ -365,6 +384,11 @@ func (server *Server) DaemonStatus(context.Context) (ariadneprotocol.DaemonStatu
 			result.Plugins = append(result.Plugins, value)
 		}
 	}
+	if server.externalPlugins != nil {
+		for _, status := range server.externalPlugins.List().Plugins {
+			result.Plugins = append(result.Plugins, ariadneprotocol.PluginStatus{Name: status.Manifest.ID, Enabled: status.Enabled && status.Running, Error: status.Error})
+		}
+	}
 	return result, nil
 }
 
@@ -398,6 +422,9 @@ func (server *Server) runningPane(ctx context.Context, paneID core.PaneID) (core
 	}
 	snapshot, err := server.core.Snapshot(ctx)
 	if err != nil {
+		return core.Pane{}, err
+	}
+	if err := external.CheckOperation(ctx, snapshot); err != nil {
 		return core.Pane{}, err
 	}
 	pane, exists := paneByID(snapshot, paneID)

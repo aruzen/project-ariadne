@@ -55,6 +55,7 @@ func Run(arguments []string) error {
 		return err
 	}
 	configuration := daemon.DefaultConfig(*statePath)
+	configuration.ExternalPlugin = fileConfiguration.Plugins
 	configuration.ClosePaneOnSuccessfulExit = fileConfiguration.Terminal.SuccessfulExit == ariadneconfig.SuccessfulExitClose
 	configuration.Clipboard.ReadPolicy = fileConfiguration.Clipboard.Read
 	configuration.Clipboard.WritePolicy = fileConfiguration.Clipboard.Write
