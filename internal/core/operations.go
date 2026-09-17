@@ -10,6 +10,8 @@ import (
 
 func (c *Core) execute(command Command, frontends map[FrontendID]*frontend) (any, *Event, error) {
 	switch value := command.(type) {
+	case CreateTransientPaneCommand:
+		return c.createTransientPane(value)
 	case CreateWorkspaceCommand:
 		return c.createWorkspace(value)
 	case CreateWindowCommand:

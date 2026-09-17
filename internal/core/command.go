@@ -69,6 +69,14 @@ type DeleteWindowCommand struct {
 
 // CreatePaneCommand creates the first Pane in an empty Window. Further Panes
 // are created with SplitPaneCommand so their position is unambiguous.
+// CreateTransientPaneCommand creates an editor directly in stash without changing layout.
+type CreateTransientPaneCommand struct {
+	WindowID WindowID
+	Launch   LaunchSpec
+}
+
+func (CreateTransientPaneCommand) isCommand() {}
+
 type CreatePaneCommand struct {
 	WindowID WindowID
 	Pane     PaneSpec
@@ -335,6 +343,9 @@ type RemoveAttentionsResult struct {
 
 func cloneCommand(command Command) (Command, error) {
 	switch value := command.(type) {
+	case CreateTransientPaneCommand:
+		value.Launch = cloneLaunch(value.Launch)
+		return value, nil
 	case CreateWorkspaceCommand:
 		return value, nil
 	case *CreateWorkspaceCommand:

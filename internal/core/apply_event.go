@@ -72,6 +72,9 @@ func ApplyEvent(snapshot Snapshot, event Event) (Snapshot, error) {
 			removeSnapshotAttention(&next, attention.ID)
 		}
 	case PaneStashEvent:
+		if payload.Pane.ID >= next.NextPaneID {
+			next.NextPaneID = payload.Pane.ID + 1
+		}
 		upsertPane(&next, payload.Pane)
 		upsertWindow(&next, payload.Window)
 		if event.Kind == EventPaneStashed {

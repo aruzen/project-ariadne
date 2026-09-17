@@ -40,6 +40,9 @@ func (c *Core) restorePane(command RestorePaneCommand, frontends map[FrontendID]
 	if command.DestinationWindowID == 0 && (command.TargetPaneID != 0 || command.Direction != "") {
 		return nil, nil, fmt.Errorf("%w: placement requires a destination window", ErrInvalidArgument)
 	}
+	if p := c.state.panes[command.PaneID]; p.Transient {
+		return nil, nil, fmt.Errorf("%w: temporary editor cannot be restored", ErrInvalidState)
+	}
 	hint, exists := c.state.stashedPanes[command.PaneID]
 	if !exists {
 		if _, paneExists := c.state.panes[command.PaneID]; !paneExists {

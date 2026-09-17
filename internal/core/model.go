@@ -148,6 +148,7 @@ type Window struct {
 }
 
 type Pane struct {
+	Transient    bool              `json:"transient,omitempty"`
 	ID           PaneID            `json:"id"`
 	WindowID     WindowID          `json:"window_id"`
 	Kind         PaneKind          `json:"kind"`

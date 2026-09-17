@@ -241,6 +241,26 @@ func readBounded(path string, maxBytes int64) ([]byte, error) {
 }
 
 func persistentFromSnapshot(snapshot core.Snapshot) persistentSnapshot {
+	snapshot.Panes = append([]core.Pane(nil), snapshot.Panes...)
+	snapshot.StashedPanes = append([]core.StashedPane(nil), snapshot.StashedPanes...)
+	transient := map[core.PaneID]bool{}
+	panes := snapshot.Panes[:0]
+	for _, p := range snapshot.Panes {
+		if p.Transient {
+			transient[p.ID] = true
+		} else {
+			panes = append(panes, p)
+		}
+	}
+	snapshot.Panes = panes
+	stash := snapshot.StashedPanes[:0]
+	for _, p := range snapshot.StashedPanes {
+		if !transient[p.PaneID] {
+			stash = append(stash, p)
+		}
+	}
+	snapshot.StashedPanes = stash
+
 	persistent := persistentSnapshot{
 		NextWorkspaceID: snapshot.NextWorkspaceID,
 		NextWindowID:    snapshot.NextWindowID,

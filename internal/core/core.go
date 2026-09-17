@@ -35,6 +35,7 @@ const (
 type request struct {
 	kind       requestKind
 	command    Command
+	check      func(Snapshot) error
 	frontendID FrontendID
 	closeErr   error
 	response   chan response
@@ -102,6 +103,13 @@ func newCore(config Config, state *state) (*Core, error) {
 // Context cancellation prevents commands not yet accepted by the executor;
 // once accepted, a command completes so callers receive a definitive result.
 func (c *Core) Execute(ctx context.Context, command Command) (any, error) {
+	return c.ExecuteChecked(ctx, command, nil)
+}
+
+// ExecuteChecked checks the current snapshot and applies the command in one
+// executor turn. The check must be short, must not call Core, and must not retain
+// or mutate the snapshot. It is an internal broker boundary, not a plugin API.
+func (c *Core) ExecuteChecked(ctx context.Context, command Command, check func(Snapshot) error) (any, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: nil context", ErrInvalidArgument)
 	}
@@ -109,7 +117,7 @@ func (c *Core) Execute(ctx context.Context, command Command) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	response, err := c.submit(ctx, request{kind: requestExecute, command: command})
+	response, err := c.submit(ctx, request{kind: requestExecute, command: command, check: check})
 	if err != nil {
 		return nil, err
 	}
@@ -226,6 +234,11 @@ func (c *Core) run() {
 func (c *Core) handle(operation request, frontends map[FrontendID]*frontend, nextFrontendID *FrontendID) response {
 	switch operation.kind {
 	case requestExecute:
+		if operation.check != nil {
+			if err := operation.check(c.state.snapshot()); err != nil {
+				return response{err: err}
+			}
+		}
 		if changesPersistentState(operation.command) && c.state.revision == math.MaxUint64 {
 			return response{err: fmt.Errorf("%w: revision exhausted", ErrInvalidState)}
 		}
