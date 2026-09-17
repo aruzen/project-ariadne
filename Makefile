@@ -13,7 +13,7 @@ endif
 
 GHOSTTY_LIB := $(BUILD_DIR)/libghostty-vt/$(TARGET)/lib/$(GHOSTTY_ARCHIVE)
 BINARY := $(BUILD_DIR)/$(APP)
-GO_SOURCES := $(shell find cmd internal -type f -name '*.go') go.mod go.sum
+GO_SOURCES := $(shell find cmd internal api -type f -name '*.go') go.mod go.sum api/plugin/ariadne_plugin.h internal/plugin/native/bridge.c internal/plugin/native/bridge.h
 
 .PHONY: all build install libghostty
 

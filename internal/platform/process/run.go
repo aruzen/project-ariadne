@@ -64,3 +64,9 @@ func Run(ctx context.Context, argv []string, cwd string, env []string, maxBytes 
 	}
 	return output.data, err
 }
+
+// PrepareTree configures a long-lived process before Start. Call install after
+// Start, and cleanup after Wait; cleanup also terminates ordinary descendants.
+func PrepareTree(command *exec.Cmd) (install func() error, cleanup func(), err error) {
+	return prepare(command)
+}
