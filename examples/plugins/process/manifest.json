@@ -1,0 +1,12 @@
+{
+ "id":"example-process", "version":"0.1.0", "api_version":1, "runtime":"process",
+ "entrypoints": {
+  "darwin/arm64":{"path":"plugin-process"},"darwin/amd64":{"path":"plugin-process"},
+  "linux/amd64":{"path":"plugin-process"},"linux/arm64":{"path":"plugin-process"},
+  "windows/amd64":{"path":"plugin-process.exe"},"windows/arm64":{"path":"plugin-process.exe"}
+ },
+ "capabilities":["core.read","core.events","pty.observe","frontend.interact"],
+ "commands":[{"name":"echo","description":"Return arguments"},{"name":"snapshot","description":"Read authorized Core state"},{"name":"prompt","description":"Request a prompt"},{"name":"editor","description":"Edit text in the default editor"}],
+ "tools":[{"name":"demo","description":"Cell surface demo"}],
+ "widgets":[{"name":"input-count","description":"Tool input count"}]
+}

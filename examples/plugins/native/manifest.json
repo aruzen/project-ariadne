@@ -1,0 +1,10 @@
+{
+ "id":"example-native","version":"0.1.0","api_version":1,"runtime":"native",
+ "entrypoints": {
+  "darwin/arm64":{"path":"plugin.dylib"},"darwin/amd64":{"path":"plugin.dylib"},
+  "linux/amd64":{"path":"plugin.so"},"linux/arm64":{"path":"plugin.so"},
+  "windows/amd64":{"path":"plugin.dll"},"windows/arm64":{"path":"plugin.dll"}
+ },
+ "capabilities":[],"commands":[{"name":"hello","description":"Native greeting"}],
+ "tools":[{"name":"demo"}],"widgets":[{"name":"status"}]
+}
