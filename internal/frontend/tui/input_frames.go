@@ -121,6 +121,15 @@ func (session *session) acceptPaste(data []byte) {
 		}
 		return
 	}
+	if view := session.views[session.focus]; view != nil {
+		if content, ok := view.content.(*externalToolContent); ok {
+			_, err := content.HandlePaste(data)
+			if err != nil {
+				session.setMessage(err.Error())
+			}
+			return
+		}
+	}
 	// Tool input is text-only; newline/control bytes must not activate actions.
 	session.sendInput([]byte(cleanText(string(data))))
 }

@@ -11,13 +11,16 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
+	v1 "github.com/aruzen/ariadne/api/plugin/v1"
 	"github.com/aruzen/ariadne/internal/client"
 	ariadneconfig "github.com/aruzen/ariadne/internal/config"
 	"github.com/aruzen/ariadne/internal/core"
 	"github.com/aruzen/ariadne/internal/daemon"
 	platformterminal "github.com/aruzen/ariadne/internal/platform/terminal"
+	"github.com/aruzen/ariadne/internal/plugin/external"
 	"github.com/aruzen/ariadne/internal/protocol"
 	"github.com/aruzen/ariadne/internal/vt/libghostty"
 	"github.com/aruzen/streammux/pty"
@@ -58,6 +61,7 @@ type inputMessage struct {
 }
 
 type session struct {
+	pluginLimits         external.Config
 	ctx                  context.Context
 	cancel               context.CancelFunc
 	client               *client.Client
@@ -128,6 +132,12 @@ type session struct {
 	dragLayout           *core.LayoutNode
 	inputFrames          inputFramer
 	pendingViewSync      bool
+	pluginResults        chan pluginResult
+	pluginDialogues      chan pluginDialogue
+	pluginStatus         v1.ManageResult
+	pluginManaging       bool
+	activePluginDialogue *pluginDialogue
+	pluginEditor         *editorPreview
 }
 
 // Run enters the full-screen frontend using an already synchronized client.
@@ -189,7 +199,8 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 		return err
 	}
 	value := &session{
-		ctx: ctx, cancel: cancel, client: frontend, pty: ptyClient, output: frameOutput,
+		pluginLimits: options.PluginLimits,
+		ctx:          ctx, cancel: cancel, client: frontend, pty: ptyClient, output: frameOutput,
 		snapshot: snapshot, width: cols, height: rows, views: make(map[core.PaneID]*paneView),
 		renderers: defaultPaneRendererRegistry(), ptyEvents: make(chan paneEvent, 256), clipboardRequests: make(chan clipboardRequest, 16),
 		statusBar: DefaultStatusBar(), paneFrame: options.PaneFrame, dirty: true,
@@ -212,11 +223,38 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 	}
 	widgetOptions := make(map[string]ariadneconfig.WidgetOptions)
 	for _, name := range append(append([]string(nil), options.Presentation.Status.Left...), options.Presentation.Status.Right...) {
-		if widget, ok := options.Presentation.Status.Widgets[name]; ok {
+		widget, ok := options.Presentation.Status.Widgets[name]
+		if !ok && strings.Contains(name, "/") {
+			widget.Plugin = name
+			ok = true
+		}
+		if ok {
 			widgetOptions[name] = widget
 		}
 	}
+	value.pluginResults = make(chan pluginResult, 128)
+	value.pluginDialogues = make(chan pluginDialogue, 16)
+	frontend.SetPluginInteractionHandler(func(dialogCtx context.Context, request v1.InteractionRequest) (v1.InteractionResult, error) {
+		dialogue := pluginDialogue{ctx: dialogCtx, request: request, done: make(chan dialogueResult, 1)}
+		select {
+		case value.pluginDialogues <- dialogue:
+		case <-ctx.Done():
+			return v1.InteractionResult{}, ctx.Err()
+		case <-dialogCtx.Done():
+			return v1.InteractionResult{}, dialogCtx.Err()
+		}
+		select {
+		case result := <-dialogue.done:
+			return result.result, result.err
+		case <-ctx.Done():
+			return v1.InteractionResult{}, ctx.Err()
+		case <-dialogCtx.Done():
+			return v1.InteractionResult{}, dialogCtx.Err()
+		}
+	})
+	defer frontend.SetPluginInteractionHandler(nil)
 	value.widgets = newWidgetRunner(ctx, widgetOptions)
+	value.refreshPlugins()
 	defer value.widgets.close()
 	value.statusBar = value.configuredStatusBar()
 	if value.clipboardRead == "" {
@@ -317,6 +355,12 @@ func (session *session) loop(output *os.File) error {
 				session.setMessage(err.Error())
 			}
 			session.dirty = true
+		case result := <-session.pluginResults:
+			if !result.editor || !session.applyEditorResult(result) {
+				session.applyPluginResult(result)
+			}
+		case dialogue := <-session.pluginDialogues:
+			session.handlePluginDialogue(dialogue)
 		case request := <-session.clipboardRequests:
 			session.handleClipboardRequest(request)
 		case _, ok := <-resize:
@@ -335,8 +379,15 @@ func (session *session) loop(output *os.File) error {
 			session.dirty = true
 		case <-clock.C:
 			session.refreshDiagnostics()
+			session.refreshPlugins()
 			session.dirty = true
 		case <-frames.C:
+			session.pollPluginDialogue()
+			for _, view := range session.views {
+				if content, ok := view.content.(*externalToolContent); ok {
+					content.refresh(time.Now())
+				}
+			}
 			for _, view := range session.views {
 				session.flushPTYInput(view)
 			}

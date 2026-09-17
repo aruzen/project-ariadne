@@ -76,6 +76,10 @@ func (session *session) handleModalInput(data []byte) {
 				session.resumeClipboardRequests()
 				return
 			case 'n', 'N', 0x03, 0x1b, '\r', '\n':
+				if (value == 0x03 || value == 0x1b) && session.activePluginDialogue != nil {
+					session.cancelPluginDialogue()
+					return
+				}
 				callback := session.confirmCallback
 				session.clearInputMode()
 				if callback != nil {
@@ -113,6 +117,10 @@ func (session *session) handleModalInput(data []byte) {
 			session.resumeClipboardRequests()
 			return
 		case 0x03, 0x1b:
+			if session.activePluginDialogue != nil {
+				session.cancelPluginDialogue()
+				return
+			}
 			session.clearInputMode()
 			session.resumeClipboardRequests()
 			return
@@ -185,6 +193,21 @@ func (session *session) completePrompt() {
 		return
 	}
 	prefix := session.prompt
+	if strings.HasPrefix(prefix, "plugin run ") {
+		matches := []string{}
+		for _, p := range session.pluginStatus.Plugins {
+			for _, c := range p.Manifest.Commands {
+				candidate := "plugin run " + p.Manifest.ID + " " + c.Name
+				if strings.HasPrefix(candidate, prefix) {
+					matches = append(matches, candidate)
+				}
+			}
+		}
+		if len(matches) == 1 {
+			session.prompt = matches[0] + " "
+		}
+		return
+	}
 	if prefix == "" || strings.IndexFunc(prefix, unicode.IsSpace) >= 0 {
 		return
 	}
@@ -240,6 +263,8 @@ func (session *session) executePrompt(commandLine string) {
 		return
 	}
 	switch fields[0] {
+	case "plugin":
+		session.pluginCommand(fields[1:])
 	case "list":
 		unit := client.ResourceWindow
 		if len(fields) > 2 {

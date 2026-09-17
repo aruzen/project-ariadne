@@ -10,6 +10,7 @@ import (
 	"github.com/aruzen/ariadne/internal/client"
 	ariadneconfig "github.com/aruzen/ariadne/internal/config"
 	"github.com/aruzen/ariadne/internal/core"
+	"github.com/aruzen/ariadne/internal/plugin/external"
 	"github.com/aruzen/ariadne/internal/vt/libghostty"
 )
 
@@ -32,6 +33,7 @@ type Options struct {
 	CWD          string
 	Env          []string
 	Clipboard    ariadneconfig.ClipboardOptions
+	PluginLimits external.Config
 }
 
 func DefaultOptions() Options {
@@ -40,6 +42,9 @@ func DefaultOptions() Options {
 }
 
 func (options Options) validate() error {
+	if _, err := options.PluginLimits.Normalize(); err != nil {
+		return err
+	}
 	if mode := options.Presentation.PaneTitle; mode != "" && !mode.Valid() {
 		return fmt.Errorf("tui.pane_title must be auto, pane, or terminal")
 	}
@@ -311,12 +316,15 @@ func (renderer toolPaneRenderer) NewContent(owner *session, pane core.Pane) pane
 	}
 	factory := renderer.factories[toolRendererKey{provider: pane.Tool.Provider, kind: pane.Tool.Type}]
 	if factory == nil {
+		if owner != nil && pane.Tool.Provider != "ariadne" {
+			return newExternalToolContent(owner, pane)
+		}
 		return unavailableToolContent{descriptor: *pane.Tool}
 	}
 	return factory(owner, pane)
 }
 
-var builtinToolTypes = []string{"command-palette", "stash-list", "help", "workspace-list", "resource-list", "agent-status", "diagnostics"}
+var builtinToolTypes = []string{"command-palette", "stash-list", "help", "workspace-list", "resource-list", "agent-status", "diagnostics", "plugin-manager"}
 
 func isBuiltinToolType(kind string) bool {
 	for _, candidate := range builtinToolTypes {
@@ -501,7 +509,19 @@ func (content *builtinToolContent) HandleInput(data []byte) (bool, error) {
 			if content.descriptor.Type == "agent-status" {
 				content.owner.ackAttentionAt(content.selected)
 			}
+		case 'i', 'u', 'd', 'g', 'v':
+			if content.descriptor.Type == "plugin-manager" {
+				actions := map[byte]string{'i': "install", 'u': "update", 'd': "uninstall", 'g': "grant", 'v': "revoke"}
+				content.owner.pluginManagerAction(content.selected-1, actions[value])
+			}
+		case 'e':
+			if content.descriptor.Type == "plugin-manager" {
+				content.owner.pluginManagerAction(content.selected-1, "toggle")
+			}
 		case 'r':
+			if content.descriptor.Type == "plugin-manager" {
+				content.owner.pluginManagerAction(content.selected-1, "restart")
+			}
 			if content.descriptor.Type == "stash-list" {
 				content.owner.restoreStashAt(content.selected)
 			}
@@ -552,7 +572,7 @@ func (content *builtinToolContent) clampScroll(lineCount, height int) {
 
 func (content *builtinToolContent) selectable() bool {
 	switch content.descriptor.Type {
-	case "stash-list", "workspace-list", "resource-list", "agent-status":
+	case "stash-list", "workspace-list", "resource-list", "agent-status", "plugin-manager":
 		return true
 	default:
 		return false
@@ -581,7 +601,7 @@ func (content *builtinToolContent) lines() []string {
 	case "command-palette":
 		lines := []string{"Command palette", "> " + content.query}
 		query := strings.ToLower(strings.TrimSpace(content.query))
-		for _, command := range promptCommandUsages() {
+		for _, command := range append(promptCommandUsages(), content.owner.pluginHelp()...) {
 			if query == "" || strings.Contains(strings.ToLower(command), query) {
 				lines = append(lines, command)
 			}
@@ -598,7 +618,9 @@ func (content *builtinToolContent) lines() []string {
 		}
 		return lines
 	case "help":
-		return promptHelpLines(content.owner.keybindings)
+		return append(promptHelpLines(content.owner.keybindings), content.owner.pluginHelp()...)
+	case "plugin-manager":
+		return content.owner.pluginManagerLines()
 	case "workspace-list":
 		lines := []string{"Workspaces / Windows"}
 		for _, workspace := range content.owner.snapshot.Workspaces {
@@ -649,6 +671,8 @@ func (content *builtinToolContent) lines() []string {
 func (content *builtinToolContent) activate() {
 	index := content.selected - 1
 	switch content.descriptor.Type {
+	case "plugin-manager":
+		content.owner.pluginManagerAction(index, "details")
 	case "resource-list":
 		unit, err := client.ParseResourceUnit(content.descriptor.Instance)
 		if err != nil {

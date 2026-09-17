@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aruzen/ariadne/internal/client"
@@ -29,6 +30,10 @@ func (session *session) createTool(arguments []string) {
 	descriptor := core.ToolDescriptor{Provider: "ariadne", Type: arguments[0], Instance: "default"}
 	if len(arguments) >= 2 {
 		descriptor.Instance = arguments[1]
+	}
+	if provider, kind, ok := strings.Cut(descriptor.Type, "/"); ok {
+		descriptor.Provider = provider
+		descriptor.Type = kind
 	}
 	direction := core.SplitHorizontal
 	if len(arguments) == 3 {

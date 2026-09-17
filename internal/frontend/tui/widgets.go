@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode"
 
+	v1 "github.com/aruzen/ariadne/api/plugin/v1"
 	"github.com/aruzen/ariadne/internal/config"
 	"github.com/aruzen/ariadne/internal/core"
 	"github.com/aruzen/ariadne/internal/platform/process"
@@ -57,7 +58,7 @@ func (session *session) refreshWidgets(now time.Time) {
 		return
 	}
 	for name, options := range runner.options {
-		if len(options.Command) == 0 {
+		if len(options.Command) == 0 && options.Plugin == "" {
 			continue
 		}
 		cwd := session.widgetCWD(options.CWD)
@@ -96,13 +97,28 @@ func (session *session) refreshWidgets(now time.Time) {
 		state.next = now.Add(time.Duration(interval) * time.Millisecond)
 		runner.active++
 		generation := state.generation
+		statePane := state.pane
 		argv := append([]string(nil), options.Command...)
 		env := append([]string(nil), session.env...)
 		runner.wg.Add(1)
 		go func() {
 			defer runner.wg.Done()
 			defer cancel()
-			data, err := process.Run(ctx, argv, cwd, env, maxBytes)
+			var data []byte
+			var err error
+			if options.Plugin != "" {
+				id, name, _ := strings.Cut(options.Plugin, "/")
+				result, e := session.client.Plugin(ctx, v1.ManageRequest{Action: "widget", ID: id, Widget: name, PaneID: uint64(statePane)})
+				err = e
+				if result.Widget != nil {
+					data = []byte(result.Widget.Text)
+				}
+				if len(data) > maxBytes {
+					err = process.ErrOutputLimit
+				}
+			} else {
+				data, err = process.Run(ctx, argv, cwd, env, maxBytes)
+			}
 			result := widgetResult{name: name, generation: generation, text: sanitizeWidgetText(string(data)), err: err}
 			select {
 			case runner.results <- result:
@@ -198,6 +214,9 @@ func (session *session) configuredStatusBar() StatusBar {
 	bar := StatusBar{Background: session.theme.styles["status"]}
 	makeWidget := func(name string) StatusWidget {
 		options := session.presentation.Status.Widgets[name]
+		if options.Plugin == "" && strings.Contains(name, "/") {
+			options.Plugin = name
+		}
 		return StatusWidgetFunc(func(c StatusContext) []Segment {
 			styleName := options.Style
 			if styleName == "" {
@@ -212,7 +231,7 @@ func (session *session) configuredStatusBar() StatusBar {
 			style := session.theme.styles[styleName]
 			value := ""
 			format := options.Format
-			if len(options.Command) != 0 {
+			if len(options.Command) != 0 || options.Plugin != "" {
 				if state := session.widgets.states[name]; state != nil {
 					value = state.text
 					if state.err {

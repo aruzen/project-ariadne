@@ -16,6 +16,7 @@ var promptCommandCatalog = []promptCommandInfo{
 	{Usage: "list [pane|window|workspace]", Summary: "open a resource list (default: window)"},
 	{Usage: "delete [pane|window|workspace] [ID]", Summary: "delete an inactive Pane or empty container"},
 	{Usage: "kill [PANE]", Summary: "stop a terminal and retain its Pane"},
+	{Usage: "plugin [ACTION ID ...]", Summary: "manage plugins; plugin run ID COMMAND [ARGS...]"},
 	{Usage: "help [COMMAND]", Summary: "show commands or one command's usage"},
 	{Usage: "command-prompt [INITIAL...]", Summary: "open the command prompt with optional initial text"},
 	{Usage: "command-palette", Summary: "open the command palette"},

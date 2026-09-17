@@ -35,6 +35,7 @@ Workspace commands:
   tool        Create or list tool panes
   attention   List or acknowledge attention events
   daemon      Inspect, stop, or run the daemon
+  plugin      Manage trusted local plugins and run their commands
 
 Global options:
   --socket PATH  Override the local IPC endpoint
@@ -44,6 +45,23 @@ Run 'ariadne help <command>' for command-specific help.
 `
 
 var helpPages = map[string]string{
+	"plugin": `Manage trusted local process/native plugins.
+
+Usage:
+  ariadne plugin list [--json]
+  ariadne plugin status [ID] [--json]
+  ariadne plugin install DIRECTORY
+  ariadne plugin update ID DIRECTORY
+  ariadne plugin uninstall ID [--purge]
+  ariadne plugin enable|disable|restart ID
+  ariadne plugin grant|revoke ID CAPABILITY [all|context|workspace:IDs|pane:IDs]
+  ariadne plugin [--json] run ID COMMAND [ARGS...]
+
+Install/update leaves plugins disabled. Approve each requested capability explicitly.
+Uninstall keeps ToolPanes, shared Tool state, and private data unless --purge is used.
+Native libraries run in the same executable's disposable helper process.
+Only trusted code should be installed; API grants do not sandbox OS access.
+`,
 	"init": `Create an Ariadne configuration template.
 
 Usage:
@@ -275,6 +293,9 @@ func HandleHelp(arguments []string, output io.Writer) (bool, error) {
 	}
 	if isHelpFlag(arguments[0]) {
 		return true, WriteHelp(nil, output)
+	}
+	if len(arguments) >= 2 && arguments[0] == "plugin" && (arguments[1] == "run" || len(arguments) >= 3 && arguments[1] == "--json" && arguments[2] == "run") {
+		return false, nil
 	}
 	for _, argument := range arguments[1:] {
 		if argument == "--" {

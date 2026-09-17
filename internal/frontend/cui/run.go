@@ -108,13 +108,15 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	operationCtx := lifetimeCtx
-	if command != "open" && command != "attach" && command != "tui" {
+	if command != "open" && command != "attach" && command != "tui" && command != "plugin" {
 		var cancelOperation context.CancelFunc
 		operationCtx, cancelOperation = context.WithTimeout(lifetimeCtx, commandTimeout)
 		defer cancelOperation()
 	}
 
 	switch command {
+	case "plugin":
+		return runPlugin(operationCtx, frontend, arguments[1:], stdout, stderr, fileConfiguration)
 	case "tui":
 		options, err := parseTUIOptions(arguments[1:], fileConfiguration.TUI, stderr)
 		if err != nil {
@@ -123,6 +125,7 @@ func Run(endpoint string, arguments []string, stdout, stderr io.Writer) error {
 		options.Shell = fileConfiguration.ShellCommand(options.Shell)
 		options.Editor = fileConfiguration.EditorCommand(options.Editor)
 		options.Clipboard = fileConfiguration.Clipboard
+		options.PluginLimits = fileConfiguration.Plugins
 		options.Keybindings = fileConfiguration.Keybindings.Normal
 		options.CopyKeys = fileConfiguration.Keybindings.Copy
 		options.PromptKeys = fileConfiguration.Keybindings.Prompt
@@ -185,7 +188,7 @@ func parseTUIOptions(arguments []string, defaults ariadneconfig.TUIOptions, stde
 
 func knownCommand(command string) bool {
 	switch command {
-	case "init", "tui", "new", "open", "attach", "list", "delete", "restart", "run", "kill", "dismiss", "stash", "restore", "tool", "attention", "daemon":
+	case "init", "tui", "new", "open", "attach", "list", "delete", "restart", "run", "kill", "dismiss", "stash", "restore", "tool", "attention", "daemon", "plugin":
 		return true
 	default:
 		return false
