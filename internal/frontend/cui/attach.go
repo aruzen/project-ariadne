@@ -80,7 +80,20 @@ func attachTerminal(ctx context.Context, frontend *client.Client, terminalID cor
 		return err
 	}
 	input := make(chan inputMessage, 16)
-	go readTerminalInput(os.Stdin, detach, input)
+	inputCtx, cancelInput := context.WithCancel(ctx)
+	inputDone := make(chan struct{})
+	go func() {
+		defer close(inputDone)
+		readTerminalInputTo(contextTerminalReader{inputCtx, os.Stdin}, detach, func(message inputMessage) bool {
+			select {
+			case input <- message:
+				return true
+			case <-inputCtx.Done():
+				return false
+			}
+		})
+	}()
+	defer func() { cancelInput(); <-inputDone }()
 	for {
 		select {
 		case message := <-input:
@@ -180,7 +193,19 @@ func parseKey(value string) (byte, error) {
 	return 0, fmt.Errorf("unsupported detach key %q", value)
 }
 
+type contextTerminalReader struct {
+	ctx  context.Context
+	file *os.File
+}
+
+func (r contextTerminalReader) Read(buffer []byte) (int, error) {
+	return platformterminal.ReadContext(r.ctx, r.file, buffer)
+}
+
 func readTerminalInput(reader io.Reader, detach []byte, output chan<- inputMessage) {
+	readTerminalInputTo(reader, detach, func(message inputMessage) bool { output <- message; return true })
+}
+func readTerminalInputTo(reader io.Reader, detach []byte, send func(inputMessage) bool) {
 	buffer := make([]byte, 4096)
 	filter := newTerminalInputFilter(detach)
 	for {
@@ -188,18 +213,22 @@ func readTerminalInput(reader io.Reader, detach []byte, output chan<- inputMessa
 		if count != 0 {
 			data, detached := filter.Feed(buffer[:count])
 			if len(data) != 0 {
-				output <- inputMessage{kind: inputData, data: data}
+				if !send(inputMessage{kind: inputData, data: data}) {
+					return
+				}
 			}
 			if detached {
-				output <- inputMessage{kind: inputDetach}
+				send(inputMessage{kind: inputDetach})
 				return
 			}
 		}
 		if err != nil {
 			if data := filter.Flush(); len(data) != 0 {
-				output <- inputMessage{kind: inputData, data: data}
+				if !send(inputMessage{kind: inputData, data: data}) {
+					return
+				}
 			}
-			output <- inputMessage{kind: inputFailure, err: err}
+			send(inputMessage{kind: inputFailure, err: err})
 			return
 		}
 	}
