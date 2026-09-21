@@ -219,7 +219,12 @@ func newWindowsE2ERuntime(t *testing.T) *windowsE2ERuntime {
 
 func windowsBuildBinary(t *testing.T, repository, output, packagePath string) {
 	t.Helper()
-	command := exec.Command("go", "build", "-race", "-o", output, packagePath)
+	arguments := []string{"build"}
+	if runtime.GOARCH == "amd64" {
+		arguments = append(arguments, "-race")
+	}
+	arguments = append(arguments, "-o", output, packagePath)
+	command := exec.Command("go", arguments...)
 	command.Dir = repository
 	if data, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("build %s: %v\n%s", packagePath, err, data)
