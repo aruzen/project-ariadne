@@ -30,6 +30,8 @@ jobs:
           - runner: windows-2025
             target: windows-amd64
             race: true
+            cc: zig cc
+            cxx: zig c++
           - runner: windows-11-arm
             target: windows-arm64
             race: false

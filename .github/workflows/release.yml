@@ -41,6 +41,8 @@ jobs:
             goarch: amd64
             race: true
             extension: .zip
+            cc: zig cc
+            cxx: zig c++
           - runner: windows-11-arm
             goos: windows
             goarch: arm64

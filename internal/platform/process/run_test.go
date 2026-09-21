@@ -25,8 +25,9 @@ func TestRunDirectArgvCWDAndOutputLimit(t *testing.T) {
 	dir := t.TempDir()
 	argv, env := helper(t, "cwd")
 	data, err := Run(context.Background(), argv, dir, env, 4096)
-	resolved, _ := filepath.EvalSymlinks(dir)
-	if err != nil || string(data) != resolved {
+	actualInfo, actualErr := os.Stat(string(data))
+	expectedInfo, expectedErr := os.Stat(dir)
+	if err != nil || actualErr != nil || expectedErr != nil || !os.SameFile(actualInfo, expectedInfo) {
 		t.Fatalf("data=%q err=%v", data, err)
 	}
 	argv, env = helper(t, "oversize")
