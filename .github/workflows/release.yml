@@ -70,6 +70,19 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
+      - name: Use x64 Zig on Windows ARM64
+        if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "zig-x86_64-windows-0.16.0.zip"
+          $directory = Join-Path $env:RUNNER_TEMP "zig-x86_64-windows-0.16.0"
+          Invoke-WebRequest -Uri "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip" -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e") {
+            throw "unexpected Zig archive checksum: $actual"
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $env:RUNNER_TEMP -Force
+          $directory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Build libghostty-vt
         run: go run ./tools/build-libghostty-vt -target ${{ matrix.goos }}-${{ matrix.goarch }}
       - name: Test with race detector
