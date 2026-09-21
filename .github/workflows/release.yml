@@ -43,7 +43,7 @@ jobs:
             extension: .zip
             cc: zig cc -target x86_64-windows-gnu
             cxx: zig c++ -target x86_64-windows-gnu
-            cgo_ldflags: -lapi-ms-win-core-synch-l1-2-0
+            cgo_ldflags: -L${{ github.workspace }}/build/windows-compat
           - runner: windows-11-arm
             goos: windows
             goarch: arm64
@@ -51,7 +51,6 @@ jobs:
             extension: .zip
             cc: zig cc -target aarch64-windows-gnu
             cxx: zig c++ -target aarch64-windows-gnu
-            cgo_ldflags: -lapi-ms-win-core-synch-l1-2-0
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
@@ -90,6 +89,12 @@ jobs:
           $directory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Build libghostty-vt
         run: go run ./tools/build-libghostty-vt -target ${{ matrix.goos }}-${{ matrix.goarch }}
+      - name: Prepare Windows race import library
+        if: matrix.goos == 'windows' && matrix.goarch == 'amd64'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/windows-compat | Out-Null
+          zig dlltool -m i386:x86-64 -d tools/windows/synchronization.def -l build/windows-compat/libsynchronization.a
       - name: Test with race detector
         if: matrix.race
         run: go test -race -shuffle=on ./...
