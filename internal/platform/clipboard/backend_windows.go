@@ -29,6 +29,7 @@ var (
 	procGlobalLock       = kernel32.NewProc("GlobalLock")
 	procGlobalUnlock     = kernel32.NewProc("GlobalUnlock")
 	procGlobalSize       = kernel32.NewProc("GlobalSize")
+	procRtlMoveMemory    = kernel32.NewProc("RtlMoveMemory")
 )
 
 type systemBackend struct{}
@@ -56,7 +57,8 @@ func (systemBackend) Read(ctx context.Context, maxBytes int) ([]byte, error) {
 		return nil, fmt.Errorf("clipboard: GlobalLock: %w", callErr)
 	}
 	defer procGlobalUnlock.Call(handle)
-	units := unsafe.Slice((*uint16)(unsafe.Pointer(pointer)), int(size/2))
+	units := make([]uint16, int(size/2))
+	procRtlMoveMemory.Call(uintptr(unsafe.Pointer(&units[0])), pointer, size)
 	end := 0
 	for end < len(units) && units[end] != 0 {
 		end++
@@ -98,7 +100,7 @@ func (systemBackend) Write(ctx context.Context, data []byte) error {
 	if pointer == 0 {
 		return fmt.Errorf("clipboard: GlobalLock: %w", callErr)
 	}
-	copy(unsafe.Slice((*uint16)(unsafe.Pointer(pointer)), len(units)), units)
+	procRtlMoveMemory.Call(pointer, uintptr(unsafe.Pointer(&units[0])), size)
 	procGlobalUnlock.Call(handle)
 	if result, _, callErr := procSetClipboardData.Call(cfUnicodeText, handle); result == 0 {
 		return fmt.Errorf("clipboard: SetClipboardData: %w", callErr)
