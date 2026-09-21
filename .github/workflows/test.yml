@@ -32,7 +32,7 @@ jobs:
             race: true
             cc: zig cc -target x86_64-windows-gnu
             cxx: zig c++ -target x86_64-windows-gnu
-            cgo_ldflags: -Lbuild/windows-compat -lsynchronization
+            cgo_ldflags: -Lbuild/windows-compat -lsynchronization -Wl,--no-dynamicbase
           - runner: windows-11-arm
             target: windows-arm64
             race: false
@@ -43,7 +43,6 @@ jobs:
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
-      CGO_LDFLAGS: ${{ matrix.cgo_ldflags }}
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -77,6 +76,8 @@ jobs:
           zig dlltool -m i386:x86-64 -d tools/windows/synchronization.def -l build/windows-compat/libsynchronization.a
       - name: Race tests
         if: matrix.race
+        env:
+          CGO_LDFLAGS: ${{ matrix.cgo_ldflags }}
         run: go test -race -shuffle=on ./...
       - name: Tests
         if: ${{ !matrix.race }}
@@ -87,6 +88,7 @@ jobs:
         if: matrix.race
         env:
           ARIADNE_RUN_E2E: "1"
+          CGO_LDFLAGS: ${{ matrix.cgo_ldflags }}
         run: go test -race -count=1 -v ./integration
       - name: Real daemon and PTY E2E
         if: ${{ !matrix.race }}

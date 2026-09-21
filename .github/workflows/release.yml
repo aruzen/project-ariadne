@@ -43,7 +43,7 @@ jobs:
             extension: .zip
             cc: zig cc -target x86_64-windows-gnu
             cxx: zig c++ -target x86_64-windows-gnu
-            cgo_ldflags: -Lbuild/windows-compat -lsynchronization
+            cgo_ldflags: -Lbuild/windows-compat -lsynchronization -Wl,--no-dynamicbase
           - runner: windows-11-arm
             goos: windows
             goarch: arm64
@@ -60,7 +60,6 @@ jobs:
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
-      CGO_LDFLAGS: ${{ matrix.cgo_ldflags }}
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
       ARIADNE_RUN_E2E: "1"
     steps:
@@ -97,6 +96,8 @@ jobs:
           zig dlltool -m i386:x86-64 -d tools/windows/synchronization.def -l build/windows-compat/libsynchronization.a
       - name: Test with race detector
         if: matrix.race
+        env:
+          CGO_LDFLAGS: ${{ matrix.cgo_ldflags }}
         run: go test -race -shuffle=on ./...
       - name: Test
         if: ${{ !matrix.race }}

@@ -30,7 +30,8 @@ import (
 
 const (
 	commandTimeout = 15 * time.Second
-	readyTimeout   = 3 * time.Second
+	readyTimeout   = 10 * time.Second
+	dialTimeout    = 100 * time.Millisecond
 )
 
 // Run executes the command-line frontend against endpoint with explicitly supplied I/O.
@@ -684,28 +685,40 @@ func runDaemon(ctx context.Context, frontend *client.Client, arguments []string,
 }
 
 func connect(ctx context.Context, socketPath string, autoStart bool) (net.Conn, error) {
-	connection, err := localipc.DialContext(ctx, socketPath)
-	if err == nil || !autoStart || !isDaemonAbsent(err) {
+	connection, err := dialOnce(ctx, socketPath)
+	if err == nil || !autoStart {
 		return connection, err
 	}
-	if err := startDaemon(socketPath); err != nil {
+	if isDaemonAbsent(err) {
+		if err := startDaemon(socketPath); err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(err, context.DeadlineExceeded) {
 		return nil, err
 	}
 	deadline := time.Now().Add(readyTimeout)
-	var lastErr error
+	lastErr := err
 	for time.Now().Before(deadline) {
-		attemptCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-		connection, lastErr = localipc.DialContext(attemptCtx, socketPath)
-		cancel()
+		connection, lastErr = dialOnce(ctx, socketPath)
 		if lastErr == nil {
 			return connection, nil
 		}
-		if !isDaemonAbsent(lastErr) {
+		if !isDaemonAbsent(lastErr) && !errors.Is(lastErr, context.DeadlineExceeded) {
 			return nil, lastErr
 		}
-		time.Sleep(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
 	return nil, fmt.Errorf("daemon did not become ready: %w", lastErr)
+}
+
+func dialOnce(ctx context.Context, socketPath string) (net.Conn, error) {
+	attemptCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+	return localipc.DialContext(attemptCtx, socketPath)
 }
 
 func startDaemon(socketPath string) error {
