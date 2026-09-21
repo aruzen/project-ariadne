@@ -41,15 +41,17 @@ jobs:
             goarch: amd64
             race: true
             extension: .zip
-            cc: zig cc
-            cxx: zig c++
+            cc: zig cc -target x86_64-windows-gnu
+            cxx: zig c++ -target x86_64-windows-gnu
+            cgo_ldflags: -lapi-ms-win-core-synch-l1-2-0
           - runner: windows-11-arm
             goos: windows
             goarch: arm64
             race: false
             extension: .zip
-            cc: zig cc
-            cxx: zig c++
+            cc: zig cc -target aarch64-windows-gnu
+            cxx: zig c++ -target aarch64-windows-gnu
+            cgo_ldflags: -lapi-ms-win-core-synch-l1-2-0
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
@@ -59,6 +61,7 @@ jobs:
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
+      CGO_LDFLAGS: ${{ matrix.cgo_ldflags }}
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
       ARIADNE_RUN_E2E: "1"
     steps:

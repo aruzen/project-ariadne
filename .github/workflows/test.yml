@@ -30,18 +30,21 @@ jobs:
           - runner: windows-2025
             target: windows-amd64
             race: true
-            cc: zig cc
-            cxx: zig c++
+            cc: zig cc -target x86_64-windows-gnu
+            cxx: zig c++ -target x86_64-windows-gnu
+            cgo_ldflags: -lapi-ms-win-core-synch-l1-2-0
           - runner: windows-11-arm
             target: windows-arm64
             race: false
-            cc: zig cc
-            cxx: zig c++
+            cc: zig cc -target aarch64-windows-gnu
+            cxx: zig c++ -target aarch64-windows-gnu
+            cgo_ldflags: -lapi-ms-win-core-synch-l1-2-0
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
+      CGO_LDFLAGS: ${{ matrix.cgo_ldflags }}
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
