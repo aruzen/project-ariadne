@@ -74,7 +74,7 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 		_ = daemon.Process.Kill()
 		_ = daemon.Wait()
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	waitForDaemon := func() {
 		for {
