@@ -386,13 +386,27 @@ func (p *Peer) handleMessage(m Message) {
 		return
 	}
 	response := Message{ID: m.ID}
+	var deferred interface {
+		rpcResult() any
+		rpcAfterResponse(error)
+	}
 	if err != nil {
 		response.Error = &RPCError{Code: -32000, Message: err.Error()}
 	} else {
+		if value, ok := result.(interface {
+			rpcResult() any
+			rpcAfterResponse(error)
+		}); ok {
+			deferred = value
+			result = value.rpcResult()
+		}
 		response.Result, _ = json.Marshal(result)
 		if len(response.Result) == 0 {
 			response.Result = json.RawMessage("null")
 		}
 	}
-	_ = p.send(response)
+	sendErr := p.send(response)
+	if deferred != nil {
+		deferred.rpcAfterResponse(sendErr)
+	}
 }

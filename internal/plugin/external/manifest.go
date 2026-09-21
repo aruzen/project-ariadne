@@ -141,7 +141,7 @@ func ValidateGrant(g v1.Grant) error {
 	default:
 		return errors.New("plugin: unknown scope")
 	}
-	if (g.Capability == v1.ClipboardRead || g.Capability == v1.ClipboardWrite || g.Capability == v1.FrontendInteract) && g.Scope.Kind != "all" {
+	if (g.Capability == v1.ClipboardRead || g.Capability == v1.ClipboardWrite || g.Capability == v1.FrontendInteract || g.Capability == v1.FrontendEditor) && g.Scope.Kind != "all" {
 		return errors.New("plugin: global capability requires all scope")
 	}
 	return nil

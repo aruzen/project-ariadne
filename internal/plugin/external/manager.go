@@ -46,10 +46,10 @@ type Manager struct {
 	commands      map[uint64]bool
 	views         map[string]viewRecord
 	contexts      map[string]invocation
+	interactions  map[string]interactionSession
 }
 type viewRecord struct {
 	hostID        string
-	closed        bool
 	frontend      uint64
 	pane          uint64
 	generation    uint64
@@ -63,6 +63,25 @@ type invocation struct {
 	generation  uint64
 	ctx         context.Context
 	cancel      context.CancelFunc
+	origin      invocationOrigin
+	view        string
+}
+type invocationOrigin uint8
+
+const (
+	invocationOther invocationOrigin = iota
+	invocationCommand
+	invocationInput
+	invocationRender
+	invocationWidget
+)
+
+type interactionSession struct {
+	plugin               string
+	id                   string
+	generation, frontend uint64
+	view                 string
+	cancel               context.CancelFunc
 }
 
 func NewManager(parent context.Context, engine *core.Core, root string, configuration Config, operations Operations) (*Manager, error) {
@@ -88,7 +107,7 @@ func NewManagerDeferred(parent context.Context, engine *core.Core, root string, 
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	m := &Manager{ctx: ctx, cancel: cancel, engine: engine, operations: operations, root: root, config: c, sessions: map[string]*session{}, failures: map[string]string{}, commands: map[uint64]bool{}, views: map[string]viewRecord{}, contexts: map[string]invocation{}}
+	m := &Manager{ctx: ctx, cancel: cancel, engine: engine, operations: operations, root: root, config: c, sessions: map[string]*session{}, failures: map[string]string{}, commands: map[uint64]bool{}, views: map[string]viewRecord{}, contexts: map[string]invocation{}, interactions: map[string]interactionSession{}}
 	m.reserved = map[string]bool{}
 	if provider, ok := operations.(interface{ ReservedPluginIDs() []string }); ok {
 		for _, id := range provider.ReservedPluginIDs() {
@@ -167,7 +186,7 @@ func (m *Manager) Manage(ctx context.Context, frontend uint64, request v1.Manage
 		return v1.ManageResult{}, nil
 	case "run":
 		return m.runCommand(ctx, frontend, request)
-	case "render", "input", "view.close":
+	case "view.open", "render", "input", "view.close":
 		return m.view(ctx, frontend, request)
 	case "widget":
 		return m.widget(ctx, frontend, request)
@@ -365,21 +384,19 @@ func (m *Manager) stop(id string, cause error) {
 			delete(m.contexts, token)
 		}
 	}
-	for key, v := range m.views {
-		if v.plugin == id {
-			delete(m.views, key)
-		}
-	}
+	m.cancelInteractionsLocked(func(interaction interactionSession) bool { return interaction.plugin == id })
+	// Views belong to frontends and survive a runtime restart. Closing a view
+	// or detaching its frontend releases it independently of plugin processes.
 	m.mu.Unlock()
 	if s != nil {
 		s.shutdown(cause)
 	}
 }
 func (m *Manager) failed(s *session, err error) {
+	m.mu.Lock()
 	s.active.Store(false)
 	s.apiCancel()
 	s.cancel()
-	m.mu.Lock()
 	if m.sessions[s.id] == s {
 		m.failures[s.id] = err.Error()
 		for token, c := range m.contexts {
@@ -388,11 +405,18 @@ func (m *Manager) failed(s *session, err error) {
 				delete(m.contexts, token)
 			}
 		}
+		m.cancelInteractionsLocked(func(interaction interactionSession) bool {
+			return interaction.plugin == s.id && interaction.generation == s.generation
+		})
 	}
 	m.mu.Unlock()
 	s.cleanupSources()
 }
 func (m *Manager) capture(ctx context.Context, s *session, frontend, pane uint64) (v1.Context, error) {
+	return m.captureInvocation(ctx, s, frontend, pane, invocationOther, "")
+}
+
+func (m *Manager) captureInvocation(ctx context.Context, s *session, frontend, pane uint64, origin invocationOrigin, view string) (v1.Context, error) {
 	f, err := m.engine.FrontendState(ctx, core.FrontendID(frontend))
 	if err != nil {
 		return v1.Context{}, err
@@ -447,8 +471,18 @@ func (m *Manager) capture(ctx context.Context, s *session, frontend, pane uint64
 		return c, ErrOverflow
 	}
 	invocationCtx, invocationCancel := context.WithCancel(ctx)
-	m.contexts[c.Token] = invocation{&atomic.Int64{}, c, s.id, s.generation, invocationCtx, invocationCancel}
+	m.contexts[c.Token] = invocation{interaction: &atomic.Int64{}, context: c, plugin: s.id, generation: s.generation, ctx: invocationCtx, cancel: invocationCancel, origin: origin, view: view}
 	return c, nil
+}
+
+func (m *Manager) invocationSource(s *session, token string) (invocationOrigin, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	invocation, ok := m.contexts[token]
+	if !ok || invocation.plugin != s.id || invocation.generation != s.generation {
+		return invocationOther, ""
+	}
+	return invocation.origin, invocation.view
 }
 func (m *Manager) releaseContext(token string) {
 	m.mu.Lock()
@@ -506,6 +540,7 @@ func (m *Manager) Detach(frontend uint64) {
 			delete(m.views, key)
 		}
 	}
+	m.cancelInteractionsLocked(func(interaction interactionSession) bool { return interaction.frontend == frontend })
 	m.mu.Unlock()
 	for _, sub := range subscriptions {
 		sub.runtime.unsubscribe(sub.token)

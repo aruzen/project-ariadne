@@ -301,11 +301,15 @@ func FuzzParse(f *testing.F) {
 }
 
 func TestPluginLimitsAndStatusWidgetConfiguration(t *testing.T) {
-	c, err := Parse([]byte("[plugins]\ncommand_ms=1234\ncontrol_queue=7\n[tui.status]\nright=[\"example/status\"]\n"))
-	if err != nil || c.Plugins.CommandMS != 1234 || c.Plugins.ControlQueue != 7 || c.Plugins.MessageBytes != 8<<20 {
+	c, err := Parse([]byte("[plugins]\nmax_views=21\nmax_interactions=3\ncommand_ms=1234\ncontrol_queue=7\n[tui.status]\nright=[\"example/status\"]\n"))
+	if err != nil || c.Plugins.MaxViews != 21 || c.Plugins.MaxInteractions != 3 || c.Plugins.CommandMS != 1234 || c.Plugins.ControlQueue != 7 || c.Plugins.MessageBytes != 8<<20 {
 		t.Fatal("plugin configuration", err, c.Plugins)
 	}
 	for _, data := range []string{
+		"[plugins]\nmax_views=-1\n",
+		"[plugins]\nmax_views=65537\n",
+		"[plugins]\nmax_interactions=-1\n",
+		"[plugins]\nmax_interactions=1025\n",
 		"[plugins]\napi_ms=-1\n",
 		"[plugins]\ncommand_ms=9223372036854775807\n",
 		"[tui.status.widgets.clock]\nplugin=\"example/status\"\n",

@@ -684,3 +684,38 @@ func TestLabelRejectsMissingTarget(t *testing.T) {
 		t.Fatalf("missing target error = %v", err)
 	}
 }
+
+func TestSnapshotValidatorRejectsMutationAtomically(t *testing.T) {
+	rejected := errors.New("persistent snapshot too large")
+	engine, err := New(Config{EventQueueCapacity: 8, SnapshotValidator: func(snapshot Snapshot) error {
+		if len(snapshot.Panes) != 0 {
+			return rejected
+		}
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	before, subscription, err := engine.Subscribe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	_, err = engine.Execute(context.Background(), CreatePaneCommand{WindowID: 1, Pane: PaneSpec{Kind: PaneTool}})
+	if !errors.Is(err, rejected) {
+		t.Fatalf("validator error = %v", err)
+	}
+	after, err := engine.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision || len(after.Panes) != 0 {
+		t.Fatalf("rejected mutation leaked: %+v", after)
+	}
+	select {
+	case event := <-subscription.Events():
+		t.Fatalf("rejected mutation published event: %+v", event)
+	default:
+	}
+}

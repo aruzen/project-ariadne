@@ -17,6 +17,7 @@ Usage:
 Getting started:
   tui         Open the full-screen terminal interface
   init        Create a commented configuration template
+  version     Show build version and provenance metadata
 
 Terminal commands:
   new         Create a terminal without attaching
@@ -40,11 +41,18 @@ Workspace commands:
 Global options:
   --socket PATH  Override the local IPC endpoint
   -h, --help     Show help
+  --version      Show version
 
 Run 'ariadne help <command>' for command-specific help.
 `
 
 var helpPages = map[string]string{
+	"version": `Show Ariadne build metadata.
+
+Usage:
+  ariadne version
+  ariadne --version
+`,
 	"plugin": `Manage trusted local process/native plugins.
 
 Usage:

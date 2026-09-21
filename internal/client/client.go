@@ -14,6 +14,7 @@ import (
 	"github.com/aruzen/ariadne/internal/core"
 	"github.com/aruzen/ariadne/internal/protocol"
 	"github.com/aruzen/streammux"
+	"github.com/aruzen/streammux/pty"
 )
 
 type Config struct {
@@ -30,6 +31,8 @@ func DefaultConfig() Config {
 }
 
 type Client struct {
+	ptyMu             sync.Mutex
+	ptyClients        map[pty.MessageTypes]*PTYClient
 	peer              *streammux.Peer
 	cancel            context.CancelFunc
 	serveDone         chan error

@@ -31,7 +31,7 @@ type Store struct {
 	closing    bool
 	dirty      bool
 	generation uint64
-	latest     []byte
+	latest     core.Snapshot
 	closeErr   error
 }
 
@@ -64,19 +64,16 @@ func (store *Store) Schedule(snapshot core.Snapshot) error {
 	if closing {
 		return ErrClosed
 	}
-	data, err := Encode(snapshot)
+	cloned, err := core.CloneSnapshot(snapshot)
 	if err != nil {
-		return err
-	}
-	if int64(len(data)) > store.options.MaxBytes {
-		return fmt.Errorf("%w: encoded state is %d bytes", ErrTooLarge, len(data))
+		return fmt.Errorf("%w: %w", ErrInvalidData, err)
 	}
 	store.mu.Lock()
 	if store.closing {
 		store.mu.Unlock()
 		return ErrClosed
 	}
-	store.latest = data
+	store.latest = cloned
 	store.dirty = true
 	store.generation++
 	store.mu.Unlock()
@@ -200,12 +197,18 @@ func (store *Store) writeLatest() error {
 		store.mu.Unlock()
 		return nil
 	}
-	data := store.latest
+	snapshot := store.latest
 	generation := store.generation
 	store.dirty = false
 	store.mu.Unlock()
 
-	err := store.write(store.path, data)
+	data, err := Encode(snapshot)
+	if err == nil && int64(len(data)) > store.options.MaxBytes {
+		err = fmt.Errorf("%w: encoded state is %d bytes", ErrTooLarge, len(data))
+	}
+	if err == nil {
+		err = store.write(store.path, data)
+	}
 	if err == nil {
 		return nil
 	}

@@ -36,6 +36,8 @@ var pendingMu sync.Mutex
 var pending = map[uint64]chan message{}
 var next atomic.Uint64
 var inputs atomic.Uint64
+var completedInteractions atomic.Uint64
+var pendingInteractions sync.Map
 
 func send(m message) error {
 	m.JSONRPC = "2.0"
@@ -129,6 +131,13 @@ func handle(m message) (any, error) {
 		}
 		return nil, errors.New("unknown command")
 	case "widget":
+		var widget v1.Widget
+		if err := json.Unmarshal(m.Params, &widget); err != nil {
+			return nil, err
+		}
+		if widget.Name == "interaction-count" {
+			return v1.WidgetResult{Text: fmt.Sprintf("interaction:%d", completedInteractions.Load())}, nil
+		}
 		return v1.WidgetResult{Text: fmt.Sprintf("input:%d", inputs.Load())}, nil
 	case "view.render":
 		var v v1.View
@@ -155,6 +164,30 @@ func handle(m message) (any, error) {
 		return frame, nil
 	case "view.input":
 		inputs.Add(1)
+		var input v1.Input
+		if err := json.Unmarshal(m.Params, &input); err != nil {
+			return nil, err
+		}
+		if text := string(input.Data); text == "interact" || text == "cancel-view" {
+			data, err := call("frontend.interact", v1.APIRequest{Context: input.View.Context.Token, Params: raw(v1.Interaction{Kind: "prompt", Message: text})})
+			if err != nil {
+				return nil, err
+			}
+			var started v1.InteractionStarted
+			if err := json.Unmarshal(data, &started); err != nil || started.ID == "" {
+				return nil, errors.New("invalid asynchronous interaction response")
+			}
+			pendingInteractions.Store(started.ID, true)
+		}
+		return nil, nil
+	case "interaction.result":
+		var completed v1.InteractionCompleted
+		if err := json.Unmarshal(m.Params, &completed); err != nil {
+			return nil, err
+		}
+		if _, found := pendingInteractions.LoadAndDelete(completed.ID); found {
+			completedInteractions.Add(1)
+		}
 		return nil, nil
 	case "event", "terminal.event", "view.close", "cancel", "shutdown":
 		return nil, nil

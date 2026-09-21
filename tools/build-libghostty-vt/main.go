@@ -117,8 +117,12 @@ func resolveTarget(name string) (target, error) {
 		return target{name: name, zig: "x86_64-macos", archive: "libghostty-vt.a"}, nil
 	case "linux-amd64":
 		return target{name: name, zig: "x86_64-linux-gnu", archive: "libghostty-vt.a"}, nil
+	case "linux-arm64":
+		return target{name: name, zig: "aarch64-linux-gnu", archive: "libghostty-vt.a"}, nil
 	case "windows-amd64":
 		return target{name: name, zig: "x86_64-windows-gnu", archive: "ghostty-vt-static.lib"}, nil
+	case "windows-arm64":
+		return target{name: name, zig: "aarch64-windows-gnu", archive: "ghostty-vt-static.lib"}, nil
 	default:
 		return target{}, fmt.Errorf("unsupported target %q", name)
 	}

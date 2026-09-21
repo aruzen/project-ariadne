@@ -124,6 +124,19 @@ func TestPTYAttachReplayInputResizeAndDetach(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterPTY: %v", err)
 	}
+	// Sequential editors and concurrent frontend features share one protocol.
+	var registrations sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		registrations.Add(1)
+		go func() {
+			defer registrations.Done()
+			reused, err := RegisterPTY(frontend, testPTYMessageTypes())
+			if err != nil || reused != ptyClient {
+				t.Errorf("RegisterPTY reuse: client=%p want=%p err=%v", reused, ptyClient, err)
+			}
+		}()
+	}
+	registrations.Wait()
 	attachment, _, err := ptyClient.Attach(ctx, session.ID(), pty.ReplayHistory)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)

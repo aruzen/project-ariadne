@@ -136,6 +136,8 @@ type session struct {
 	pluginDialogues      chan pluginDialogue
 	pluginStatus         v1.ManageResult
 	pluginManaging       bool
+	pendingCommands      []string
+	commandPending       bool
 	activePluginDialogue *pluginDialogue
 	pluginEditor         *editorPreview
 }

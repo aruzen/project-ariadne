@@ -1,12 +1,15 @@
 .idea/**
 /build/
+/dist/
 *.md
+!README.md
 !実装計画.md
 
 /examples/plugins/process/plugin-process*
 /examples/plugins/native/plugin.dll
 /examples/plugins/native/plugin.so
 /examples/plugins/native/plugin.dylib
+/official-plugin/
 !/docs/*.md
 !/examples/plugins/README.md
 !/examples/plugins/process/README.md

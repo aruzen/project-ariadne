@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	v1 "github.com/aruzen/ariadne/api/plugin/v1"
+	"github.com/aruzen/ariadne/internal/core"
 	"github.com/rivo/uniseg"
 )
 
@@ -64,12 +65,15 @@ func (m *Manager) view(ctx context.Context, frontend uint64, request v1.ManageRe
 	if request.Action == "view.close" {
 		m.mu.Lock()
 		record, ok := m.views[key]
-		if ok && record.frontend == frontend && record.plugin == request.ID && !record.closed && v.Generation >= record.generation {
-			record.closed = true
-			m.views[key] = record
+		closed := ok && record.frontend == frontend && record.plugin == request.ID && v.Generation >= record.generation
+		if closed {
+			delete(m.views, key)
+			m.cancelInteractionsLocked(func(interaction interactionSession) bool {
+				return interaction.plugin == record.plugin && interaction.frontend == frontend && interaction.view == key
+			})
 		}
 		m.mu.Unlock()
-		if ok && record.frontend == frontend && record.plugin == request.ID && record.closed && v.Generation >= record.generation {
+		if closed {
 			if s, err := m.get(request.ID); err == nil {
 				_ = s.peer.Notify("view.close", map[string]any{"view_id": record.hostID, "generation": v.Generation})
 			}
@@ -109,13 +113,24 @@ func (m *Manager) view(ctx context.Context, frontend uint64, request v1.ManageRe
 	if !found {
 		return v1.ManageResult{}, ErrPermission
 	}
+	if _, err := m.engine.FrontendState(ctx, core.FrontendID(frontend)); err != nil {
+		return v1.ManageResult{}, err
+	}
 	m.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		m.mu.Unlock()
+		return v1.ManageResult{}, err
+	}
 	old, ok := m.views[key]
-	if ok && (old.closed || old.plugin != s.id || old.pane != v.PaneID || v.Generation < old.generation || (old.generation == v.Generation && (old.width != v.Width || old.height != v.Height))) {
+	if !ok && request.Action != "view.open" {
 		m.mu.Unlock()
 		return v1.ManageResult{}, ErrUnavailable
 	}
-	if len(m.views) >= 4096 && !ok {
+	if ok && (old.plugin != s.id || old.pane != v.PaneID || v.Generation < old.generation || (old.generation == v.Generation && (old.width != v.Width || old.height != v.Height))) {
+		m.mu.Unlock()
+		return v1.ManageResult{}, ErrUnavailable
+	}
+	if len(m.views) >= m.config.MaxViews && !ok {
 		m.mu.Unlock()
 		return v1.ManageResult{}, ErrOverflow
 	}
@@ -123,10 +138,17 @@ func (m *Manager) view(ctx context.Context, frontend uint64, request v1.ManageRe
 	if !ok {
 		hostID = randomID()
 	}
-	m.views[key] = viewRecord{hostID, false, frontend, v.PaneID, v.Generation, s.id, v.Width, v.Height}
+	m.views[key] = viewRecord{hostID: hostID, frontend: frontend, pane: v.PaneID, generation: v.Generation, plugin: s.id, width: v.Width, height: v.Height}
 	v.ID = hostID
 	m.mu.Unlock()
-	c, err := m.capture(ctx, s, frontend, v.PaneID)
+	if request.Action == "view.open" {
+		return v1.ManageResult{}, nil
+	}
+	origin := invocationRender
+	if request.Action == "input" {
+		origin = invocationInput
+	}
+	c, err := m.captureInvocation(ctx, s, frontend, v.PaneID, origin, key)
 	if err != nil {
 		return v1.ManageResult{}, err
 	}
@@ -148,7 +170,7 @@ func (m *Manager) view(ctx context.Context, frontend uint64, request v1.ManageRe
 	m.mu.Lock()
 	current, ok := m.views[key]
 	m.mu.Unlock()
-	if !ok || current.closed || current.generation != v.Generation || current.plugin != s.id || !s.active.Load() {
+	if !ok || current.hostID != hostID || current.generation != v.Generation || current.plugin != s.id || !s.active.Load() {
 		return v1.ManageResult{}, ErrUnavailable
 	}
 	if err := validFrame(frame, v); err != nil {

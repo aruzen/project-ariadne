@@ -50,6 +50,21 @@ func TestRunHelpFormsDoNotResolveIPC(t *testing.T) {
 	}
 }
 
+func TestRunVersionFormsDoNotResolveIPC(t *testing.T) {
+	for _, arguments := range [][]string{{"--version"}, {"version"}} {
+		t.Run(strings.Join(arguments, "_"), func(t *testing.T) {
+			t.Setenv("XDG_RUNTIME_DIR", "relative-path")
+			var stdout, stderr bytes.Buffer
+			if err := Run(arguments, &stdout, &stderr); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(stdout.String(), "ariadne ") || stderr.Len() != 0 {
+				t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
 func TestRunUnknownGlobalOptionSuggestsHelp(t *testing.T) {
 	var output bytes.Buffer
 	err := Run([]string{"--unknown"}, &output, &output)

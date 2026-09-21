@@ -4,6 +4,11 @@ INSTALL_DIR ?= $(HOME)/app
 GOOS := $(shell go env GOOS)
 GOARCH := $(shell go env GOARCH)
 TARGET := $(GOOS)-$(GOARCH)
+VERSION ?= dev
+COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+BUILD_DATE ?= unknown
+VERSION_PACKAGE := github.com/aruzen/ariadne/internal/version
+LDFLAGS := -X $(VERSION_PACKAGE).Version=$(VERSION) -X $(VERSION_PACKAGE).Commit=$(COMMIT) -X $(VERSION_PACKAGE).Date=$(BUILD_DATE)
 
 ifeq ($(GOOS),windows)
 GHOSTTY_ARCHIVE := ghostty-vt-static.lib
@@ -22,7 +27,7 @@ all: build
 build: $(BINARY)
 
 $(BINARY): $(GHOSTTY_LIB) $(GO_SOURCES)
-	go build -o $@ ./cmd/ariadne
+	go build -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/ariadne
 
 libghostty: $(GHOSTTY_LIB)
 

@@ -13,6 +13,7 @@ import (
 	"github.com/aruzen/ariadne/internal/platform/localipc"
 	"github.com/aruzen/ariadne/internal/plugin/external"
 	"github.com/aruzen/ariadne/internal/plugin/native"
+	"github.com/aruzen/ariadne/internal/version"
 )
 
 // Run dispatches to either the frontend or the foreground daemon role.
@@ -31,14 +32,20 @@ func Run(arguments []string, stdout, stderr io.Writer) error {
 	global.SetOutput(io.Discard)
 	endpoint := global.String("socket", "", "local IPC endpoint")
 	showHelp := false
+	showVersion := false
 	global.BoolVar(&showHelp, "help", false, "show help")
 	global.BoolVar(&showHelp, "h", false, "show help")
+	global.BoolVar(&showVersion, "version", false, "show version")
 	if err := global.Parse(arguments); err != nil {
 		return fmt.Errorf("%w; run 'ariadne --help' for usage", err)
 	}
 	remaining := global.Args()
 	if showHelp {
 		return cui.WriteHelp(remaining, stdout)
+	}
+	if showVersion || len(remaining) == 1 && remaining[0] == "version" {
+		_, err := fmt.Fprintln(stdout, version.String())
+		return err
 	}
 	if handled, err := cui.HandleHelp(remaining, stdout); handled {
 		return err

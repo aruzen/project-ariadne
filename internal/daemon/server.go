@@ -91,6 +91,15 @@ func Open(parent context.Context, factory pty.ManagedFactory, configuration Conf
 	if err != nil {
 		return nil, statefile.LoadResult{}, err
 	}
+	coreValidator := configuration.Core.SnapshotValidator
+	configuration.Core.SnapshotValidator = func(snapshot core.Snapshot) error {
+		if coreValidator != nil {
+			if err := coreValidator(snapshot); err != nil {
+				return err
+			}
+		}
+		return statefile.ValidateSize(snapshot, configuration.State.MaxBytes)
+	}
 	engine, err := core.NewFromSnapshot(configuration.Core, loaded.Snapshot)
 	if err != nil {
 		return nil, loaded, err

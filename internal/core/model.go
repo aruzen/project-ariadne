@@ -506,6 +506,27 @@ func stateFromSnapshot(snapshot Snapshot) (*state, error) {
 	return s, nil
 }
 
+// CloneSnapshot returns a validated deep copy suitable for handing ownership
+// to an asynchronous boundary such as persistence.
+func CloneSnapshot(snapshot Snapshot) (Snapshot, error) {
+	state, err := stateFromSnapshot(snapshot)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return state.snapshot(), nil
+}
+
+func cloneState(source *state) (*state, error) {
+	cloned, err := stateFromSnapshot(source.snapshot())
+	if err != nil {
+		return nil, err
+	}
+	// Attention IDs are runtime-only, but a transaction clone must preserve
+	// the allocator even when the greatest prior ID has already been evicted.
+	cloned.nextAttentionID = source.nextAttentionID
+	return cloned, nil
+}
+
 func maxKey[K ~uint64, V any](values map[K]V) uint64 {
 	var maximum uint64
 	for key := range values {

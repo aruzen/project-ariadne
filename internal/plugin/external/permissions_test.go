@@ -188,6 +188,9 @@ func TestReadAndEventProjectionCannotLeakOtherPanes(t *testing.T) {
 	if err := ValidateGrant(v1.Grant{Capability: v1.ClipboardRead, Scope: v1.Scope{Kind: "pane", IDs: []uint64{1}}}); err == nil {
 		t.Fatal("global clipboard resource scope accepted")
 	}
+	if err := ValidateGrant(v1.Grant{Capability: v1.FrontendEditor, Scope: v1.Scope{Kind: "pane", IDs: []uint64{1}}}); err == nil {
+		t.Fatal("global editor resource scope accepted")
+	}
 }
 func TestRevokeInvalidatesOldGeneration(t *testing.T) {
 	t.Setenv("ARIADNE_PLUGIN_TEST_PROCESS", "1")
@@ -297,5 +300,30 @@ func TestContextSubscriptionsExpireAndDetachDoesNotRetainTokens(t *testing.T) {
 	}
 	if _, err := invoke(s, "core.subscribe", captured.Token, map[string]any{}); !errors.Is(err, ErrPermission) {
 		t.Fatal("detached subscription revived", err)
+	}
+}
+
+func TestAttentionEvictionNotifiesScopeOfRemovedEntry(t *testing.T) {
+	s, engine, _ := brokerSession(t)
+	first, err := engine.Execute(context.Background(), core.CreatePaneCommand{WindowID: 1, Pane: core.PaneSpec{Kind: core.PaneTool}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := engine.Execute(context.Background(), core.SplitPaneCommand{TargetPaneID: first.(core.CreatePaneResult).Pane.ID, Direction: core.SplitVertical, Pane: core.PaneSpec{Kind: core.PaneTool}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := first.(core.CreatePaneResult).Pane.ID
+	two := second.(core.CreatePaneResult).Pane.ID
+	s.manifest.Capabilities = append(s.manifest.Capabilities, v1.CoreEvents)
+	s.grants = []v1.Grant{{Capability: v1.CoreEvents, Scope: v1.Scope{Kind: "pane", IDs: []uint64{uint64(one)}}}}
+	before, _ := engine.Snapshot(context.Background())
+	removed := core.Attention{ID: 1, PaneID: one, Source: "source", Key: "old"}
+	added := core.Attention{ID: 2, PaneID: two, Source: "source", Key: "new"}
+	after := before
+	after.Attentions = []core.Attention{added}
+	event := core.Event{Kind: core.EventAttentionRaised, Payload: core.AttentionEvent{Attention: added, Removed: []core.Attention{removed}}}
+	if !s.eventVisible(event, before, after) {
+		t.Fatal("removal inside scope was hidden by addition outside scope")
 	}
 }

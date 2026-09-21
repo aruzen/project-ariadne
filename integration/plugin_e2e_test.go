@@ -133,6 +133,7 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 		t.Fatal("authorized Core projection", err)
 	}
 	run("plugin", "grant", "example-process", "frontend.interact", "all")
+	run("plugin", "grant", "example-process", "frontend.editor", "all")
 	headless := exec.CommandContext(ctx, binary, "--socket", endpoint, "plugin", "run", "example-process", "prompt")
 	headless.Env = environment
 	if data, err := headless.CombinedOutput(); err == nil || !strings.Contains(string(data), "headless") {
@@ -163,7 +164,15 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 	}()
 	// This command requests an editor, while its frontend makes other daemon
 	// requests on the same stream. Real PTY and transient cleanup are exercised.
+	toolInteractionEntered := make(chan struct{}, 1)
+	toolInteractionCanceled := make(chan struct{}, 1)
 	frontend.SetPluginInteractionHandler(func(dialogueCtx context.Context, r v1.InteractionRequest) (v1.InteractionResult, error) {
+		if r.Interaction.Message == "cancel-view" {
+			toolInteractionEntered <- struct{}{}
+			<-dialogueCtx.Done()
+			toolInteractionCanceled <- struct{}{}
+			return v1.InteractionResult{}, dialogueCtx.Err()
+		}
 		if r.Interaction.Kind != "editor" {
 			return v1.InteractionResult{Text: "answered"}, nil
 		}
@@ -209,6 +218,9 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 		t.Fatal(toolJSON, err)
 	}
 	view := v1.View{ID: "first", Generation: 1, PaneID: paneID, Width: 40, Height: 4}
+	if _, err := frontend.Plugin(ctx, v1.ManageRequest{Action: "view.open", ID: "example-process", View: &view}); err != nil {
+		t.Fatal(err)
+	}
 	frame, err := frontend.Plugin(ctx, v1.ManageRequest{Action: "render", ID: "example-process", View: &view})
 	if err != nil || frame.Frame.Width != 40 {
 		t.Fatal("process Tool frame", err)
@@ -220,6 +232,36 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 	widget, err := frontend.Plugin(ctx, v1.ManageRequest{Action: "widget", ID: "example-process", Widget: "input-count"})
 	if err != nil || widget.Widget.Text != "input:1" {
 		t.Fatal("process widget", err)
+	}
+	if _, err := frontend.Plugin(ctx, v1.ManageRequest{Action: "input", ID: "example-process", Input: &v1.Input{View: view, Data: []byte("interact")}}); err != nil {
+		t.Fatal("asynchronous ToolPane interaction", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		widget, err = frontend.Plugin(ctx, v1.ManageRequest{Action: "widget", ID: "example-process", Widget: "interaction-count"})
+		if err == nil && widget.Widget.Text == "interaction:1" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ToolPane interaction completion was not delivered", err, widget.Widget)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := frontend.Plugin(ctx, v1.ManageRequest{Action: "input", ID: "example-process", Input: &v1.Input{View: view, Data: []byte("cancel-view")}}); err != nil {
+		t.Fatal("start cancellable ToolPane interaction", err)
+	}
+	select {
+	case <-toolInteractionEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancellable ToolPane interaction did not reach frontend")
+	}
+	if _, err := frontend.Plugin(ctx, v1.ManageRequest{Action: "view.close", ID: "example-process", View: &view}); err != nil {
+		t.Fatal("close ToolPane view", err)
+	}
+	select {
+	case <-toolInteractionCanceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("view close did not cancel ToolPane interaction")
 	}
 	t.Run("native", func(t *testing.T) {
 		compiler := os.Getenv("CC")
@@ -276,6 +318,9 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 			t.Fatal(toolJSON, err)
 		}
 		view := v1.View{ID: "native", Generation: 1, PaneID: nativePaneID, Width: 40, Height: 4}
+		if _, err := frontend.Plugin(ctx, v1.ManageRequest{Action: "view.open", ID: "example-native", View: &view}); err != nil {
+			t.Fatal(err)
+		}
 		frame, err := frontend.Plugin(ctx, v1.ManageRequest{Action: "render", ID: "example-native", View: &view})
 		if err != nil || len(frame.Frame.Cells) != 160 {
 			t.Fatal("native Tool frame", err)
@@ -365,7 +410,7 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 	}
 	waitForDaemon()
 	var restored v1.ManageResult
-	if err := json.Unmarshal([]byte(run("plugin", "--json", "status", "example-process")), &restored); err != nil || len(restored.Plugins) != 1 || !restored.Plugins[0].Enabled || !restored.Plugins[0].Running || len(restored.Plugins[0].Grants) != 2 {
+	if err := json.Unmarshal([]byte(run("plugin", "--json", "status", "example-process")), &restored); err != nil || len(restored.Plugins) != 1 || !restored.Plugins[0].Enabled || !restored.Plugins[0].Running || len(restored.Plugins[0].Grants) != 3 {
 		t.Fatal("registry restore", err, restored)
 	}
 	if data, err := os.ReadFile(privatePath); err != nil || string(data) != "retained" {

@@ -1,4 +1,4 @@
-//go:build cgo && (darwin || (linux && amd64) || (windows && amd64))
+//go:build cgo && (darwin || linux || windows) && (amd64 || arm64)
 
 // Package libghostty isolates the unstable libghostty-vt C API.
 package libghostty

@@ -13,6 +13,8 @@ import (
 )
 
 type externalToolContent struct {
+	ctx        context.Context
+	opened     bool
 	owner      *session
 	pane       core.PaneID
 	provider   string
@@ -20,6 +22,7 @@ type externalToolContent struct {
 	cols, rows int
 	generation uint64
 	running    bool
+	renderDone chan struct{}
 	closed     bool
 	next       time.Time
 	frame      *v1.Frame
@@ -33,7 +36,7 @@ type externalToolContent struct {
 func newExternalToolContent(s *session, p core.Pane) paneContent {
 	limits, _ := s.pluginLimits.Normalize()
 	ctx, cancel := context.WithCancel(s.ctx)
-	c := &externalToolContent{owner: s, pane: p.ID, provider: p.Tool.Provider, id: fmt.Sprintf("%d-%d", p.ID, time.Now().UnixNano()), generation: 1, inputs: make(chan v1.Input, limits.ControlQueue), cancel: cancel}
+	c := &externalToolContent{ctx: ctx, owner: s, pane: p.ID, provider: p.Tool.Provider, id: fmt.Sprintf("%d-%d", p.ID, time.Now().UnixNano()), generation: 1, inputs: make(chan v1.Input, limits.ControlQueue), cancel: cancel}
 	go func() {
 		for {
 			select {
@@ -73,9 +76,21 @@ func (c *externalToolContent) refresh(now time.Time) {
 	c.next = now.Add(100 * time.Millisecond)
 	view := c.view()
 	generation := c.generation
+	opened := c.opened
+	done := make(chan struct{})
+	c.renderDone = done
 	go func() {
-		result, err := c.owner.client.Plugin(c.owner.ctx, v1.ManageRequest{Action: "render", ID: c.provider, View: &view})
-		c.owner.sendPluginResult(pluginResult{result: result, err: err, content: c, generation: generation, render: true})
+		defer close(done)
+		if !opened {
+			_, err := c.owner.client.Plugin(c.ctx, v1.ManageRequest{Action: "view.open", ID: c.provider, View: &view})
+			if err != nil {
+				c.owner.sendPluginResult(pluginResult{err: err, content: c, generation: generation, render: true})
+				return
+			}
+			opened = true
+		}
+		result, err := c.owner.client.Plugin(c.ctx, v1.ManageRequest{Action: "render", ID: c.provider, View: &view})
+		c.owner.sendPluginResult(pluginResult{result: result, err: err, content: c, generation: generation, render: true, opened: opened})
 	}()
 }
 func (c *externalToolContent) Draw(surface *Surface, rect Rect, _ core.Pane, focused bool, style Style) (Cursor, error) {
@@ -153,7 +168,13 @@ func (c *externalToolContent) Close() {
 	c.closed = true
 	c.cancel()
 	view := c.view()
+	done := c.renderDone
 	go func() {
+		// The transport dispatches management calls asynchronously. Wait for the
+		// cancelled open/render to settle so close cannot overtake registration.
+		if done != nil {
+			<-done
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_, _ = c.owner.client.Plugin(ctx, v1.ManageRequest{Action: "view.close", ID: c.provider, View: &view})

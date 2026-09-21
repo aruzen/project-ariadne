@@ -470,9 +470,6 @@ func (s *session) handleAPI(parent context.Context, method string, data json.Raw
 		}
 		return invokeIO(ctx, method, request.Params, c)
 	case "frontend.interact":
-		if !s.hasCapability(v1.FrontendInteract) || c.Token == "" {
-			return nil, ErrPermission
-		}
 		var p v1.Interaction
 		if err := strict(request.Params, &p); err != nil {
 			return nil, err
@@ -480,9 +477,27 @@ func (s *session) handleAPI(parent context.Context, method string, data json.Raw
 		if p.Kind != "prompt" && p.Kind != "confirm" && p.Kind != "editor" {
 			return nil, errors.New("plugin: unknown interaction")
 		}
+		capability := v1.FrontendInteract
+		if p.Kind == "editor" {
+			capability = v1.FrontendEditor
+		}
+		if !s.hasCapability(capability) || c.Token == "" {
+			return nil, ErrPermission
+		}
+		origin, view := s.manager.invocationSource(s, c.Token)
+		switch origin {
+		case invocationInput:
+			return s.manager.startInteraction(s, c, view, request.Params)
+		case invocationRender, invocationWidget, invocationOther:
+			return nil, ErrPermission
+		case invocationCommand:
+		}
 		// Host dialogue time is excluded from the command deadline.
-		interactionCtx, interactionCancel := context.WithTimeout(parent, milliseconds(s.manager.config.InteractionMS))
-		defer interactionCancel()
+		interactionID, interactionCtx, err := s.manager.beginInteraction(s, c, "", parent)
+		if err != nil {
+			return nil, err
+		}
+		defer s.manager.finishInteraction(s, interactionID)
 		counter := s.manager.interactionCounter(c.Token)
 		if counter == nil {
 			return nil, ErrPermission

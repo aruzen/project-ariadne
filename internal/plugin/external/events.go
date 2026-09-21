@@ -88,6 +88,9 @@ func (s *session) eventVisibleContext(event core.Event, before, after core.Snaps
 		}
 	case core.AttentionEvent:
 		pane(p.Attention.PaneID)
+		for _, removed := range p.Removed {
+			pane(removed.PaneID)
+		}
 	case core.AttentionsEvent:
 		for _, a := range p.Attentions {
 			pane(a.PaneID)

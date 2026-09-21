@@ -459,6 +459,37 @@ func TestStoreDebouncesAndPersistsNewestSnapshot(t *testing.T) {
 	}
 }
 
+func TestStoreTakesOwnershipOfSnapshotCopy(t *testing.T) {
+	options := DefaultOptions()
+	options.Debounce = time.Hour
+	store, err := NewStore("unused", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(context.Background())
+	var written []byte
+	store.write = func(_ string, data []byte) error {
+		written = append([]byte(nil), data...)
+		return nil
+	}
+	snapshot := core.DefaultSnapshot()
+	want := snapshot.Workspaces[0].Name
+	if err := store.Schedule(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Workspaces[0].Name = "mutated after schedule"
+	if err := store.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(written, DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decoded.Workspaces[0].Name; got != want {
+		t.Fatalf("stored caller mutation %q, want %q", got, want)
+	}
+}
+
 func TestStoreFlushAndCloseAreImmediate(t *testing.T) {
 	options := DefaultOptions()
 	options.Debounce = time.Hour

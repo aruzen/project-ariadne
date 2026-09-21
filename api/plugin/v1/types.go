@@ -18,6 +18,7 @@ const (
 	ClipboardRead     Capability = "clipboard.read"
 	ClipboardWrite    Capability = "clipboard.write"
 	FrontendInteract  Capability = "frontend.interact"
+	FrontendEditor    Capability = "frontend.editor"
 	LabelWrite        Capability = "label.write"
 	AttentionWrite    Capability = "attention.write"
 	ToolStateWrite    Capability = "tool.state.write"
@@ -25,7 +26,7 @@ const (
 
 func ValidCapability(c Capability) bool {
 	switch c {
-	case CoreRead, CoreEvents, LayoutWrite, TerminalLifecycle, PTYObserve, PTYInput, ClipboardRead, ClipboardWrite, FrontendInteract, LabelWrite, AttentionWrite, ToolStateWrite:
+	case CoreRead, CoreEvents, LayoutWrite, TerminalLifecycle, PTYObserve, PTYInput, ClipboardRead, ClipboardWrite, FrontendInteract, FrontendEditor, LabelWrite, AttentionWrite, ToolStateWrite:
 		return true
 	}
 	return false
@@ -180,6 +181,14 @@ type Interaction struct {
 type InteractionResult struct {
 	Text      string `json:"text,omitempty"`
 	Confirmed bool   `json:"confirmed,omitempty"`
+}
+type InteractionStarted struct {
+	ID string `json:"id"`
+}
+type InteractionCompleted struct {
+	ID     string             `json:"id"`
+	Result *InteractionResult `json:"result,omitempty"`
+	Error  string             `json:"error,omitempty"`
 }
 
 // Read data is deliberately opaque JSON with a versioned schema documented in

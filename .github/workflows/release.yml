@@ -1,0 +1,143 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            goos: darwin
+            goarch: amd64
+            race: true
+            extension: .tar.gz
+            macosx_deployment_target: "13.0"
+          - runner: macos-15
+            goos: darwin
+            goarch: arm64
+            race: true
+            extension: .tar.gz
+            macosx_deployment_target: "13.0"
+          - runner: ubuntu-22.04
+            goos: linux
+            goarch: amd64
+            race: true
+            extension: .tar.gz
+          - runner: ubuntu-22.04-arm
+            goos: linux
+            goarch: arm64
+            race: true
+            extension: .tar.gz
+          - runner: windows-2025
+            goos: windows
+            goarch: amd64
+            race: true
+            extension: .zip
+          - runner: windows-11-arm
+            goos: windows
+            goarch: arm64
+            race: false
+            extension: .zip
+            cc: zig cc
+            cxx: zig c++
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
+      ARIADNE_RUN_E2E: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - name: Build libghostty-vt
+        run: go run ./tools/build-libghostty-vt -target ${{ matrix.goos }}-${{ matrix.goarch }}
+      - name: Test with race detector
+        if: matrix.race
+        run: go test -race -shuffle=on ./...
+      - name: Test
+        if: ${{ !matrix.race }}
+        run: go test -shuffle=on ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Build release executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="build/release/ariadne"
+          if [[ "${{ matrix.goos }}" == windows ]]; then binary+=".exe"; fi
+          mkdir -p build/release
+          build_date="$(git show -s --format=%cI HEAD)"
+          go build -trimpath -buildvcs=false \
+            -ldflags "-X github.com/aruzen/ariadne/internal/version.Version=${GITHUB_REF_NAME} -X github.com/aruzen/ariadne/internal/version.Commit=${GITHUB_SHA} -X github.com/aruzen/ariadne/internal/version.Date=${build_date}" \
+            -o "$binary" ./cmd/ariadne
+          "$binary" --version
+      - name: Package release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="build/release/ariadne"
+          if [[ "${{ matrix.goos }}" == windows ]]; then binary+=".exe"; fi
+          archive="dist/ariadne_${GITHUB_REF_NAME}_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.extension }}"
+          go run ./tools/package-release \
+            -root . -binary "$binary" -output "$archive" \
+            -version "$GITHUB_REF_NAME" -os "${{ matrix.goos }}" -arch "${{ matrix.goarch }}"
+      - name: Attest archive
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ariadne-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ariadne-*
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum ariadne_* | LC_ALL=C sort > SHA256SUMS
+      - name: Attest checksums
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/SHA256SUMS
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          arguments=("$GITHUB_REF_NAME" dist/* --verify-tag --title "Ariadne $GITHUB_REF_NAME" --generate-notes)
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then arguments+=(--prerelease); fi
+          gh release create "${arguments[@]}"

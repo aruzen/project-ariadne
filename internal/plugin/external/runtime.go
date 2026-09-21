@@ -344,7 +344,7 @@ func (m *Manager) runCommand(ctx context.Context, frontend uint64, request v1.Ma
 	m.commands[frontend] = true
 	m.mu.Unlock()
 	defer func() { m.mu.Lock(); delete(m.commands, frontend); m.mu.Unlock() }()
-	c, err := m.capture(ctx, s, frontend, request.PaneID)
+	c, err := m.captureInvocation(ctx, s, frontend, request.PaneID, invocationCommand, "")
 	if err != nil {
 		return v1.ManageResult{}, err
 	}
@@ -405,7 +405,7 @@ func (m *Manager) widget(ctx context.Context, frontend uint64, request v1.Manage
 	if !declares(s.manifest.Widgets, request.Widget) {
 		return v1.ManageResult{}, errors.New("plugin: undeclared widget")
 	}
-	c, err := m.capture(ctx, s, frontend, request.PaneID)
+	c, err := m.captureInvocation(ctx, s, frontend, request.PaneID, invocationWidget, "")
 	if err != nil {
 		return v1.ManageResult{}, err
 	}

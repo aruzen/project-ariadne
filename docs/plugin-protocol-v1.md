@@ -19,7 +19,7 @@ packageはローカルdirectoryで、rootに`manifest.json`を置く。download�
     "linux/amd64": {"path": "plugin", "args": ["--stdio"]},
     "windows/amd64": {"path": "plugin.exe"}
   },
-  "capabilities": ["core.read", "frontend.interact"],
+  "capabilities": ["core.read", "frontend.interact", "frontend.editor"],
   "commands": [{"name": "inspect", "description": "Inspect a pane"}],
   "tools": [{"name": "inspector"}],
   "widgets": [{"name": "count"}]
@@ -34,6 +34,7 @@ ariadne plugin status my-plugin
 ariadne plugin install /absolute/package
 ariadne plugin grant my-plugin core.read workspace:1,2
 ariadne plugin grant my-plugin frontend.interact all
+ariadne plugin grant my-plugin frontend.editor all
 ariadne plugin enable my-plugin
 ariadne plugin run my-plugin inspect ARG
 ariadne plugin --json run my-plugin inspect ARG
@@ -101,6 +102,7 @@ public Go DTOは[`api/plugin/v1`](../api/plugin/v1/types.go)に置く。内部Go
 | `terminal.event` | `TerminalEvent` | null | 2s |
 | `shutdown` | null | null | 2s |
 | `view.close` notification | `{"view_id":"...","generation":N}` | なし | — |
+| `interaction.result` notification | `{"id":"...","result":InteractionResult?,"error":"..."?}` | なし | — |
 | `cancel` notification | `{"id":N}` | なし | — |
 
 initializeは`api_version`、Plugin `id`、実行`generation`、manifestが現在要求する承認済み`grants`、`data_directory`を渡す。実装がAPI v1に対応しない場合はerrorを返す。実際の利用可能capabilityはmanifest要求と通知されたgrantの両方で決まる。権限変更時は旧実行generationを無効化し、再起動・initializeする。
@@ -148,9 +150,11 @@ operationのparamsはstrictに検査し、未知fieldを拒否する。source偽
 | `terminal.stop`／`terminal.delete` | `terminal.lifecycle` | `pane_id`。stopはPaneを保持、deleteは停止済みPaneを削除 |
 | `pty.input` | `pty.input` | `pane_id`、`terminal_id`、base64 `data`。context必須、取得時のTerminalと現在のTerminalの両方に一致すること |
 | `clipboard.read`／`clipboard.write` | `clipboard.read`／`clipboard.write` | `{}` → `{"text":"..."}`／`text`。Ariadne clipboard deny policyは優先 |
-| `frontend.interact` | `frontend.interact` | `kind` prompt/confirm/editor、`message?`、`text?` → `{"text":"...","confirmed":true/false}`。context必須 |
+| `frontend.interact` | `frontend.interact`（prompt/confirm）、`frontend.editor`（editor） | `kind` prompt/confirm/editor、`message?`、`text?`。commandからは`InteractionResult`、`view.input`からは`{"id":"..."}`を返す。context必須 |
 
-`log`は共通envelopeを使わず`{"level":"info","message":"..."}`を渡す（level 32 bytes、message 4KiB以下）。`cancel` notificationは`{"id":N}`。対話cancelはerror responseで返り、prompt/confirm/editorを継続しない。
+`log`は共通envelopeを使わず`{"level":"info","message":"..."}`を渡す（level 32 bytes、message 4KiB以下）。`cancel` notificationは`{"id":N}`。
+
+command callbackからの対話は同期で、結果をAPI responseとして返す。待機時間はcommand期限に算入しない。`view.input` callbackからの対話はboundedな非同期sessionとして開始し、APIは直ちにinteraction IDを返す。開始responseを送信してから対話を開始し、完了時は`interaction.result` notificationで同じIDと`result`または`error`を通知する。`view.render`と`widget` callbackから対話は開始できない。frontend detach、view close、Plugin停止／再起動／権限変更、または`interaction_ms`超過でsessionを取り消す。detachや旧runtime破棄後には完了notificationを送らない。
 
 ### Capability scope
 
@@ -163,7 +167,7 @@ resourceを扱うcapabilityに`all`、`workspace`、`pane`、`context`を用い�
 
 複数対象の操作は全対象を検査する。moveはPane・移動元Window・移動先Window・指定target、Window stash/restoreは配下の全Pane、resizeはWindow内の全Pane、共有Tool stateは同じdescriptorを参照する全Paneを検査する。Core変更では検査と変更を同じexecutor turnで行い、検査後の移動／共有view追加も再検査する。
 
-clipboardとfrontend.interactはglobal capabilityでscopeは`all`のみ。PTY入力はPane権限に加えて、contextのPane／Terminalに限定する。再起動によるTerminal差し替え後の古い入力は拒否する。Label／attentionのsource、Tool stateのproviderは自身のIDに限定する。
+clipboard、frontend.interact、frontend.editorはglobal capabilityでscopeは`all`のみ。PTY入力はPane権限に加えて、contextのPane／Terminalに限定する。再起動によるTerminal差し替え後の古い入力は拒否する。Label／attentionのsource、Tool stateのproviderは自身のIDに限定する。
 
 ### Snapshotとevent
 
@@ -185,6 +189,10 @@ non-contextのcore.events／pty.observe grantには常駐通知を自動で開�
 `terminal.event`は`kind`（output/exited）、`pane_id/terminal_id/sequence/data?/exit?`、任意のcontextを渡す。dataはbase64でbyte列を表し、UTF-8とは限らない。PTY出力の取得はdaemonのdrainを待たせず、最新の所属scopeを再検査する。
 
 ## ToolPaneとwidget
+
+frontend管理APIは描画前に`view.open`（IDとView）でviewを登録する。`render`／`input`は既存viewだけを使用し、`view.close`で直ちに解放する。close後の遅延render／inputはviewを再作成しない。viewの寿命はfrontendに属し、Plugin runtimeのrestartでは保持する。同時に開けるviewはdaemon全体で4096件まで。openとcloseの順序はfrontendが保証し、closeしたIDは新しいviewに再利用しない。
+
+`view.input`中に開始した対話sessionはcallback終了後も有効で、command対話と合わせた同時数をdaemon全体の`max_interactions`で制限する。Pluginは`interaction.result`を通常のnotificationとして処理し、interaction IDで自身の状態へ対応付ける。
 
 Tool descriptorのproviderはPlugin ID、typeはmanifestのtool名、instanceは利用者が選ぶlogical instance名。CLIでは`ariadne tool new --provider ID TYPE`、TUIでは`:tool ID/TYPE [INSTANCE] [h|v]`で作る。Tool stateはCoreの既存JSON永続化を用い、state_versionとexpected_generationで更新する。独立したstorage APIは提供しない。
 
@@ -235,6 +243,8 @@ configの`[plugins]`で変更できる。全値は正、0は既定値を選択�
 
 | Config | 既定値 |
 | --- | --- |
+| `max_views` | 4096件（同時open、最大65536件） |
+| `max_interactions` | 16件（同期・非同期対話の合計、最大1024件） |
 | `message_bytes` | 8MiB |
 | `control_queue` | 64件 |
 | `control_bytes` | 16MiB |

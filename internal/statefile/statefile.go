@@ -141,6 +141,22 @@ func Encode(snapshot core.Snapshot) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
+// ValidateSize verifies that a Snapshot can be represented by the configured
+// durable format before Core publishes the mutation that produced it.
+func ValidateSize(snapshot core.Snapshot, maxBytes int64) error {
+	if maxBytes == 0 {
+		maxBytes = DefaultMaxBytes
+	}
+	data, err := Encode(snapshot)
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) > maxBytes {
+		return fmt.Errorf("%w: encoded state is %d bytes", ErrTooLarge, len(data))
+	}
+	return nil
+}
+
 // Decode accepts exactly one supported-version JSON document.
 func Decode(data []byte, maxBytes int64) (core.Snapshot, error) {
 	if maxBytes <= 0 {

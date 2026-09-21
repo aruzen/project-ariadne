@@ -171,6 +171,8 @@
 # Legacy flat [keybindings] entries must migrate to [keybindings.normal].
 
 [plugins]
+# max_views = 4096 # Concurrent frontend ToolPane views, not lifetime total.
+# max_interactions = 16 # Concurrent command and ToolPane interactions.
 # Trusted external plugins run in separate processes; this is not an OS sandbox.
 # Install/enable/grants are managed by `ariadne plugin`, not by this config.
 # message_bytes = 8388608

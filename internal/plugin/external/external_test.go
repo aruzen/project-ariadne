@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -42,6 +43,18 @@ func newTestManager(t *testing.T, root string, c Config) (*Manager, *core.Core, 
 	t.Cleanup(func() { _ = m.Close(context.Background()); _ = subscription.Close(); _ = engine.Close() })
 	return m, engine, uint64(subscription.ID())
 }
+
+type orderedDeferredResult struct {
+	peer *Peer
+}
+
+func (result orderedDeferredResult) rpcResult() any { return "started" }
+func (result orderedDeferredResult) rpcAfterResponse(err error) {
+	if err == nil {
+		_ = result.peer.Notify("completed", "done")
+	}
+}
+
 func testPackage(t *testing.T, id string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -60,7 +73,7 @@ func testPackage(t *testing.T, id string) string {
 	if err := os.WriteFile(filepath.Join(dir, name), data, 0700); err != nil {
 		t.Fatal(err)
 	}
-	manifest := v1.Manifest{ID: id, Version: "1.0", APIVersion: 1, Runtime: "process", Entrypoints: map[string]v1.Entrypoint{runtime.GOOS + "/" + runtime.GOARCH: {Path: name, Args: []string{"-test.run=^TestProcessPlugin$"}}}, Capabilities: []v1.Capability{v1.CoreRead, v1.LabelWrite, v1.ToolStateWrite, v1.AttentionWrite, v1.CoreEvents, v1.PTYObserve, v1.FrontendInteract}, Commands: []v1.Declaration{{Name: "echo"}, {Name: "hang"}, {Name: "crash"}, {Name: "malformed"}, {Name: "error"}, {Name: "interact"}}, Tools: []v1.Declaration{{Name: "demo"}}, Widgets: []v1.Declaration{{Name: "status"}}}
+	manifest := v1.Manifest{ID: id, Version: "1.0", APIVersion: 1, Runtime: "process", Entrypoints: map[string]v1.Entrypoint{runtime.GOOS + "/" + runtime.GOARCH: {Path: name, Args: []string{"-test.run=^TestProcessPlugin$"}}}, Capabilities: []v1.Capability{v1.CoreRead, v1.LabelWrite, v1.ToolStateWrite, v1.AttentionWrite, v1.CoreEvents, v1.PTYObserve, v1.FrontendInteract, v1.FrontendEditor}, Commands: []v1.Declaration{{Name: "echo"}, {Name: "hang"}, {Name: "crash"}, {Name: "malformed"}, {Name: "error"}, {Name: "interact"}}, Tools: []v1.Declaration{{Name: "demo"}}, Widgets: []v1.Declaration{{Name: "status"}}}
 	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), asJSON(manifest), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -325,6 +338,7 @@ func TestFrameGenerationsAndWideCells(t *testing.T) {
 	}
 	pane := value.(core.CreatePaneResult).Pane
 	v := v1.View{ID: "view", Generation: 1, PaneID: uint64(pane.ID), Width: 4, Height: 2}
+	manage(t, m, frontend, v1.ManageRequest{Action: "view.open", ID: "test-plugin", View: &v})
 	r := manage(t, m, frontend, v1.ManageRequest{Action: "render", ID: "test-plugin", View: &v})
 	if r.Frame.Cells[0].Width != 2 || r.Frame.Cells[1].Width != 0 {
 		t.Fatal("wide cells not preserved")
@@ -343,6 +357,7 @@ func TestFrameGenerationsAndWideCells(t *testing.T) {
 	defer sub.Close()
 	v.Width = 2
 	v.Generation = 1
+	manage(t, m, uint64(sub.ID()), v1.ManageRequest{Action: "view.open", ID: "test-plugin", View: &v})
 	manage(t, m, uint64(sub.ID()), v1.ManageRequest{Action: "render", ID: "test-plugin", View: &v})
 	v.Generation = 2
 	v.Width = 8
@@ -507,6 +522,192 @@ func TestDialogueTimeIsExcludedAndInvocationCancellationReachesAPI(t *testing.T)
 		t.Fatal(result)
 	}
 }
+
+func TestToolInputStartsBoundedInteractionAndDetachCancelsIt(t *testing.T) {
+	c := DefaultConfig()
+	c.MaxInteractions = 1
+	m, _, frontend := newTestManager(t, t.TempDir(), c)
+	operations := &dialogueOperations{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	m.operations = operations
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	s := &session{
+		manager:    m,
+		id:         "interaction-plugin",
+		generation: 1,
+		ctx:        ctx,
+		apiCtx:     ctx,
+		cancel:     cancel,
+		apiCancel:  cancel,
+		manifest: v1.Manifest{
+			ID:           "interaction-plugin",
+			Capabilities: []v1.Capability{v1.FrontendInteract, v1.FrontendEditor},
+		},
+		grants: []v1.Grant{{Capability: v1.FrontendInteract, Scope: v1.Scope{Kind: "all"}}},
+	}
+	s.active.Store(true)
+	m.mu.Lock()
+	m.sessions[s.id] = s
+	m.mu.Unlock()
+	t.Cleanup(func() {
+		m.mu.Lock()
+		delete(m.sessions, s.id)
+		m.mu.Unlock()
+	})
+
+	viewKey := fmt.Sprintf("%d/%s", frontend, "test-view")
+	input, err := m.captureInvocation(ctx, s, frontend, 0, invocationInput, viewKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := invoke(s, "frontend.interact", input.Token, v1.Interaction{Kind: "prompt", Message: "value"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferred, ok := result.(deferredInteractionStart)
+	started := deferred.InteractionStarted
+	if !ok || started.ID == "" {
+		t.Fatalf("unexpected asynchronous result: %#v", result)
+	}
+	deferred.rpcAfterResponse(nil)
+	select {
+	case <-operations.entered:
+	case <-time.After(time.Second):
+		t.Fatal("frontend interaction did not start")
+	}
+
+	second, err := m.captureInvocation(ctx, s, frontend, 0, invocationCommand, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(s, "frontend.interact", second.Token, v1.Interaction{Kind: "prompt"}); !errors.Is(err, ErrOverflow) {
+		t.Fatal("shared command/ToolPane interaction limit not enforced", err)
+	}
+	if _, err := invoke(s, "frontend.interact", second.Token, v1.Interaction{Kind: "editor"}); !errors.Is(err, ErrPermission) {
+		t.Fatal("editor accepted without frontend.editor grant", err)
+	}
+
+	render, err := m.captureInvocation(ctx, s, frontend, 0, invocationRender, viewKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(s, "frontend.interact", render.Token, v1.Interaction{Kind: "prompt"}); !errors.Is(err, ErrPermission) {
+		t.Fatal("render callback started an interaction", err)
+	}
+
+	m.mu.Lock()
+	m.views[viewKey] = viewRecord{hostID: "host-view", frontend: frontend, plugin: s.id, generation: 1}
+	m.mu.Unlock()
+	s.active.Store(false) // Synthetic session has no RPC peer for view.close notification.
+	if _, err := m.view(ctx, frontend, v1.ManageRequest{Action: "view.close", ID: s.id, View: &v1.View{ID: "test-view", Generation: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	s.active.Store(true)
+	assertNoInteractions := func(message string) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for {
+			m.mu.Lock()
+			remaining := len(m.interactions)
+			m.mu.Unlock()
+			if remaining == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal(message)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	assertNoInteractions("view close did not cancel interaction")
+
+	s.grants = append(s.grants, v1.Grant{Capability: v1.FrontendEditor, Scope: v1.Scope{Kind: "all"}})
+	third, err := m.captureInvocation(ctx, s, frontend, 0, invocationInput, "another-view")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := invoke(s, "frontend.interact", third.Token, v1.Interaction{Kind: "editor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value.(deferredInteractionStart).rpcAfterResponse(nil)
+	select {
+	case <-operations.entered:
+	case <-time.After(time.Second):
+		t.Fatal("second frontend interaction did not start")
+	}
+	m.Detach(frontend)
+	assertNoInteractions("detach did not cancel interaction")
+}
+
+func TestToolInputPublishesInteractionResult(t *testing.T) {
+	m, _, frontend := newTestManager(t, t.TempDir(), DefaultConfig())
+	operations := &dialogueOperations{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	m.operations = operations
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	host, remote := net.Pipe()
+	peer := NewPeer(ctx, host, host, m.config, nil, nil)
+	peer.Start()
+	t.Cleanup(func() {
+		peer.Close()
+		_ = remote.Close()
+	})
+	s := &session{
+		manager:    m,
+		id:         "result-plugin",
+		generation: 1,
+		ctx:        ctx,
+		apiCtx:     ctx,
+		cancel:     cancel,
+		apiCancel:  cancel,
+		peer:       peer,
+		manifest:   v1.Manifest{ID: "result-plugin", Capabilities: []v1.Capability{v1.FrontendInteract}},
+		grants:     []v1.Grant{{Capability: v1.FrontendInteract, Scope: v1.Scope{Kind: "all"}}},
+	}
+	s.active.Store(true)
+	m.mu.Lock()
+	m.sessions[s.id] = s
+	m.mu.Unlock()
+	t.Cleanup(func() {
+		m.mu.Lock()
+		delete(m.sessions, s.id)
+		m.mu.Unlock()
+	})
+
+	captured, err := m.captureInvocation(ctx, s, frontend, 0, invocationInput, "result-view")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := invoke(s, "frontend.interact", captured.Token, v1.Interaction{Kind: "prompt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferred := value.(deferredInteractionStart)
+	started := deferred.InteractionStarted
+	deferred.rpcAfterResponse(nil)
+	<-operations.entered
+	close(operations.release)
+	if err := remote.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	message, err := ReadMessage(bufio.NewReader(remote), m.config.MessageBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Method != "interaction.result" || message.ID != nil {
+		t.Fatalf("unexpected completion notification: %#v", message)
+	}
+	var completed v1.InteractionCompleted
+	if err := json.Unmarshal(message.Params, &completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed.ID != started.ID || completed.Result == nil || completed.Result.Text != "answered" || completed.Error != "" {
+		t.Fatalf("unexpected completion: %#v", completed)
+	}
+}
+
 func TestControlAndPTYOverflowStopOnlyTarget(t *testing.T) {
 	// Oversized queued control payloads are rejected before a write can block.
 	host, remote := net.Pipe()
@@ -556,6 +757,7 @@ func TestQueuedInputCannotCrossRuntimeRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	view := v1.View{ID: "input-view", Generation: 1, PaneID: uint64(result.(core.CreatePaneResult).Pane.ID), Width: 4, Height: 1}
+	manage(t, m, frontend, v1.ManageRequest{Action: "view.open", ID: "test-plugin", View: &view})
 	frame := manage(t, m, frontend, v1.ManageRequest{Action: "render", ID: "test-plugin", View: &view}).Frame
 	view.RuntimeGeneration = frame.RuntimeGeneration
 	old := v1.Input{View: view, Data: []byte("before restart")}
@@ -614,5 +816,39 @@ func TestDialogueDoesNotBlockOtherFrontendHostAPIs(t *testing.T) {
 	close(release)
 	if _, err := ReadMessage(reader, 8<<20); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDeferredRPCWorkStartsAfterResponseIsQueued(t *testing.T) {
+	host, remote := net.Pipe()
+	defer remote.Close()
+	var peer *Peer
+	peer = NewPeer(context.Background(), host, host, DefaultConfig(), func(context.Context, string, json.RawMessage) (any, error) {
+		return orderedDeferredResult{peer: peer}, nil
+	}, nil)
+	peer.Start()
+	defer peer.Close()
+
+	id := uint64(1)
+	if err := WriteMessage(remote, Message{JSONRPC: "2.0", ID: &id, Method: "start", Params: asJSON(nil)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(remote)
+	response, err := ReadMessage(reader, 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.ID == nil || *response.ID != id || string(response.Result) != `"started"` {
+		t.Fatalf("completion preceded start response: %#v", response)
+	}
+	notification, err := ReadMessage(reader, 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notification.ID != nil || notification.Method != "completed" {
+		t.Fatalf("unexpected deferred notification: %#v", notification)
 	}
 }

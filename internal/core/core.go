@@ -16,6 +16,10 @@ const DefaultMaxAttentionEntries = 1024
 type Config struct {
 	EventQueueCapacity  int
 	MaxAttentionEntries int
+	// SnapshotValidator is an application boundary used to reject a durable
+	// mutation before it is published. It must be deterministic and must not
+	// call Core.
+	SnapshotValidator func(Snapshot) error
 }
 
 func DefaultConfig() Config {
@@ -242,9 +246,29 @@ func (c *Core) handle(operation request, frontends map[FrontendID]*frontend, nex
 		if changesPersistentState(operation.command) && c.state.revision == math.MaxUint64 {
 			return response{err: fmt.Errorf("%w: revision exhausted", ErrInvalidState)}
 		}
+		originalState := c.state
+		var originalFrontends map[FrontendID]FrontendState
+		if c.config.SnapshotValidator != nil && changesPersistentState(operation.command) {
+			candidate, err := cloneState(c.state)
+			if err != nil {
+				return response{err: err}
+			}
+			c.state = candidate
+			originalFrontends = make(map[FrontendID]FrontendState, len(frontends))
+			for id, frontend := range frontends {
+				originalFrontends[id] = frontend.state
+			}
+		}
 		value, event, err := c.execute(operation.command, frontends)
 		if err != nil {
+			c.rollbackValidatedMutation(originalState, originalFrontends, frontends)
 			return response{err: err}
+		}
+		if event != nil && originalFrontends != nil {
+			if err := c.config.SnapshotValidator(c.state.snapshot()); err != nil {
+				c.rollbackValidatedMutation(originalState, originalFrontends, frontends)
+				return response{err: err}
+			}
 		}
 		if event != nil {
 			c.state.revision++
@@ -284,6 +308,18 @@ func (c *Core) handle(operation request, frontends map[FrontendID]*frontend, nex
 		return response{}
 	default:
 		return response{err: ErrInvalidCommand}
+	}
+}
+
+func (c *Core) rollbackValidatedMutation(original *state, states map[FrontendID]FrontendState, frontends map[FrontendID]*frontend) {
+	if states == nil {
+		return
+	}
+	c.state = original
+	for id, state := range states {
+		if frontend := frontends[id]; frontend != nil {
+			frontend.state = state
+		}
 	}
 }
 

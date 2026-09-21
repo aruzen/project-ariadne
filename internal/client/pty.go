@@ -64,6 +64,12 @@ func RegisterPTY(client *Client, types pty.MessageTypes) (*PTYClient, error) {
 	if err := validatePTYMessageTypes(types); err != nil {
 		return nil, err
 	}
+	// Handlers belong to the connection, not to an individual attachment.
+	client.ptyMu.Lock()
+	defer client.ptyMu.Unlock()
+	if existing := client.ptyClients[types]; existing != nil {
+		return existing, nil
+	}
 	protocol := &PTYClient{client: client, types: types, active: make(map[streammux.StreamID]*PTYAttachment)}
 	handlers := map[streammux.MessageType]streammux.Handler{
 		types.ReplayBegin: protocol.handleReplayBegin,
@@ -75,6 +81,10 @@ func RegisterPTY(client *Client, types pty.MessageTypes) (*PTYClient, error) {
 	if err := client.peer.RegisterHandlers(handlers); err != nil {
 		return nil, err
 	}
+	if client.ptyClients == nil {
+		client.ptyClients = make(map[pty.MessageTypes]*PTYClient)
+	}
+	client.ptyClients[types] = protocol
 	return protocol, nil
 }
 

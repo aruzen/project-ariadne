@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
@@ -93,6 +94,22 @@ func TestCommandSequenceStopsWhenCommandEntersAMode(t *testing.T) {
 	}
 	if session.zoom {
 		t.Fatal("command after modal transition was executed")
+	}
+}
+
+func TestCommandSequenceResumesAfterAsyncPluginResult(t *testing.T) {
+	active := session{pluginManaging: true, pendingCommands: []string{"command-prompt next"}}
+	active.applyPluginResult(pluginResult{management: true})
+	if active.inputMode != inputModePrompt || active.prompt != "next " || len(active.pendingCommands) != 0 {
+		t.Fatal("successful async command did not resume sequence")
+	}
+
+	var failed session
+	failed.pluginManaging = true
+	failed.pendingCommands = []string{"command-prompt must-not-run"}
+	failed.applyPluginResult(pluginResult{management: true, err: errors.New("plugin failed")})
+	if failed.inputMode != inputModeNormal || len(failed.pendingCommands) != 0 {
+		t.Fatal("failed async command resumed sequence")
 	}
 }
 

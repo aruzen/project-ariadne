@@ -38,8 +38,13 @@ func (session *session) beginPrompt(lead, initial string) {
 }
 
 func (session *session) executeCommandSequence(commands []string) {
-	for _, command := range commands {
+	for index, command := range commands {
+		session.commandPending = false
 		session.executePrompt(command)
+		if session.commandPending {
+			session.pendingCommands = append(session.pendingCommands[:0], commands[index+1:]...)
+			return
+		}
 		if session.quitRequested || session.inputMode != inputModeNormal || session.copyMode {
 			return
 		}

@@ -11,7 +11,9 @@ func TestResolveTarget(t *testing.T) {
 		{name: "darwin-arm64", zig: "aarch64-macos", archive: "libghostty-vt.a"},
 		{name: "darwin-amd64", zig: "x86_64-macos", archive: "libghostty-vt.a"},
 		{name: "linux-amd64", zig: "x86_64-linux-gnu", archive: "libghostty-vt.a"},
+		{name: "linux-arm64", zig: "aarch64-linux-gnu", archive: "libghostty-vt.a"},
 		{name: "windows-amd64", zig: "x86_64-windows-gnu", archive: "ghostty-vt-static.lib"},
+		{name: "windows-arm64", zig: "aarch64-windows-gnu", archive: "ghostty-vt-static.lib"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 )
 
 type pluginResult struct {
+	opened     bool
 	result     v1.ManageResult
 	err        error
 	content    *externalToolContent
@@ -61,6 +62,7 @@ func (s *session) pluginCommand(args []string) {
 		return
 	}
 	s.pluginManaging = true
+	s.commandPending = true
 	go func() {
 		result, err := s.client.Plugin(s.ctx, request)
 		s.sendPluginResult(pluginResult{result: result, err: err, management: true})
@@ -76,6 +78,7 @@ func (s *session) applyPluginResult(result pluginResult) {
 	if result.management {
 		s.pluginManaging = false
 		if result.err != nil {
+			s.pendingCommands = nil
 			s.setMessage(result.err.Error())
 			return
 		}
@@ -92,10 +95,16 @@ func (s *session) applyPluginResult(result pluginResult) {
 			}
 			s.setMessage(sanitizeWidgetText(message))
 		}
+		if len(s.pendingCommands) != 0 && s.inputMode == inputModeNormal && !s.copyMode && !s.quitRequested {
+			commands := append([]string(nil), s.pendingCommands...)
+			s.pendingCommands = nil
+			s.executeCommandSequence(commands)
+		}
 	}
 	if c := result.content; c != nil && !c.closed {
 		if result.render {
 			c.running = false
+			c.opened = c.opened || result.opened
 			if c.generation != result.generation {
 				return
 			}

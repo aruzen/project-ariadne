@@ -14,6 +14,7 @@ ariadne plugin grant example-process core.read workspace:1
 ariadne plugin run example-process snapshot
 ariadne plugin grant example-process frontend.interact all
 ariadne plugin run example-process prompt
+ariadne plugin grant example-process frontend.editor all
 ariadne plugin run example-process editor initial text
 ariadne tool new --provider example-process demo
 ```
