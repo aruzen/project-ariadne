@@ -530,6 +530,17 @@ func (server *Server) requestStop(err error) {
 	}
 }
 
+func (server *Server) flushState(ctx context.Context) error {
+	snapshot, err := server.core.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if err := server.store.Schedule(snapshot); err != nil {
+		return err
+	}
+	return server.store.Flush(ctx)
+}
+
 func (server *Server) Close(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("%w: nil context", ErrInvalidConfig)
@@ -563,16 +574,8 @@ func (server *Server) Close(ctx context.Context) error {
 			<-server.stateLoopDone
 		}
 		server.commandGate.Lock()
-		snapshot, err := server.core.Snapshot(ctx)
-		if err != nil {
+		if err := server.flushState(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)
-		} else {
-			if err := server.store.Schedule(snapshot); err != nil {
-				shutdownErrors = append(shutdownErrors, err)
-			}
-			if err := server.store.Flush(ctx); err != nil {
-				shutdownErrors = append(shutdownErrors, err)
-			}
 		}
 		if err := server.store.Close(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)

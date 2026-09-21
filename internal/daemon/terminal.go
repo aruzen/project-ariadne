@@ -412,7 +412,13 @@ func (server *Server) DaemonStop(ctx context.Context, params ariadneprotocol.Dae
 
 func (server *Server) AfterResponse(operation ariadneprotocol.Operation) {
 	if operation == ariadneprotocol.OperationDaemonStop && server.stopAfterResponse.Swap(false) {
-		server.requestStop(nil)
+		// Keep the IPC endpoint alive until every in-flight command has completed
+		// and its resulting state is durable. Otherwise an auto-starting client can
+		// launch the replacement daemon after listener.Close but before Close flushes.
+		server.commandGate.Lock()
+		err := server.flushState(context.Background())
+		server.commandGate.Unlock()
+		server.requestStop(err)
 	}
 }
 

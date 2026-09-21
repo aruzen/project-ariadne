@@ -694,7 +694,7 @@ func TestClipboardDenyPolicyCannotBeOverridden(t *testing.T) {
 
 func TestDaemonStopRefusesActiveTerminalWithoutForce(t *testing.T) {
 	process := newTestManagedProcess()
-	server, _ := openTestServer(t, &testFactory{processes: []*testManagedProcess{process}})
+	server, statePath := openTestServer(t, &testFactory{processes: []*testManagedProcess{process}})
 	created, err := server.NewTerminal(context.Background(), ariadneprotocol.NewTerminalParams{
 		Argv: []string{"test-command"}, CWD: "/tmp", InitialSize: pty.Size{Cols: 80, Rows: 24},
 	})
@@ -713,6 +713,9 @@ func TestDaemonStopRefusesActiveTerminalWithoutForce(t *testing.T) {
 	if _, err := server.KillTerminal(context.Background(), ariadneprotocol.PaneParams{PaneID: created.Pane.ID}); err != nil {
 		t.Fatalf("KillTerminal: %v", err)
 	}
+	persistedPane := executeCore[core.CreatePaneResult](t, server, core.CreatePaneCommand{
+		WindowID: 1, Pane: core.PaneSpec{Kind: core.PaneTool},
+	}).Pane
 	status, err := server.DaemonStop(context.Background(), ariadneprotocol.DaemonStopParams{})
 	if err != nil || !status.Stopping {
 		t.Fatalf("DaemonStop = %+v, %v", status, err)
@@ -723,6 +726,20 @@ func TestDaemonStopRefusesActiveTerminalWithoutForce(t *testing.T) {
 	server.mu.Unlock()
 	if !stopping {
 		t.Fatal("accepted stop did not change daemon state")
+	}
+	loaded, err := statefile.Load(statePath, statefile.DefaultOptions())
+	if err != nil {
+		t.Fatalf("load state immediately after stop response: %v", err)
+	}
+	persisted := false
+	for _, pane := range loaded.Snapshot.Panes {
+		if pane.ID == persistedPane.ID && pane.Kind == core.PaneTool {
+			persisted = true
+			break
+		}
+	}
+	if !persisted {
+		t.Fatalf("stop response did not durably persist pane: %+v", loaded.Snapshot)
 	}
 }
 
