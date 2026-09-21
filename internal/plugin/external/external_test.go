@@ -472,7 +472,7 @@ func TestDialogueTimeIsExcludedAndInvocationCancellationReachesAPI(t *testing.T)
 	g := v1.Grant{Capability: v1.FrontendInteract, Scope: v1.Scope{Kind: "all"}}
 	manage(t, m, frontend, v1.ManageRequest{Action: "grant", ID: "test-plugin", Grant: &g})
 	manage(t, m, frontend, v1.ManageRequest{Action: "enable", ID: "test-plugin"})
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {

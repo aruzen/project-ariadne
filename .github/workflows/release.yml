@@ -43,7 +43,7 @@ jobs:
             extension: .zip
             cc: zig cc -target x86_64-windows-gnu
             cxx: zig c++ -target x86_64-windows-gnu
-            cgo_ldflags: -L${{ github.workspace }}/build/windows-compat
+            cgo_ldflags: -Lbuild/windows-compat -lsynchronization
           - runner: windows-11-arm
             goos: windows
             goarch: arm64

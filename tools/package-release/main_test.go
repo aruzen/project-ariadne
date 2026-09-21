@@ -36,10 +36,13 @@ func TestReleaseArchives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = file.Close() })
 	gz, err := gzip.NewReader(file)
 	if err != nil {
+		file.Close()
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = gz.Close() })
 	reader := tar.NewReader(gz)
 	foundExecutable := false
 	for {
@@ -57,6 +60,12 @@ func TestReleaseArchives(t *testing.T) {
 	if !foundExecutable {
 		t.Fatal("executable missing or not executable")
 	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	zipPath := filepath.Join(root, "release.zip")
 	if err := run([]string{"-root", root, "-binary", filepath.Join(root, "ariadne"), "-output", zipPath, "-version", "v1.0.0", "-os", "windows", "-arch", "arm64"}); err != nil {
@@ -66,7 +75,7 @@ func TestReleaseArchives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer archive.Close()
+	t.Cleanup(func() { _ = archive.Close() })
 	foundLicense := false
 	for _, item := range archive.File {
 		if item.Name == "ariadne_v1.0.0_windows_arm64/third_party/dependency/LICENSE" {
@@ -75,6 +84,9 @@ func TestReleaseArchives(t *testing.T) {
 	}
 	if !foundLicense {
 		t.Fatal("third-party license missing")
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
