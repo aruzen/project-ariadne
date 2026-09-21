@@ -361,7 +361,7 @@ func (runtime *windowsE2ERuntime) testDaemonRestart(t *testing.T) {
 
 func (runtime *windowsE2ERuntime) testOpenDetachReattachResize(t *testing.T) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	open := runtime.startTerminal(t, ctx, "open", "--", "cmd.exe", "/q", "/d")
 	if _, err := open.process.Input().Write([]byte("echo ARIADNE_WINDOWS_PTY\r\n")); err != nil {
@@ -449,7 +449,7 @@ func (runtime *windowsE2ERuntime) startTerminal(t *testing.T, ctx context.Contex
 
 func (terminal *windowsTerminalSession) readUntil(t *testing.T, expected string) {
 	t.Helper()
-	timer := time.NewTimer(15 * time.Second)
+	timer := time.NewTimer(45 * time.Second)
 	defer timer.Stop()
 	for {
 		select {

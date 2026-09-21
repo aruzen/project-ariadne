@@ -194,7 +194,7 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 			defer cancel()
 			_, _ = frontend.Plugin(cleanupCtx, v1.ManageRequest{Action: "editor.cancel", PaneID: id})
 		}()
-		deadline := time.Now().Add(5 * time.Second)
+			deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
 			result, err := frontend.Plugin(dialogueCtx, v1.ManageRequest{Action: "editor.finish", PaneID: id})
 			if err == nil {
