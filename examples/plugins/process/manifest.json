@@ -5,8 +5,8 @@
   "linux/amd64":{"path":"plugin-process"},"linux/arm64":{"path":"plugin-process"},
   "windows/amd64":{"path":"plugin-process.exe"},"windows/arm64":{"path":"plugin-process.exe"}
  },
- "capabilities":["core.read","core.events","pty.observe","frontend.interact","frontend.editor"],
- "commands":[{"name":"echo","description":"Return arguments"},{"name":"snapshot","description":"Read authorized Core state"},{"name":"prompt","description":"Request a prompt"},{"name":"editor","description":"Edit text in the default editor"}],
+ "capabilities":["core.read","core.events","pty.observe","frontend.interact","frontend.editor","frontend.navigate","process.inspect"],
+ "commands":[{"name":"echo","description":"Return arguments"},{"name":"snapshot","description":"Read authorized Core state"},{"name":"navigate","description":"Navigate the invoking frontend to a Pane"},{"name":"terminal-process","description":"Inspect a Terminal root process"},{"name":"prompt","description":"Request a prompt"},{"name":"editor","description":"Edit text in the default editor"}],
  "tools":[{"name":"demo","description":"Cell surface demo"}],
  "widgets":[{"name":"input-count","description":"Tool input count"},{"name":"interaction-count","description":"Completed ToolPane interactions"}]
 }

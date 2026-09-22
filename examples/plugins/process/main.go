@@ -118,6 +118,26 @@ func handle(m message) (any, error) {
 		case "snapshot":
 			data, err := call("core.snapshot", v1.APIRequest{Context: c.Context.Token, Params: json.RawMessage(`{}`)})
 			return v1.CommandResult{JSON: data}, err
+		case "navigate":
+			if len(c.Args) != 1 {
+				return nil, errors.New("navigate requires pane ID")
+			}
+			paneID, err := strconv.ParseUint(c.Args[0], 10, 64)
+			if err != nil || paneID == 0 {
+				return nil, errors.New("invalid pane ID")
+			}
+			_, err = call("frontend.navigate", v1.APIRequest{Params: raw(v1.FrontendNavigateParams{FrontendID: c.Context.FrontendID, PaneID: paneID})})
+			return v1.CommandResult{}, err
+		case "terminal-process":
+			if len(c.Args) != 1 {
+				return nil, errors.New("terminal-process requires pane ID")
+			}
+			paneID, err := strconv.ParseUint(c.Args[0], 10, 64)
+			if err != nil || paneID == 0 {
+				return nil, errors.New("invalid pane ID")
+			}
+			data, err := call("terminal.process", v1.APIRequest{Params: raw(v1.TerminalProcessParams{PaneID: paneID})})
+			return v1.CommandResult{JSON: data}, err
 		case "prompt", "editor":
 			data, err := call("frontend.interact", v1.APIRequest{Context: c.Context.Token, Params: raw(v1.Interaction{Kind: c.Name, Message: "Enter text", Text: strings.Join(c.Args, " ")})})
 			if err != nil {

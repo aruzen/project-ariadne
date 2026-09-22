@@ -101,21 +101,24 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 		}
 		return string(data)
 	}
-	processDirectory := filepath.Join(directory, "process")
-	if err := os.Mkdir(processDirectory, 0700); err != nil {
-		t.Fatal(err)
-	}
-	build := exec.CommandContext(ctx, "go", "build", "-buildvcs=false", "-o", filepath.Join(processDirectory, "plugin-process"+suffix), "./examples/plugins/process")
-	build.Dir = repository
-	if data, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build process: %v\n%s", err, data)
-	}
-	data, err := os.ReadFile(filepath.Join(repository, "examples/plugins/process/manifest.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(processDirectory, "manifest.json"), data, 0600); err != nil {
-		t.Fatal(err)
+	processDirectory := os.Getenv("ARIADNE_E2E_PLUGIN_DIR")
+	if processDirectory == "" {
+		processDirectory = filepath.Join(directory, "process")
+		if err := os.Mkdir(processDirectory, 0700); err != nil {
+			t.Fatal(err)
+		}
+		build := exec.CommandContext(ctx, "go", "build", "-buildvcs=false", "-o", filepath.Join(processDirectory, "plugin-process"+suffix), "./examples/plugins/process")
+		build.Dir = repository
+		if data, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build process: %v\n%s", err, data)
+		}
+		data, err := os.ReadFile(filepath.Join(repository, "examples/plugins/process/manifest.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(processDirectory, "manifest.json"), data, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	run("plugin", "install", processDirectory)
 	disabled := exec.CommandContext(ctx, binary, "--socket", endpoint, "plugin", "run", "example-process", "echo", "unexpected")
@@ -134,6 +137,8 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 	}
 	run("plugin", "grant", "example-process", "frontend.interact", "all")
 	run("plugin", "grant", "example-process", "frontend.editor", "all")
+	run("plugin", "grant", "example-process", "frontend.navigate", "all")
+	run("plugin", "grant", "example-process", "process.inspect", "all")
 	headless := exec.CommandContext(ctx, binary, "--socket", endpoint, "plugin", "run", "example-process", "prompt")
 	headless.Env = environment
 	if data, err := headless.CombinedOutput(); err == nil || !strings.Contains(string(data), "headless") {
@@ -151,6 +156,28 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 	if _, err := frontend.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
+	observerConnection, err := localipc.DialContext(ctx, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer, err := client.Open(ctx, observerConnection, client.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer observer.Close()
+	if _, err := observer.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	controls := make(chan protocol.FrontendControlRequest, 1)
+	observerControls := make(chan protocol.FrontendControlRequest, 1)
+	frontend.SetFrontendControlHandler(func(_ context.Context, request protocol.FrontendControlRequest) error {
+		controls <- request
+		return nil
+	})
+	observer.SetFrontendControlHandler(func(_ context.Context, request protocol.FrontendControlRequest) error {
+		observerControls <- request
+		return nil
+	})
 	go func() {
 		for {
 			select {
@@ -162,6 +189,55 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 			}
 		}
 	}()
+	go func() {
+		for {
+			select {
+			case <-observer.Events():
+			case <-ctx.Done():
+				return
+			case <-observer.Done():
+				return
+			}
+		}
+	}()
+	terminalCommand := []string{"/bin/sh", "-c", "sleep 120"}
+	if runtime.GOOS == "windows" {
+		terminalCommand = []string{"cmd.exe", "/d", "/s", "/c", "ping -n 121 127.0.0.1 >NUL"}
+	}
+	created := run(append([]string{"new", "--"}, terminalCommand...)...)
+	var terminalPaneID, terminalID uint64
+	if _, err := fmt.Sscanf(strings.TrimSpace(created), "created pane=%d terminal=%d", &terminalPaneID, &terminalID); err != nil {
+		t.Fatalf("parse terminal result %q: %v", created, err)
+	}
+	if _, err := frontend.Plugin(ctx, v1.ManageRequest{Action: "run", ID: "example-process", Command: "navigate", Args: []string{fmt.Sprint(terminalPaneID)}}); err != nil {
+		t.Fatal("frontend navigation", err)
+	}
+	select {
+	case request := <-controls:
+		if uint64(request.PaneID) != terminalPaneID || request.Action != protocol.FrontendNavigate {
+			t.Fatalf("frontend control = %+v", request)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("frontend navigation did not reach the selected frontend")
+	}
+	select {
+	case request := <-observerControls:
+		t.Fatalf("frontend navigation leaked to another frontend: %+v", request)
+	case <-time.After(100 * time.Millisecond):
+	}
+	identityResult, err := frontend.Plugin(ctx, v1.ManageRequest{Action: "run", ID: "example-process", Command: "terminal-process", Args: []string{fmt.Sprint(terminalPaneID)}})
+	if err != nil {
+		t.Fatal("terminal process identity", err)
+	}
+	var identity v1.TerminalProcessResult
+	if identityResult.Command == nil || json.Unmarshal(identityResult.Command.JSON, &identity) != nil || identity.TerminalID != terminalID || identity.PID == 0 {
+		t.Fatalf("terminal process identity = %+v", identityResult.Command)
+	}
+	run("kill", fmt.Sprint(terminalPaneID))
+	if _, err := frontend.Plugin(ctx, v1.ManageRequest{Action: "run", ID: "example-process", Command: "terminal-process", Args: []string{fmt.Sprint(terminalPaneID)}}); err == nil {
+		t.Fatal("exited terminal exposed a process identity")
+	}
+	run("delete", "pane", fmt.Sprint(terminalPaneID))
 	// This command requests an editor, while its frontend makes other daemon
 	// requests on the same stream. Real PTY and transient cleanup are exercised.
 	toolInteractionEntered := make(chan struct{}, 1)
@@ -194,7 +270,7 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 			defer cancel()
 			_, _ = frontend.Plugin(cleanupCtx, v1.ManageRequest{Action: "editor.cancel", PaneID: id})
 		}()
-			deadline := time.Now().Add(30 * time.Second)
+		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
 			result, err := frontend.Plugin(dialogueCtx, v1.ManageRequest{Action: "editor.finish", PaneID: id})
 			if err == nil {
@@ -264,6 +340,9 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 		t.Fatal("view close did not cancel ToolPane interaction")
 	}
 	t.Run("native", func(t *testing.T) {
+		if os.Getenv("ARIADNE_E2E_SKIP_NATIVE") == "1" {
+			t.Skip("native E2E disabled for prebuilt remote run")
+		}
 		compiler := os.Getenv("CC")
 		if compiler == "" {
 			compiler = "cc"
@@ -397,6 +476,7 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = frontend.Close()
+	_ = observer.Close()
 	run("daemon", "stop", "--force")
 	if err := daemon.Wait(); err != nil {
 		t.Fatal("stop original daemon", err)
@@ -410,7 +490,7 @@ func TestExternalPluginEndToEnd(t *testing.T) {
 	}
 	waitForDaemon()
 	var restored v1.ManageResult
-	if err := json.Unmarshal([]byte(run("plugin", "--json", "status", "example-process")), &restored); err != nil || len(restored.Plugins) != 1 || !restored.Plugins[0].Enabled || !restored.Plugins[0].Running || len(restored.Plugins[0].Grants) != 3 {
+	if err := json.Unmarshal([]byte(run("plugin", "--json", "status", "example-process")), &restored); err != nil || len(restored.Plugins) != 1 || !restored.Plugins[0].Enabled || !restored.Plugins[0].Running || len(restored.Plugins[0].Grants) != 5 {
 		t.Fatal("registry restore", err, restored)
 	}
 	if data, err := os.ReadFile(privatePath); err != nil || string(data) != "retained" {
