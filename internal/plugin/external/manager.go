@@ -472,7 +472,33 @@ func (m *Manager) captureInvocation(ctx context.Context, s *session, frontend, p
 	}
 	invocationCtx, invocationCancel := context.WithCancel(ctx)
 	m.contexts[c.Token] = invocation{interaction: &atomic.Int64{}, context: c, plugin: s.id, generation: s.generation, ctx: invocationCtx, cancel: invocationCancel, origin: origin, view: view}
+	s.observeFrontend(frontend)
 	return c, nil
+}
+
+func (s *session) observeFrontend(frontend uint64) {
+	if frontend == 0 {
+		return
+	}
+	s.observedMu.Lock()
+	if s.observed == nil {
+		s.observed = map[uint64]struct{}{}
+	}
+	s.observed[frontend] = struct{}{}
+	s.observedMu.Unlock()
+}
+
+func (s *session) observedFrontend(frontend uint64) bool {
+	s.observedMu.Lock()
+	defer s.observedMu.Unlock()
+	_, ok := s.observed[frontend]
+	return ok
+}
+
+func (s *session) forgetFrontend(frontend uint64) {
+	s.observedMu.Lock()
+	delete(s.observed, frontend)
+	s.observedMu.Unlock()
 }
 
 func (m *Manager) invocationSource(s *session, token string) (invocationOrigin, string) {
@@ -525,7 +551,11 @@ func (m *Manager) Detach(frontend uint64) {
 		token   string
 	}
 	var subscriptions []subscription
+	var sessions []*session
 	m.mu.Lock()
+	for _, runtime := range m.sessions {
+		sessions = append(sessions, runtime)
+	}
 	for token, c := range m.contexts {
 		if c.context.FrontendID == frontend {
 			if runtime := m.sessions[c.plugin]; runtime != nil {
@@ -542,6 +572,9 @@ func (m *Manager) Detach(frontend uint64) {
 	}
 	m.cancelInteractionsLocked(func(interaction interactionSession) bool { return interaction.frontend == frontend })
 	m.mu.Unlock()
+	for _, runtime := range sessions {
+		runtime.forgetFrontend(frontend)
+	}
 	for _, sub := range subscriptions {
 		sub.runtime.unsubscribe(sub.token)
 	}

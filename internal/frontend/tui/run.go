@@ -140,6 +140,8 @@ type session struct {
 	commandPending       bool
 	activePluginDialogue *pluginDialogue
 	pluginEditor         *editorPreview
+	frontendControls     chan frontendControl
+	pendingControls      []frontendControl
 }
 
 // Run enters the full-screen frontend using an already synchronized client.
@@ -236,6 +238,9 @@ func Run(parent context.Context, frontend *client.Client, snapshot core.Snapshot
 	}
 	value.pluginResults = make(chan pluginResult, 128)
 	value.pluginDialogues = make(chan pluginDialogue, 16)
+	value.frontendControls = make(chan frontendControl, 16)
+	frontend.SetFrontendControlHandler(value.enqueueFrontendControl)
+	defer frontend.SetFrontendControlHandler(nil)
 	frontend.SetPluginInteractionHandler(func(dialogCtx context.Context, request v1.InteractionRequest) (v1.InteractionResult, error) {
 		dialogue := pluginDialogue{ctx: dialogCtx, request: request, done: make(chan dialogueResult, 1)}
 		select {
@@ -363,6 +368,9 @@ func (session *session) loop(output *os.File) error {
 			}
 		case dialogue := <-session.pluginDialogues:
 			session.handlePluginDialogue(dialogue)
+		case control := <-session.frontendControls:
+			session.pendingControls = append(session.pendingControls, control)
+			session.processFrontendControls()
 		case request := <-session.clipboardRequests:
 			session.handleClipboardRequest(request)
 		case _, ok := <-resize:
@@ -385,6 +393,7 @@ func (session *session) loop(output *os.File) error {
 			session.dirty = true
 		case <-frames.C:
 			session.pollPluginDialogue()
+			session.processFrontendControls()
 			for _, view := range session.views {
 				if content, ok := view.content.(*externalToolContent); ok {
 					content.refresh(time.Now())

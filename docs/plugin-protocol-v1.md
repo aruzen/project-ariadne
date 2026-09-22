@@ -151,6 +151,8 @@ operationのparamsはstrictに検査し、未知fieldを拒否する。source偽
 | `pty.input` | `pty.input` | `pane_id`、`terminal_id`、base64 `data`。context必須、取得時のTerminalと現在のTerminalの両方に一致すること |
 | `clipboard.read`／`clipboard.write` | `clipboard.read`／`clipboard.write` | `{}` → `{"text":"..."}`／`text`。Ariadne clipboard deny policyは優先 |
 | `frontend.interact` | `frontend.interact`（prompt/confirm）、`frontend.editor`（editor） | `kind` prompt/confirm/editor、`message?`、`text?`。commandからは`InteractionResult`、`view.input`からは`{"id":"..."}`を返す。context必須 |
+| `frontend.navigate` | `frontend.navigate` | `frontend_id`、`pane_id`。context不要。通常Paneへfocus、stash済みPaneをlayout変更なしでpreview |
+| `terminal.process` | `process.inspect` | `pane_id` → `{"terminal_id":N,"pid":N}`。`context` scope時だけcontext必須 |
 
 `log`は共通envelopeを使わず`{"level":"info","message":"..."}`を渡す（level 32 bytes、message 4KiB以下）。`cancel` notificationは`{"id":N}`。
 
@@ -168,6 +170,10 @@ resourceを扱うcapabilityに`all`、`workspace`、`pane`、`context`を用い�
 複数対象の操作は全対象を検査する。moveはPane・移動元Window・移動先Window・指定target、Window stash/restoreは配下の全Pane、resizeはWindow内の全Pane、共有Tool stateは同じdescriptorを参照する全Paneを検査する。Core変更では検査と変更を同じexecutor turnで行い、検査後の移動／共有view追加も再検査する。
 
 clipboard、frontend.interact、frontend.editorはglobal capabilityでscopeは`all`のみ。PTY入力はPane権限に加えて、contextのPane／Terminalに限定する。再起動によるTerminal差し替え後の古い入力は拒否する。Label／attentionのsource、Tool stateのproviderは自身のIDに限定する。
+
+`frontend.navigate`が指定できるfrontendは、現在のPlugin generationで一度以上Contextを受け取った接続に限定する。Context自体の終了後も観測状態はgeneration中維持し、frontend detach、Plugin restart、権限変更で破棄する。通常Paneへの移動は既存preview、copy/search、zoomを終了する。stash済みPaneは開始前のfocusを維持したままpreviewし、別のstash済みPaneへの移動ではpreview対象だけを切り替える。prompt、confirm、editor、mouse drag中はbusyとして拒否する。非対応frontendでは失敗する。
+
+`process.inspect`はPIDをSnapshot、event、state file、logへ含めない。`terminal.process`はrunningなTerminalの現在の`terminal_id`とroot PIDを同時に返し、restart前のTerminal identityは成功させない。子孫process、実行path、OS上の開始時刻はPluginがOS APIで調査する。
 
 ### Snapshotとevent
 

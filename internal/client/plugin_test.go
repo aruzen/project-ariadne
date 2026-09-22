@@ -20,6 +20,8 @@ type testPluginController struct {
 	cancelled chan struct{}
 }
 
+func (*testPluginController) Attach(uint64) error { return nil }
+
 func (p *testPluginController) Manage(ctx context.Context, _ uint64, r v1.ManageRequest) (v1.ManageResult, error) {
 	if r.Action == "run" {
 		close(p.entered)

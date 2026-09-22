@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,8 +12,37 @@ import (
 	v1 "github.com/aruzen/ariadne/api/plugin/v1"
 	"github.com/aruzen/ariadne/internal/core"
 	"github.com/aruzen/ariadne/internal/plugin/external"
+	ariadneprotocol "github.com/aruzen/ariadne/internal/protocol"
 	"github.com/aruzen/streammux/pty"
 )
+
+func TestPluginTerminalProcessReturnsCurrentTerminalIdentity(t *testing.T) {
+	process := newTestManagedProcess()
+	server, _, err := Open(context.Background(), &testFactory{processes: []*testManagedProcess{process}}, DefaultConfig(filepath.Join(t.TempDir(), "state.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close(context.Background())
+	result, err := server.NewTerminal(context.Background(), ariadneprotocol.NewTerminalParams{WindowID: 1, Argv: []string{"shell"}, CWD: t.TempDir(), InitialSize: pty.Size{Cols: 80, Rows: 24}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, _ := json.Marshal(v1.TerminalProcessParams{PaneID: uint64(result.Pane.ID)})
+	value, err := server.PluginOperation(context.Background(), "terminal.process", params, v1.Context{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := value.(v1.TerminalProcessResult)
+	if identity.TerminalID != uint64(*result.Pane.Terminal.ID) || identity.PID != 4312 {
+		t.Fatalf("identity = %+v", identity)
+	}
+	if _, err := server.StopTerminal(context.Background(), ariadneprotocol.PaneParams{PaneID: result.Pane.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.PluginOperation(context.Background(), "terminal.process", params, v1.Context{}); !errors.Is(err, external.ErrUnavailable) {
+		t.Fatalf("stopped terminal process error = %v", err)
+	}
+}
 
 func TestPluginEditorNormalExitAndCancellation(t *testing.T) {
 	for _, normal := range []bool{true, false} {

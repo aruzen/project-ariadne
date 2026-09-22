@@ -10,6 +10,20 @@ import (
 	"github.com/aruzen/ariadne/internal/core"
 )
 
+type recordingOperations struct {
+	method string
+	params json.RawMessage
+}
+
+func (o *recordingOperations) PluginOperation(_ context.Context, method string, params json.RawMessage, _ v1.Context) (any, error) {
+	o.method = method
+	o.params = append(o.params[:0], params...)
+	if method == "terminal.process" {
+		return v1.TerminalProcessResult{TerminalID: 7, PID: 4312}, nil
+	}
+	return nil, nil
+}
+
 func brokerSession(t *testing.T) (*session, *core.Core, uint64) {
 	t.Helper()
 	m, engine, frontend := newTestManager(t, t.TempDir(), DefaultConfig())
@@ -127,6 +141,73 @@ func TestContextCannotBeForgedAndKeepsOriginalFocusAndTerminal(t *testing.T) {
 		t.Fatal("expired invocation accepted")
 	}
 }
+
+func TestFrontendNavigateRequiresObservedFrontendAndSurvivesContextRelease(t *testing.T) {
+	s, engine, frontend := brokerSession(t)
+	operations := &recordingOperations{}
+	s.manager.operations = operations
+	s.manifest.Capabilities = append(s.manifest.Capabilities, v1.FrontendNavigate)
+	value, err := engine.Execute(context.Background(), core.CreatePaneCommand{WindowID: 1, Pane: core.PaneSpec{Kind: core.PaneTool}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paneID := uint64(value.(core.CreatePaneResult).Pane.ID)
+	s.grants = []v1.Grant{{Capability: v1.FrontendNavigate, Scope: v1.Scope{Kind: "pane", IDs: []uint64{paneID}}}}
+	params := v1.FrontendNavigateParams{FrontendID: frontend, PaneID: paneID}
+	if _, err := invoke(s, "frontend.navigate", "", params); !errors.Is(err, ErrPermission) {
+		t.Fatalf("unobserved frontend error = %v", err)
+	}
+	captured, err := s.manager.capture(context.Background(), s, frontend, paneID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.manager.releaseContext(captured.Token)
+	if _, err := invoke(s, "frontend.navigate", "", params); err != nil {
+		t.Fatal(err)
+	}
+	if operations.method != "frontend.navigate" {
+		t.Fatalf("operation = %q", operations.method)
+	}
+	s.manager.mu.Lock()
+	s.manager.sessions[s.id] = s
+	s.manager.mu.Unlock()
+	s.manager.Detach(frontend)
+	s.manager.mu.Lock()
+	delete(s.manager.sessions, s.id)
+	s.manager.mu.Unlock()
+	if _, err := invoke(s, "frontend.navigate", "", params); !errors.Is(err, ErrPermission) {
+		t.Fatalf("detached frontend error = %v", err)
+	}
+}
+
+func TestTerminalProcessContextScopeAndIdentityResult(t *testing.T) {
+	s, engine, frontend := brokerSession(t)
+	operations := &recordingOperations{}
+	s.manager.operations = operations
+	s.manifest.Capabilities = append(s.manifest.Capabilities, v1.ProcessInspect)
+	value, err := engine.Execute(context.Background(), core.CreatePaneCommand{WindowID: 1, Pane: core.PaneSpec{Kind: core.PaneTerminal}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paneID := uint64(value.(core.CreatePaneResult).Pane.ID)
+	s.grants = []v1.Grant{{Capability: v1.ProcessInspect, Scope: v1.Scope{Kind: "context"}}}
+	if _, err := invoke(s, "terminal.process", "", v1.TerminalProcessParams{PaneID: paneID}); !errors.Is(err, ErrPermission) {
+		t.Fatalf("context-free process inspection error = %v", err)
+	}
+	captured, err := s.manager.capture(context.Background(), s, frontend, paneID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.manager.releaseContext(captured.Token)
+	result, err := invoke(s, "terminal.process", captured.Token, v1.TerminalProcessParams{PaneID: paneID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := result.(v1.TerminalProcessResult)
+	if identity.TerminalID != 7 || identity.PID != 4312 {
+		t.Fatalf("identity = %+v", identity)
+	}
+}
 func TestSharedToolStateChecksEveryPaneAndProvider(t *testing.T) {
 	s, engine, _ := brokerSession(t)
 	ctx := context.Background()
@@ -190,6 +271,9 @@ func TestReadAndEventProjectionCannotLeakOtherPanes(t *testing.T) {
 	}
 	if err := ValidateGrant(v1.Grant{Capability: v1.FrontendEditor, Scope: v1.Scope{Kind: "pane", IDs: []uint64{1}}}); err == nil {
 		t.Fatal("global editor resource scope accepted")
+	}
+	if err := ValidateGrant(v1.Grant{Capability: v1.FrontendNavigate, Scope: v1.Scope{Kind: "context"}}); err == nil {
+		t.Fatal("context-scoped frontend navigation accepted")
 	}
 }
 func TestRevokeInvalidatesOldGeneration(t *testing.T) {

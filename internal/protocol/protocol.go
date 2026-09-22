@@ -24,6 +24,7 @@ const (
 	MessageEvent                   = streammux.MessageType(0x1001)
 	MessagePluginInteraction       = streammux.MessageType(0x1002)
 	MessagePluginInteractionCancel = streammux.MessageType(0x1003)
+	MessageFrontendControl         = streammux.MessageType(0x1004)
 	DefaultMaxJSONBytes            = 1 << 20
 	DefaultSendTimeout             = 2 * time.Second
 )
@@ -99,8 +100,25 @@ type Config struct {
 
 // PluginController is the shared management and extension bridge for every frontend.
 type PluginController interface {
+	Attach(uint64) error
 	Manage(context.Context, uint64, v1.ManageRequest) (v1.ManageResult, error)
 	Detach(uint64)
+}
+
+type FrontendAction string
+
+const FrontendNavigate FrontendAction = "navigate"
+
+type FrontendControlRequest struct {
+	Version         uint16         `json:"version"`
+	Action          FrontendAction `json:"action"`
+	PaneID          core.PaneID    `json:"pane_id"`
+	MinimumRevision uint64         `json:"minimum_revision"`
+}
+
+type FrontendControlResponse struct {
+	Version uint16       `json:"version"`
+	Error   *RemoteError `json:"error,omitempty"`
 }
 
 // TerminalController owns operations that cross the Core/PTY I/O boundary.
@@ -851,7 +869,41 @@ func (protocol *Protocol) synchronize(params json.RawMessage) (SyncResult, *core
 	}
 	protocol.subscription = subscription
 	protocol.mu.Unlock()
+	if protocol.config.Plugins != nil {
+		if err := protocol.config.Plugins.Attach(uint64(subscription.ID())); err != nil {
+			protocol.mu.Lock()
+			protocol.subscription = nil
+			protocol.mu.Unlock()
+			_ = subscription.Close()
+			return SyncResult{}, nil, err
+		}
+	}
 	return SyncResult{Snapshot: snapshot}, subscription, nil
+}
+
+func DecodeFrontendControlRequest(data []byte) (FrontendControlRequest, error) {
+	var request FrontendControlRequest
+	if err := decodeStrict(data, &request); err != nil {
+		return FrontendControlRequest{}, err
+	}
+	if request.Version != Version || request.Action != FrontendNavigate || request.PaneID == 0 {
+		return FrontendControlRequest{}, ErrInvalidPayload
+	}
+	return request, nil
+}
+
+func DecodeFrontendControlResponse(data []byte) (FrontendControlResponse, error) {
+	var response FrontendControlResponse
+	if err := decodeStrict(data, &response); err != nil {
+		return FrontendControlResponse{}, err
+	}
+	if response.Version != Version {
+		return FrontendControlResponse{}, ErrUnsupportedVersion
+	}
+	if response.Error != nil {
+		return response, response.Error
+	}
+	return response, nil
 }
 
 func (protocol *Protocol) frontendID() (core.FrontendID, error) {

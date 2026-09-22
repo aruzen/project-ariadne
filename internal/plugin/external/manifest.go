@@ -144,6 +144,9 @@ func ValidateGrant(g v1.Grant) error {
 	if (g.Capability == v1.ClipboardRead || g.Capability == v1.ClipboardWrite || g.Capability == v1.FrontendInteract || g.Capability == v1.FrontendEditor) && g.Scope.Kind != "all" {
 		return errors.New("plugin: global capability requires all scope")
 	}
+	if g.Capability == v1.FrontendNavigate && g.Scope.Kind == "context" {
+		return errors.New("plugin: frontend navigation does not support context scope")
+	}
 	return nil
 }
 func declares(ds []v1.Declaration, name string) bool {

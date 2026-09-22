@@ -42,6 +42,8 @@ type Client struct {
 	pluginInteraction InteractionHandler
 	pluginNext        atomic.Uint64
 	pluginDialogues   map[string]*pluginDialogueCancel
+	frontendMu        sync.Mutex
+	frontendControl   FrontendControlHandler
 }
 
 func Open(parent context.Context, connection io.ReadWriteCloser, configuration Config) (*Client, error) {
@@ -75,6 +77,11 @@ func Open(parent context.Context, connection io.ReadWriteCloser, configuration C
 		return nil, err
 	}
 	if err := peer.Register(protocol.MessagePluginInteractionCancel, client.handlePluginDialogueCancel); err != nil {
+		cancel()
+		_ = peer.Close()
+		return nil, err
+	}
+	if err := peer.Register(protocol.MessageFrontendControl, client.handleFrontendControl); err != nil {
 		cancel()
 		_ = peer.Close()
 		return nil, err

@@ -24,6 +24,7 @@ type pluginFrontend struct {
 	peer   *streammux.Peer
 	ctx    context.Context
 	cancel context.CancelFunc
+	gate   sync.Mutex
 }
 type pluginEditor struct {
 	frontend uint64
@@ -33,21 +34,34 @@ type pluginEditor struct {
 type pluginController struct {
 	server   *Server
 	peer     *streammux.Peer
-	once     sync.Once
 	frontend uint64
+}
+
+func (p *pluginController) Attach(frontend uint64) error {
+	if frontend == 0 || p.frontend != 0 {
+		return core.ErrInvalidState
+	}
+	linkCtx, cancel := context.WithCancel(p.server.ctx)
+	link := &pluginFrontend{peer: p.peer, ctx: linkCtx, cancel: cancel}
+	p.server.mu.Lock()
+	if _, exists := p.server.pluginFrontends[frontend]; exists {
+		p.server.mu.Unlock()
+		cancel()
+		return core.ErrAlreadyExists
+	}
+	p.frontend = frontend
+	p.server.pluginFrontends[frontend] = link
+	p.server.mu.Unlock()
+	return nil
 }
 
 func (p *pluginController) Manage(ctx context.Context, frontend uint64, request v1.ManageRequest) (v1.ManageResult, error) {
 	if err := ctx.Err(); err != nil {
 		return v1.ManageResult{}, err
 	}
-	p.once.Do(func() {
-		p.frontend = frontend
-		linkCtx, cancel := context.WithCancel(p.server.ctx)
-		p.server.mu.Lock()
-		p.server.pluginFrontends[frontend] = pluginFrontend{p.peer, linkCtx, cancel}
-		p.server.mu.Unlock()
-	})
+	if p.frontend != frontend {
+		return v1.ManageResult{}, external.ErrUnavailable
+	}
 	if request.Action == "editor.open" || request.Action == "editor.finish" || request.Action == "editor.cancel" {
 		return p.server.managePluginEditor(ctx, frontend, request)
 	}
@@ -81,6 +95,98 @@ func decodePluginParams(data []byte, destination any) error {
 }
 func (server *Server) PluginOperation(ctx context.Context, method string, params json.RawMessage, c v1.Context) (any, error) {
 	switch method {
+	case "frontend.navigate":
+		var p v1.FrontendNavigateParams
+		if err := decodePluginParams(params, &p); err != nil {
+			return nil, err
+		}
+		server.mu.Lock()
+		link, ok := server.pluginFrontends[p.FrontendID]
+		server.mu.Unlock()
+		if !ok || link.ctx.Err() != nil {
+			return nil, external.ErrUnavailable
+		}
+		if _, err := server.core.FrontendState(ctx, core.FrontendID(p.FrontendID)); err != nil {
+			return nil, external.ErrUnavailable
+		}
+		snapshot, err := server.core.Snapshot(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err := external.CheckOperation(ctx, snapshot); err != nil {
+			return nil, err
+		}
+		link.gate.Lock()
+		defer link.gate.Unlock()
+		requestCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		stop := context.AfterFunc(link.ctx, cancel)
+		defer stop()
+		payload, err := json.Marshal(protocol.FrontendControlRequest{Version: protocol.Version, Action: protocol.FrontendNavigate, PaneID: core.PaneID(p.PaneID), MinimumRevision: snapshot.Revision})
+		if err != nil {
+			return nil, err
+		}
+		frame, err := streammux.NewFrame(streammux.Header{Version: protocol.Version, MessageType: protocol.MessageFrontendControl, Flags: streammux.FlagRequest, CorrelationID: 1}, payload)
+		if err != nil {
+			return nil, err
+		}
+		response, err := link.peer.Call(requestCtx, frame)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := protocol.DecodeFrontendControlResponse(response.Payload); err != nil {
+			return nil, err
+		}
+		current, err := server.core.Snapshot(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err := external.CheckOperation(ctx, current); err != nil {
+			return nil, err
+		}
+		if _, exists := paneByID(current, core.PaneID(p.PaneID)); !exists {
+			return nil, external.ErrUnavailable
+		}
+		return nil, nil
+	case "terminal.process":
+		var p v1.TerminalProcessParams
+		if err := decodePluginParams(params, &p); err != nil {
+			return nil, err
+		}
+		server.terminalMu.Lock()
+		defer server.terminalMu.Unlock()
+		snapshot, err := server.core.Snapshot(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err := external.CheckOperation(ctx, snapshot); err != nil {
+			return nil, err
+		}
+		pane, ok := paneByID(snapshot, core.PaneID(p.PaneID))
+		if !ok || pane.Kind != core.PaneTerminal || pane.Terminal == nil || pane.Terminal.ID == nil || pane.Terminal.State != core.TerminalRunning {
+			return nil, external.ErrUnavailable
+		}
+		terminalID := *pane.Terminal.ID
+		session, ok := server.manager.Get(terminalID)
+		if !ok {
+			return nil, external.ErrUnavailable
+		}
+		pid, err := session.ProcessID()
+		if err != nil {
+			return nil, external.ErrUnavailable
+		}
+		current, err := server.core.Snapshot(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err := external.CheckOperation(ctx, current); err != nil {
+			return nil, err
+		}
+		pane, ok = paneByID(current, core.PaneID(p.PaneID))
+		if !ok || pane.Terminal == nil || pane.Terminal.ID == nil || *pane.Terminal.ID != terminalID || pane.Terminal.State != core.TerminalRunning {
+			return nil, external.ErrUnavailable
+		}
+		return v1.TerminalProcessResult{TerminalID: uint64(terminalID), PID: pid}, nil
 	case "terminal.new":
 		var p protocol.NewTerminalParams
 		if err := decodePluginParams(params, &p); err != nil {

@@ -19,6 +19,8 @@ const (
 	ClipboardWrite    Capability = "clipboard.write"
 	FrontendInteract  Capability = "frontend.interact"
 	FrontendEditor    Capability = "frontend.editor"
+	FrontendNavigate  Capability = "frontend.navigate"
+	ProcessInspect    Capability = "process.inspect"
 	LabelWrite        Capability = "label.write"
 	AttentionWrite    Capability = "attention.write"
 	ToolStateWrite    Capability = "tool.state.write"
@@ -26,7 +28,7 @@ const (
 
 func ValidCapability(c Capability) bool {
 	switch c {
-	case CoreRead, CoreEvents, LayoutWrite, TerminalLifecycle, PTYObserve, PTYInput, ClipboardRead, ClipboardWrite, FrontendInteract, FrontendEditor, LabelWrite, AttentionWrite, ToolStateWrite:
+	case CoreRead, CoreEvents, LayoutWrite, TerminalLifecycle, PTYObserve, PTYInput, ClipboardRead, ClipboardWrite, FrontendInteract, FrontendEditor, FrontendNavigate, ProcessInspect, LabelWrite, AttentionWrite, ToolStateWrite:
 		return true
 	}
 	return false
@@ -181,6 +183,20 @@ type Interaction struct {
 type InteractionResult struct {
 	Text      string `json:"text,omitempty"`
 	Confirmed bool   `json:"confirmed,omitempty"`
+}
+
+type FrontendNavigateParams struct {
+	FrontendID uint64 `json:"frontend_id"`
+	PaneID     uint64 `json:"pane_id"`
+}
+
+type TerminalProcessParams struct {
+	PaneID uint64 `json:"pane_id"`
+}
+
+type TerminalProcessResult struct {
+	TerminalID uint64 `json:"terminal_id"`
+	PID        uint64 `json:"pid"`
 }
 type InteractionStarted struct {
 	ID string `json:"id"`

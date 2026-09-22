@@ -23,6 +23,8 @@ import (
 
 type session struct {
 	log           *cappedLog
+	observedMu    sync.Mutex
+	observed      map[uint64]struct{}
 	subMu         sync.Mutex
 	subscriptions map[string]map[v1.Capability]bool
 	events        chan observedEvent
@@ -96,7 +98,7 @@ func (m *Manager) start(id string) {
 		return
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
-	s := &session{manager: m, id: id, manifest: manifest, grants: append([]v1.Grant(nil), e.Grants...), generation: generation, ctx: ctx, cancel: cancel, done: make(chan struct{}), terminal: make(chan v1.TerminalEvent, m.config.ControlQueue)}
+	s := &session{manager: m, id: id, manifest: manifest, grants: append([]v1.Grant(nil), e.Grants...), generation: generation, ctx: ctx, cancel: cancel, done: make(chan struct{}), terminal: make(chan v1.TerminalEvent, m.config.ControlQueue), observed: map[uint64]struct{}{}}
 	ep := manifest.Entrypoints[runtime.GOOS+"/"+runtime.GOARCH]
 	argv := append([]string{filepath.Join(dir, filepath.FromSlash(ep.Path))}, ep.Args...)
 	if manifest.Runtime == "native" {

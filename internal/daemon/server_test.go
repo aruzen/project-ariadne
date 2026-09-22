@@ -35,9 +35,10 @@ func newTestManagedProcess() *testManagedProcess {
 	return &testManagedProcess{reader: reader, writer: writer, done: make(chan struct{})}
 }
 
-func (process *testManagedProcess) Output() io.Reader     { return process.reader }
-func (process *testManagedProcess) Input() io.Writer      { return io.Discard }
-func (process *testManagedProcess) Resize(pty.Size) error { return nil }
+func (process *testManagedProcess) Output() io.Reader          { return process.reader }
+func (process *testManagedProcess) Input() io.Writer           { return io.Discard }
+func (process *testManagedProcess) Resize(pty.Size) error      { return nil }
+func (process *testManagedProcess) ProcessID() (uint64, error) { return 4312, nil }
 func (process *testManagedProcess) Terminate() error {
 	process.complete(pty.ExitStatus{Reason: pty.ExitReasonKilled})
 	return nil

@@ -197,6 +197,33 @@ func (s *session) handleAPI(parent context.Context, method string, data json.Raw
 			return nil, ErrPermission
 		}
 		return s.filterSnapshot(snapshot, v1.CoreRead, c), nil
+	case "frontend.navigate":
+		var p v1.FrontendNavigateParams
+		if err := strict(request.Params, &p); err != nil {
+			return nil, err
+		}
+		if p.FrontendID == 0 || p.PaneID == 0 {
+			return nil, core.ErrInvalidArgument
+		}
+		if !s.observedFrontend(p.FrontendID) {
+			return nil, ErrPermission
+		}
+		if err := check(v1.FrontendNavigate, pane(p.PaneID)); err != nil {
+			return nil, err
+		}
+		return invokeIO(ctx, method, request.Params, c)
+	case "terminal.process":
+		var p v1.TerminalProcessParams
+		if err := strict(request.Params, &p); err != nil {
+			return nil, err
+		}
+		if p.PaneID == 0 {
+			return nil, core.ErrInvalidArgument
+		}
+		if err := check(v1.ProcessInspect, pane(p.PaneID)); err != nil {
+			return nil, err
+		}
+		return invokeIO(ctx, method, request.Params, c)
 	case "label.set", "label.remove":
 		var p struct {
 			Kind  string `json:"kind"`

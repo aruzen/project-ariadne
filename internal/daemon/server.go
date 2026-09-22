@@ -53,7 +53,7 @@ type Server struct {
 	terminalMu            sync.Mutex
 	clipboardMu           sync.Mutex
 	clipboardText         []byte
-	pluginFrontends       map[uint64]pluginFrontend
+	pluginFrontends       map[uint64]*pluginFrontend
 	pluginEditors         map[core.PaneID]pluginEditor
 	pluginInteractionNext atomic.Uint64
 	terminalPanes         map[core.TerminalID]core.PaneID
@@ -117,7 +117,7 @@ func Open(parent context.Context, factory pty.ManagedFactory, configuration Conf
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	server := &Server{
-		pluginFrontends: map[uint64]pluginFrontend{}, pluginEditors: map[core.PaneID]pluginEditor{},
+		pluginFrontends: map[uint64]*pluginFrontend{}, pluginEditors: map[core.PaneID]pluginEditor{},
 		config: configuration, core: engine, manager: manager, store: store, load: loaded,
 		ctx: ctx, cancel: cancel, connections: make(map[*streammux.Peer]struct{}), terminalPanes: make(map[core.TerminalID]core.PaneID), fatal: make(chan error, 1),
 		stateLoopDone: make(chan struct{}), managerLoopDone: make(chan struct{}),

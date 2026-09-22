@@ -106,6 +106,32 @@ func newProtocolCore(t *testing.T) *core.Core {
 	return engine
 }
 
+func TestDecodeFrontendControlRejectsInvalidPayloads(t *testing.T) {
+	tests := []string{
+		`{"version":1,"action":"navigate","pane_id":0,"minimum_revision":1}`,
+		`{"version":1,"action":"navigate","pane_id":1,"minimum_revision":1,"unknown":true}`,
+		`{"version":1,"action":"navigate","pane_id":18446744073709551616,"minimum_revision":1}`,
+		`{"version":2,"action":"navigate","pane_id":1,"minimum_revision":1}`,
+		`{"version":1,"action":"unknown","pane_id":1,"minimum_revision":1}`,
+	}
+	for _, payload := range tests {
+		if _, err := DecodeFrontendControlRequest([]byte(payload)); err == nil {
+			t.Fatalf("accepted invalid payload %s", payload)
+		}
+	}
+}
+
+func TestDecodeFrontendControlResponseRejectsInvalidPayloads(t *testing.T) {
+	for _, payload := range []string{
+		`{"version":1,"unknown":true}`,
+		`{"version":2}`,
+	} {
+		if _, err := DecodeFrontendControlResponse([]byte(payload)); err == nil {
+			t.Fatalf("accepted invalid payload %s", payload)
+		}
+	}
+}
+
 func TestSyncThenCommandReturnsResponseAndEvent(t *testing.T) {
 	engine := newProtocolCore(t)
 	pair := newPeerPair(t, engine)
