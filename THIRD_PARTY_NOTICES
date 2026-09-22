@@ -5,11 +5,16 @@ libghostty-vt (Ghostty), revision b0c421fcd2e290629d4285c181b52fe2f2095f06
   License: MIT
   License file: third_party/ghostty/LICENSE
 
+Microsoft Terminal WPF, revision 9ae724aa5b080aafbeea2bbf88db630b182cc802
+  Package: CI.Microsoft.Terminal.Wpf 1.25.260303002
+  License: MIT
+  License file: third_party/windows-terminal/LICENSE
+
 github.com/Microsoft/go-winio v0.6.2
   License: MIT
   License file: third_party/go/github.com/Microsoft/go-winio/LICENSE
 
-github.com/aruzen/streammux v0.3.2
+github.com/aruzen/streammux v0.3.3
   License: MIT
   License file: third_party/go/github.com/aruzen/streammux/LICENSE
 

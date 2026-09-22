@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net8.0-windows10.0.19041": {
+      "CI.Microsoft.Terminal.Wpf": {
+        "type": "Direct",
+        "requested": "[1.25.260303002, 1.25.260303002]",
+        "resolved": "1.25.260303002",
+        "contentHash": "lz6dPTjumMvFKUdTvYa1WdlFHe3gTziWZuY4PC/1vThduVIOPMH89+bIrSs2/C5V1gdPuXwVWZV9+0Rn0BRa0Q=="
+      }
+    },
+    "net8.0-windows10.0.19041/win-arm64": {
+      "CI.Microsoft.Terminal.Wpf": {
+        "type": "Direct",
+        "requested": "[1.25.260303002, 1.25.260303002]",
+        "resolved": "1.25.260303002",
+        "contentHash": "lz6dPTjumMvFKUdTvYa1WdlFHe3gTziWZuY4PC/1vThduVIOPMH89+bIrSs2/C5V1gdPuXwVWZV9+0Rn0BRa0Q=="
+      }
+    },
+    "net8.0-windows10.0.19041/win-x64": {
+      "CI.Microsoft.Terminal.Wpf": {
+        "type": "Direct",
+        "requested": "[1.25.260303002, 1.25.260303002]",
+        "resolved": "1.25.260303002",
+        "contentHash": "lz6dPTjumMvFKUdTvYa1WdlFHe3gTziWZuY4PC/1vThduVIOPMH89+bIrSs2/C5V1gdPuXwVWZV9+0Rn0BRa0Q=="
+      }
+    }
+  }
+}
