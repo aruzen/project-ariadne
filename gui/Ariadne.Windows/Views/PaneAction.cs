@@ -1,4 +1,5 @@
 using Ariadne.Windows.Protocol;
+using System.Windows.Media;
 
 namespace Ariadne.Windows.Views;
 
@@ -23,7 +24,11 @@ internal static class PaneContextMenu
 {
     public static System.Windows.Controls.ContextMenu Create(PaneModel pane, EventHandler<PaneActionEventArgs> handler)
     {
-        var menu = new System.Windows.Controls.ContextMenu();
+        var menu = new System.Windows.Controls.ContextMenu
+        {
+            Background = new SolidColorBrush(Color.FromRgb(245, 246, 248)),
+            Foreground = new SolidColorBrush(Color.FromRgb(32, 36, 42)),
+        };
         Add(menu, "Split right", PaneAction.SplitRight, pane.Id, true, handler);
         Add(menu, "Split below", PaneAction.SplitBelow, pane.Id, true, handler);
         menu.Items.Add(new System.Windows.Controls.Separator());

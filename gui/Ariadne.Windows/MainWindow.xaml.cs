@@ -2,6 +2,9 @@ using System.Collections;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using Ariadne.Windows.Protocol;
 using Ariadne.Windows.Views;
 
@@ -11,29 +14,107 @@ public partial class MainWindow : Window
 {
     private readonly Dictionary<ulong, TerminalPaneView> terminalViews = new();
     private readonly Dictionary<ulong, ToolPaneView> toolViews = new();
-    private readonly ToolPaneRendererRegistry toolRenderers = new();
+    private ToolPaneRendererRegistry? toolRenderers;
     private readonly CancellationTokenSource lifetime = new();
+    private readonly SemaphoreSlim interactionGate = new(1, 1);
+    private readonly SemaphoreSlim focusGate = new(1, 1);
     private AriadneClient? client;
     private Snapshot snapshot = new();
     private ulong workspaceId;
     private ulong windowId;
     private ulong paneId;
+    private ulong requestedFocusPaneId;
     private ulong previewPaneId;
     private ulong zoomPaneId;
     private bool prefixArmed;
     private bool updatingPickers;
     private bool closing;
+    private bool smokePluginMode;
+    private Dictionary<string, string> keybindings = LegacyKeybindings();
+    private readonly List<string> keySequence = [];
 
     public MainWindow()
     {
         InitializeComponent();
         Loaded += OnLoaded;
         Closed += OnClosed;
+        Deactivated += (_, _) => CancelPrefix();
+        PreviewMouseDown += (_, _) => CancelPrefix();
     }
 
-    private async void OnLoaded(object sender, RoutedEventArgs e) => await ConnectAsync();
+    private void CancelPrefix()
+    {
+        if (!prefixArmed && keySequence.Count == 0)
+        {
+            return;
+        }
+        prefixArmed = false;
+        keySequence.Clear();
+        SetStatus("Prefix cancelled");
+    }
 
-    private async Task ConnectAsync()
+    private async void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        var arguments = Environment.GetCommandLineArgs();
+        smokePluginMode = arguments.Contains("--smoke-test-plugin", StringComparer.OrdinalIgnoreCase);
+        var connected = await ConnectAsync();
+        var smoke = arguments.Contains("--smoke-test", StringComparer.OrdinalIgnoreCase) ||
+                    smokePluginMode;
+        if (!smoke)
+        {
+            return;
+        }
+        if (connected && smokePluginMode)
+        {
+            var external = snapshot.Panes.LastOrDefault(value => value.Tool is not null && value.Tool.Provider != "ariadne");
+            var externalWindow = external is null ? null : FindWindow(external.WindowId);
+            var externalWorkspace = externalWindow is null
+                ? null
+                : snapshot.Workspaces.FirstOrDefault(value => value.WindowIds.Contains(externalWindow.Id));
+            if (external is not null && externalWindow is not null && externalWorkspace is not null)
+            {
+                workspaceId = externalWorkspace.Id;
+                windowId = externalWindow.Id;
+                paneId = external.Id;
+                zoomPaneId = external.Id;
+                Refresh();
+            }
+        }
+        var passed = connected && await WaitForSmokeConditionAsync(smokePluginMode);
+        var screenshot = arguments.FirstOrDefault(value => value.StartsWith("--screenshot=", StringComparison.OrdinalIgnoreCase));
+        if (screenshot is not null)
+        {
+            SaveScreenshot(screenshot["--screenshot=".Length..]);
+        }
+        else if (arguments.Contains("--smoke-test-screenshot", StringComparer.OrdinalIgnoreCase))
+        {
+            SaveScreenshot(Path.Combine(Path.GetTempPath(), "ariadne-gui-smoke.png"));
+        }
+        Application.Current.Shutdown(passed ? 0 : 1);
+    }
+
+    private void SaveScreenshot(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || ActualWidth < 1 || ActualHeight < 1)
+        {
+            throw new ArgumentException("invalid screenshot path or window dimensions", nameof(path));
+        }
+        UpdateLayout();
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var bitmap = new RenderTargetBitmap(
+            Math.Max(1, (int)Math.Ceiling(ActualWidth * dpi.DpiScaleX)),
+            Math.Max(1, (int)Math.Ceiling(ActualHeight * dpi.DpiScaleY)),
+            dpi.PixelsPerInchX, dpi.PixelsPerInchY, PixelFormats.Pbgra32);
+        bitmap.Render(this);
+        var directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+        using var output = File.Create(path);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        encoder.Save(output);
+    }
+
+    private async Task<bool> ConnectAsync()
     {
         SetStatus("Connecting…");
         await DisconnectAsync();
@@ -41,8 +122,15 @@ public partial class MainWindow : Window
         {
             var value = await AriadneClient.ConnectAsync(cancellationToken: lifetime.Token);
             client = value;
+            keybindings = value.Gui.Keybindings.Count == 0
+                ? LegacyKeybindings()
+                : new Dictionary<string, string>(value.Gui.Keybindings, StringComparer.Ordinal);
+            toolRenderers = new ToolPaneRendererRegistry(value, value.Gui);
+            RenderOptions.ProcessRenderMode = value.Gui.SoftwareRendering ? RenderMode.SoftwareOnly : RenderMode.Default;
+            ApplyGuiTheme(value.Gui);
             value.Store.Changed += StoreOnChanged;
             value.NavigateRequested += NavigateAsync;
+            value.PluginInteractionRequested += HandlePluginInteractionAsync;
             value.Failed += ConnectionOnFailed;
             snapshot = value.Store.Current;
             SelectInitialLocation();
@@ -54,14 +142,48 @@ public partial class MainWindow : Window
                 Refresh();
             }
             SetStatus("Connected");
+            return true;
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         {
+            return false;
         }
         catch (Exception ex)
         {
             SetStatus(ex.Message);
+            return false;
         }
+    }
+
+    private async Task<bool> WaitForSmokeConditionAsync(bool requirePlugin)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+        ToolPaneView? pluginView = null;
+        int? initialInputCount = null;
+        while (DateTime.UtcNow < deadline && !lifetime.IsCancellationRequested)
+        {
+            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            if (PaneHost.Children.Count != 0 && !requirePlugin)
+            {
+                return true;
+            }
+            if (requirePlugin)
+            {
+                pluginView ??= toolViews.Values.FirstOrDefault(value => value.ExternalFrameReady && value.ExternalInputCount is not null);
+                if (pluginView is not null && initialInputCount is null)
+                {
+                    initialInputCount = pluginView.ExternalInputCount;
+                    pluginView.SendExternalSmokeInput();
+                }
+                else if (pluginView is not null && initialInputCount is not null &&
+                         pluginView.ExternalInputCount is int currentInputCount && currentInputCount > initialInputCount.Value)
+                {
+                    return true;
+                }
+            }
+            await Task.Delay(100, lifetime.Token);
+        }
+        return false;
     }
 
     private void SelectInitialLocation()
@@ -249,7 +371,7 @@ public partial class MainWindow : Window
                 {
                     view.Dispose();
                 }
-                view = new TerminalPaneView(client!, pane);
+                view = new TerminalPaneView(client!, pane, client!.Gui);
                 view.FocusRequested += (_, _) => _ = FocusPaneAsync(pane.Id);
                 view.ConnectionFailed += (_, error) => SetStatus(error.Message);
                 view.ActionRequested += PaneActionRequested;
@@ -263,7 +385,7 @@ public partial class MainWindow : Window
         }
         if (!toolViews.TryGetValue(pane.Id, out var tool))
         {
-            tool = new ToolPaneView(toolRenderers, pane, FindToolInstance(pane.Tool));
+            tool = new ToolPaneView(toolRenderers!, pane, FindToolInstance(pane.Tool));
             tool.FocusRequested += (_, _) => _ = FocusPaneAsync(pane.Id);
             tool.ActionRequested += PaneActionRequested;
             toolViews[pane.Id] = tool;
@@ -302,22 +424,62 @@ public partial class MainWindow : Window
         }
     }
 
+    private void RefreshPaneFocus()
+    {
+        foreach (var (id, view) in terminalViews)
+        {
+            view.SetFocused(id == paneId || id == previewPaneId);
+        }
+        foreach (var (id, view) in toolViews)
+        {
+            view.SetFocused(id == paneId || id == previewPaneId);
+        }
+    }
+
     private async Task FocusPaneAsync(ulong id)
     {
-        if (client is null || id == paneId)
+        if (client is null || id == 0 || id == paneId)
         {
             return;
         }
+        requestedFocusPaneId = id;
+        previewPaneId = 0;
+        paneId = id;
+        RefreshPaneFocus();
+
+        var entered = false;
         try
         {
+            await focusGate.WaitAsync(lifetime.Token);
+            entered = true;
+            if (requestedFocusPaneId != id)
+            {
+                return;
+            }
             var result = await client.SetFocusAsync(id, lifetime.Token);
-            previewPaneId = 0;
+            if (requestedFocusPaneId != id)
+            {
+                return;
+            }
             ApplyFocus(result.Focus);
-            Refresh();
+            RefreshPaneFocus();
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
         }
         catch (Exception ex)
         {
-            SetStatus(ex.Message);
+            if (requestedFocusPaneId == id)
+            {
+                SetStatus(ex.Message);
+            }
+        }
+        finally
+        {
+            if (entered)
+            {
+                focusGate.Release();
+            }
         }
     }
 
@@ -358,11 +520,155 @@ public partial class MainWindow : Window
         await completion.Task.ConfigureAwait(false);
     }
 
+    private async Task<PluginInteractionResult> HandlePluginInteractionAsync(PluginInteractionRequest request, CancellationToken cancellationToken)
+    {
+        await interactionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (request.Interaction.Kind == "editor")
+            {
+                return await HandlePluginEditorAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+            var completion = new TaskCompletionSource<PluginInteractionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            await Dispatcher.BeginInvoke(() =>
+            {
+                try
+                {
+                    if (request.Interaction.Kind == "confirm")
+                    {
+                        var confirmed = MessageBox.Show(this, request.Interaction.Message, request.Context.PluginId,
+                            MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes;
+                        completion.TrySetResult(new PluginInteractionResult { Confirmed = confirmed });
+                        return;
+                    }
+                    if (request.Interaction.Kind != "prompt")
+                    {
+                        throw new InvalidOperationException($"unsupported plugin interaction {request.Interaction.Kind}");
+                    }
+                    var prompt = new TextPromptWindow(this, request.Context.PluginId,
+                        request.Interaction.Message, request.Interaction.Text, "OK", true);
+                    using var registration = cancellationToken.Register(() => Dispatcher.BeginInvoke(prompt.Close));
+                    if (prompt.ShowDialog() == true)
+                    {
+                        completion.TrySetResult(new PluginInteractionResult { Text = prompt.Value });
+                    }
+                    else
+                    {
+                        completion.TrySetCanceled(cancellationToken);
+                    }
+                }
+                catch (Exception error)
+                {
+                    completion.TrySetException(error);
+                }
+            });
+            return await completion.Task.ConfigureAwait(false);
+        }
+        finally
+        {
+            interactionGate.Release();
+        }
+    }
+
+    private async Task<PluginInteractionResult> HandlePluginEditorAsync(PluginInteractionRequest request, CancellationToken cancellationToken)
+    {
+        var currentClient = client ?? throw new InvalidOperationException("frontend is disconnected");
+        var editor = currentClient.Gui.Editor.Count == 0 ? new List<string> { "notepad.exe" } : currentClient.Gui.Editor;
+        var environment = Environment.GetEnvironmentVariables().Cast<DictionaryEntry>()
+            .Select(value => $"{value.Key}={value.Value}").ToList();
+        PluginEditorResult? opened = null;
+        var previousPreview = previewPaneId;
+        var previousPane = paneId;
+        var previousZoom = zoomPaneId;
+        try
+        {
+            var result = await currentClient.PluginAsync(new PluginManageRequest
+            {
+                Action = "editor.open",
+                Editor = new PluginEditorRequest
+                {
+                    Argv = editor,
+                    Cwd = Environment.CurrentDirectory,
+                    Env = environment,
+                    Text = request.Interaction.Text,
+                },
+            }, cancellationToken).ConfigureAwait(false);
+            opened = result.Editor ?? throw new InvalidDataException("editor.open returned no editor");
+
+            var exited = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void Observe(Snapshot value)
+            {
+                var pane = value.Panes.FirstOrDefault(candidate => candidate.Id == opened.PaneId);
+                if (pane?.Terminal?.State is "exited" or "failed")
+                {
+                    var normal = pane.Terminal.Exit is { Kind: "process", Code: 0 };
+                    exited.TrySetResult(normal);
+                }
+            }
+            currentClient.Store.Changed += Observe;
+            using var registration = cancellationToken.Register(() => exited.TrySetCanceled(cancellationToken));
+            try
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    previewPaneId = opened.PaneId;
+                    paneId = opened.PaneId;
+                    zoomPaneId = 0;
+                    Refresh();
+                });
+                Observe(currentClient.Store.Current);
+                if (!await exited.Task.ConfigureAwait(false))
+                {
+                    throw new OperationCanceledException("editor exited unsuccessfully", cancellationToken);
+                }
+            }
+            finally
+            {
+                currentClient.Store.Changed -= Observe;
+            }
+
+            var finished = await currentClient.PluginAsync(new PluginManageRequest
+            {
+                Action = "editor.finish", PaneId = opened.PaneId,
+            }, cancellationToken).ConfigureAwait(false);
+            return new PluginInteractionResult { Text = finished.Editor?.Text ?? "" };
+        }
+        catch
+        {
+            if (opened is not null)
+            {
+                try
+                {
+                    using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    await currentClient.PluginAsync(new PluginManageRequest
+                    {
+                        Action = "editor.cancel", PaneId = opened.PaneId,
+                    }, cleanup.Token).ConfigureAwait(false);
+                }
+                catch
+                {
+                }
+            }
+            throw;
+        }
+        finally
+        {
+            await Dispatcher.InvokeAsync(() =>
+            {
+                previewPaneId = previousPreview;
+                paneId = previousPane;
+                zoomPaneId = previousZoom;
+                Refresh();
+            });
+        }
+    }
+
     private void ApplyFocus(FrontendState focus)
     {
         workspaceId = focus.WorkspaceId;
         windowId = focus.WindowId;
         paneId = focus.PaneId;
+        requestedFocusPaneId = focus.PaneId;
     }
 
     private async void WorkspacePicker_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -389,13 +695,14 @@ public partial class MainWindow : Window
 
     private async Task SelectWindowAsync(ulong id)
     {
-        if (client is null)
+        var currentClient = client;
+        if (currentClient is null)
         {
             return;
         }
         try
         {
-            var result = await client.SelectWindowAsync(id, lifetime.Token);
+            var result = await currentClient.SelectWindowAsync(id, lifetime.Token);
             previewPaneId = 0;
             ApplyFocus(result.Focus);
             Refresh();
@@ -422,7 +729,7 @@ public partial class MainWindow : Window
         try
         {
             var result = await client.NewTerminalAsync(
-                windowId, targetPaneId, direction, ["powershell.exe", "-NoLogo"],
+                windowId, targetPaneId, direction, DefaultShell(client.Gui),
                 Environment.CurrentDirectory, CurrentEnvironment(), 120, 30, lifetime.Token);
             var focused = await client.SetFocusAsync(result.Pane.Id, lifetime.Token);
             ApplyFocus(focused.Focus);
@@ -500,6 +807,9 @@ public partial class MainWindow : Window
         .Select(value => $"{value.Key}={value.Value}")
         .ToArray();
 
+    private static IReadOnlyList<string> DefaultShell(GuiOptions options) =>
+        options.Shell.Count == 0 ? ["powershell.exe", "-NoLogo"] : options.Shell;
+
     private async Task ShareClipboardAsync(ulong targetPaneId, string text)
     {
         try
@@ -543,7 +853,7 @@ public partial class MainWindow : Window
 
     private void Stash_OnClick(object sender, RoutedEventArgs e)
     {
-        var menu = new ContextMenu();
+        var menu = CreateSelectionMenu();
         foreach (var stashed in snapshot.StashedPanes)
         {
             var pane = snapshot.Panes.FirstOrDefault(value => value.Id == stashed.PaneId);
@@ -567,8 +877,10 @@ public partial class MainWindow : Window
         {
             menu.Items.Add(new MenuItem { Header = "Stash is empty", IsEnabled = false });
         }
-        menu.PlacementTarget = StashButton;
-        menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        menu.PlacementTarget = sender as UIElement ?? StashButton;
+        menu.Placement = ReferenceEquals(sender, StashButton)
+            ? System.Windows.Controls.Primitives.PlacementMode.Bottom
+            : System.Windows.Controls.Primitives.PlacementMode.MousePoint;
         menu.IsOpen = true;
     }
 
@@ -631,68 +943,165 @@ public partial class MainWindow : Window
 
     private async void MainWindow_OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
-        var controlA = e.Key == Key.A && Keyboard.Modifiers.HasFlag(ModifierKeys.Control);
-        if (!prefixArmed)
+        var modifiers = Keyboard.Modifiers;
+        if (keySequence.Count == 0 && e.Key == Key.P && modifiers.HasFlag(ModifierKeys.Control) &&
+            modifiers.HasFlag(ModifierKeys.Shift))
         {
-            if (e.Key == Key.P && Keyboard.Modifiers.HasFlag(ModifierKeys.Control) && Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))
-            {
-                e.Handled = true;
-                await ShowCommandPaletteAsync();
-                return;
-            }
-            if (controlA)
-            {
-                prefixArmed = true;
-                e.Handled = true;
-                SetStatus("prefix: Ctrl-a");
-            }
+            e.Handled = true;
+            await ShowCommandPaletteAsync();
             return;
         }
-
-        prefixArmed = false;
+        var token = PortableKey(e, modifiers);
+        if (token is null)
+        {
+            return;
+        }
+        if (e.IsRepeat && keySequence.Count != 0 && keySequence[^1] == token)
+        {
+            e.Handled = true;
+            return;
+        }
+        var candidate = string.Join(' ', keySequence.Append(token));
+        var exact = keybindings.TryGetValue(candidate, out var command);
+        var prefix = keybindings.Keys.Any(value => value.StartsWith(candidate + " ", StringComparison.Ordinal));
+        if (!exact && !prefix)
+        {
+            if (keySequence.Count == 0) return;
+            e.Handled = true;
+            CancelPrefix();
+            return;
+        }
         e.Handled = true;
-        if (controlA)
+        if (exact)
         {
-            if (terminalViews.TryGetValue(paneId, out var terminal))
-            {
-                terminal.SendInput("\x01");
-            }
-            SetStatus("Ctrl-a sent");
+            keySequence.Clear();
+            prefixArmed = false;
+            await ExecuteKeybindingAsync(command!);
             return;
         }
-        switch (e.Key)
+        keySequence.Add(token);
+        prefixArmed = true;
+        SetStatus($"keys: {candidate}");
+    }
+
+    private static string? PortableKey(KeyEventArgs e, ModifierKeys modifiers)
+    {
+        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        string? name = key switch
         {
-            case Key.H:
-                await MoveFocusAsync(-1, 0);
-                break;
-            case Key.J:
-                await MoveFocusAsync(0, 1);
-                break;
-            case Key.K:
-                await MoveFocusAsync(0, -1);
-                break;
-            case Key.L:
-                await MoveFocusAsync(1, 0);
-                break;
-            case Key.Z:
-                zoomPaneId = zoomPaneId == 0 ? paneId : 0;
-                Refresh();
-                SetStatus(zoomPaneId == 0 ? "Zoom off" : $"Pane {paneId} zoomed");
-                break;
-            case Key.D5 when Keyboard.Modifiers.HasFlag(ModifierKeys.Shift):
-                await CreateTerminalAsync(paneId, "horizontal");
-                break;
-            case Key.OemQuotes when Keyboard.Modifiers.HasFlag(ModifierKeys.Shift):
-                await CreateTerminalAsync(paneId, "vertical");
-                break;
-            case Key.OemSemicolon when Keyboard.Modifiers.HasFlag(ModifierKeys.Shift):
-                await ShowCommandPaletteAsync();
-                break;
-            default:
-                SetStatus("Unknown prefix key");
-                break;
+            >= Key.A and <= Key.Z => ((char)('a' + (int)key - (int)Key.A)).ToString(),
+            Key.Left => "left", Key.Down => "down", Key.Up => "up", Key.Right => "right",
+            Key.Enter => "enter", Key.Escape => "escape", Key.Tab => "tab", Key.Back => "backspace",
+            Key.Space => "space", Key.PageUp => "page-up", Key.PageDown => "page-down",
+            Key.Home => "home", Key.End => "end", Key.Delete => "delete", Key.Insert => "insert",
+            Key.D5 when modifiers.HasFlag(ModifierKeys.Shift) => "%",
+            Key.D2 when modifiers.HasFlag(ModifierKeys.Shift) => "\"",
+            Key.OemQuotes when modifiers.HasFlag(ModifierKeys.Shift) => "\"",
+            Key.D9 when modifiers.HasFlag(ModifierKeys.Shift) => "(",
+            Key.D0 when modifiers.HasFlag(ModifierKeys.Shift) => ")",
+            Key.D4 when modifiers.HasFlag(ModifierKeys.Shift) => "$",
+            Key.OemOpenBrackets => "[", Key.OemCloseBrackets => "]", Key.OemComma => ",",
+            Key.OemQuestion when modifiers.HasFlag(ModifierKeys.Shift) => "?",
+            Key.OemSemicolon => ":",
+            _ => null,
+        };
+        if (name is null) return null;
+        if (modifiers.HasFlag(ModifierKeys.Control)) return "ctrl-" + name.ToLowerInvariant();
+        if (modifiers.HasFlag(ModifierKeys.Alt)) return "alt-" + name.ToLowerInvariant();
+        if (modifiers.HasFlag(ModifierKeys.Shift) && name.Length == 1 && char.IsLetter(name[0])) return name.ToUpperInvariant();
+        return name;
+    }
+
+    private async Task ExecuteKeybindingAsync(string commands)
+    {
+        if (commands.Length == 0)
+        {
+            SetStatus("Keybinding disabled");
+            return;
+        }
+        foreach (var command in commands.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            switch (command)
+            {
+                case "focus left": await MoveFocusAsync(-1, 0); break;
+                case "focus down": await MoveFocusAsync(0, 1); break;
+                case "focus up": await MoveFocusAsync(0, -1); break;
+                case "focus right": await MoveFocusAsync(1, 0); break;
+                case "resize left": await ResizeFocusedPaneAsync("horizontal", -1); break;
+                case "resize right": await ResizeFocusedPaneAsync("horizontal", 1); break;
+                case "resize up": await ResizeFocusedPaneAsync("vertical", -1); break;
+                case "resize down": await ResizeFocusedPaneAsync("vertical", 1); break;
+                case "zoom toggle": MenuZoom_OnClick(this, new RoutedEventArgs()); break;
+                case "zoom on" when zoomPaneId == 0: MenuZoom_OnClick(this, new RoutedEventArgs()); break;
+                case "zoom off" when zoomPaneId != 0: MenuZoom_OnClick(this, new RoutedEventArgs()); break;
+                case "split h": await CreateTerminalAsync(paneId, "horizontal"); break;
+                case "split v": await CreateTerminalAsync(paneId, "vertical"); break;
+                case "command-prompt": await ShowCommandPaletteAsync(); break;
+                case "restart": await ExecutePaneActionAsync(paneId, PaneAction.Restart); break;
+                case "run": await ExecutePaneActionAsync(paneId, PaneAction.RunCommand); break;
+                case "stop": await ExecutePaneActionAsync(paneId, PaneAction.Stop); break;
+                case "stash-pane": await ExecutePaneActionAsync(paneId, PaneAction.Stash); break;
+                case "close-confirm": await ExecutePaneActionAsync(paneId, PaneAction.Delete); break;
+                case "paste" when terminalViews.TryGetValue(paneId, out var terminal): await PasteClipboardAsync(terminal); break;
+                case "send-key ctrl-a" when terminalViews.TryGetValue(paneId, out var target): target.SendInput("\x01"); break;
+                case "detach": Close(); return;
+                case "help":
+                case "commands": await ShowCommandPaletteAsync(); break;
+                case "reconnect": await ConnectAsync(); break;
+                case "settings": MenuSettings_OnClick(this, new RoutedEventArgs()); break;
+                default:
+                    SetStatus($"GUI does not support command: {command}");
+                    return;
+            }
         }
     }
+
+    private async Task ResizeFocusedPaneAsync(string direction, int neighborDelta)
+    {
+        if (client is null || FindWindow(windowId)?.Layout is not { } layout) return;
+        var path = new List<(LayoutNode Node, int ChildIndex)>();
+        if (!FindLayoutPath(layout, paneId, path)) return;
+        for (var index = path.Count - 1; index >= 0; index--)
+        {
+            var (node, childIndex) = path[index];
+            if (node.Direction != direction) continue;
+            var neighbor = childIndex + neighborDelta;
+            if (neighbor < 0 || neighbor >= node.Children.Count) continue;
+            var weights = Enumerable.Range(0, node.Children.Count)
+                .Select(position => position < node.Weights.Count && node.Weights[position] > 0 ? node.Weights[position] : 1u)
+                .ToArray();
+            if (weights[neighbor] <= 1)
+            {
+                SetStatus("Adjacent pane is already at its minimum weight");
+                return;
+            }
+            weights[childIndex]++;
+            weights[neighbor]--;
+            await client.ResizeSplitAsync(node.SplitId, weights, lifetime.Token);
+            SetStatus($"Pane {paneId} resized {direction}");
+            return;
+        }
+        SetStatus("No adjacent pane in that direction");
+    }
+
+    private static bool FindLayoutPath(LayoutNode node, ulong target, List<(LayoutNode Node, int ChildIndex)> path)
+    {
+        if (node.Kind == "pane") return node.PaneId == target;
+        for (var index = 0; index < node.Children.Count; index++)
+        {
+            path.Add((node, index));
+            if (FindLayoutPath(node.Children[index], target, path)) return true;
+            path.RemoveAt(path.Count - 1);
+        }
+        return false;
+    }
+
+    private static Dictionary<string, string> LegacyKeybindings() => new(StringComparer.Ordinal)
+    {
+        ["ctrl-a h"] = "focus left", ["ctrl-a j"] = "focus down", ["ctrl-a k"] = "focus up", ["ctrl-a l"] = "focus right",
+        ["ctrl-a z"] = "zoom toggle", ["ctrl-a ctrl-a"] = "send-key ctrl-a", ["ctrl-a %"] = "split h",
+        ["ctrl-a \""] = "split v", ["ctrl-a :"] = "command-prompt",
+    };
 
     private async void Palette_OnClick(object sender, RoutedEventArgs e) => await ShowCommandPaletteAsync();
 
@@ -711,14 +1120,22 @@ public partial class MainWindow : Window
     {
         var items = new List<CommandPaletteItem>
         {
-            new("split-right", "Pane: split right"),
-            new("split-below", "Pane: split below"),
-            new("zoom", zoomPaneId == 0 ? "Pane: zoom" : "Pane: leave zoom"),
-            new("focus-left", "Pane: focus left"),
-            new("focus-down", "Pane: focus down"),
-            new("focus-up", "Pane: focus up"),
-            new("focus-right", "Pane: focus right"),
-            new("reconnect", "Frontend: reconnect"),
+            new("split-right", "split h — split the focused Pane to the right"),
+            new("split-below", "split v — split the focused Pane below"),
+            new("zoom", "zoom [on|off|toggle] — change the frontend-local zoom state"),
+            new("focus-left", "focus left — focus the Pane on the left"),
+            new("focus-down", "focus down — focus the Pane below"),
+            new("focus-up", "focus up — focus the Pane above"),
+            new("focus-right", "focus right — focus the Pane on the right"),
+            new("resize-left", "resize left — grow the focused Pane to the left"),
+            new("resize-down", "resize down — grow the focused Pane downward"),
+            new("resize-up", "resize up — grow the focused Pane upward"),
+            new("resize-right", "resize right — grow the focused Pane to the right"),
+            new("paste", "paste — paste the shared clipboard into the focused terminal"),
+            new("send-prefix", "send-key ctrl-a — send Ctrl+A to the focused terminal"),
+            new("settings", "settings — open GUI settings"),
+            new("reconnect", "reconnect — reconnect this frontend"),
+            new("detach", "detach — close this frontend without stopping the daemon"),
         };
         var pane = snapshot.Panes.FirstOrDefault(value => value.Id == paneId);
         var state = pane?.Terminal?.State;
@@ -726,26 +1143,26 @@ public partial class MainWindow : Window
         {
             if (state is "exited" or "failed" or "placeholder")
             {
-                items.Add(new("restart", "Terminal: restart original command"));
-                items.Add(new("run", "Terminal: run another command…"));
-                items.Add(new("delete", "Pane: delete"));
+                items.Add(new("restart", "restart — restart the focused terminal's original command"));
+                items.Add(new("run", "run — run another command in the focused Pane…"));
+                items.Add(new("delete", "close-confirm — confirm and delete the focused Pane"));
             }
             if (state == "running")
             {
-                items.Add(new("stop", "Terminal: stop"));
+                items.Add(new("stop", "stop — stop the focused terminal"));
             }
         }
         if (pane is not null && !pane.Transient)
         {
-            items.Add(new("stash", "Pane: stash"));
+            items.Add(new("stash", "stash-pane — stash the focused Pane"));
         }
         foreach (var stashed in snapshot.StashedPanes)
         {
-            items.Add(new($"restore-pane:{stashed.PaneId}", $"Stash: restore pane {stashed.PaneId}"));
+            items.Add(new($"restore-pane:{stashed.PaneId}", $"restore-pane {stashed.PaneId} — restore this stashed Pane"));
         }
         foreach (var stashed in snapshot.StashedWindows)
         {
-            items.Add(new($"restore-window:{stashed.WindowId}", $"Stash: restore window {stashed.WindowId}"));
+            items.Add(new($"restore-window:{stashed.WindowId}", $"restore-window {stashed.WindowId} — restore this stashed Window"));
         }
         return items;
     }
@@ -764,12 +1181,20 @@ public partial class MainWindow : Window
             case "focus-down": await MoveFocusAsync(0, 1); return;
             case "focus-up": await MoveFocusAsync(0, -1); return;
             case "focus-right": await MoveFocusAsync(1, 0); return;
+            case "resize-left": await ResizeFocusedPaneAsync("horizontal", -1); return;
+            case "resize-down": await ResizeFocusedPaneAsync("vertical", 1); return;
+            case "resize-up": await ResizeFocusedPaneAsync("vertical", -1); return;
+            case "resize-right": await ResizeFocusedPaneAsync("horizontal", 1); return;
             case "restart": await ExecutePaneActionAsync(paneId, PaneAction.Restart); return;
             case "run": await ExecutePaneActionAsync(paneId, PaneAction.RunCommand); return;
             case "stop": await ExecutePaneActionAsync(paneId, PaneAction.Stop); return;
             case "stash": await ExecutePaneActionAsync(paneId, PaneAction.Stash); return;
             case "delete": await ExecutePaneActionAsync(paneId, PaneAction.Delete); return;
+            case "paste" when terminalViews.TryGetValue(paneId, out var terminal): await PasteClipboardAsync(terminal); return;
+            case "send-prefix" when terminalViews.TryGetValue(paneId, out var target): target.SendInput("\x01"); return;
+            case "settings": MenuSettings_OnClick(this, new RoutedEventArgs()); return;
             case "reconnect": await ConnectAsync(); return;
+            case "detach": Close(); return;
         }
         if (command.StartsWith("restore-pane:", StringComparison.Ordinal) &&
             ulong.TryParse(command["restore-pane:".Length..], out var restorePane))
@@ -785,7 +1210,7 @@ public partial class MainWindow : Window
 
     private void Attention_OnClick(object sender, RoutedEventArgs e)
     {
-        var menu = new ContextMenu();
+        var menu = CreateSelectionMenu();
         foreach (var attention in snapshot.Attentions
                      .Where(value => value.AcknowledgedAt is null)
                      .OrderByDescending(value => value.UpdatedAt))
@@ -803,6 +1228,12 @@ public partial class MainWindow : Window
         menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Top;
         menu.IsOpen = true;
     }
+
+    private static ContextMenu CreateSelectionMenu() => new()
+    {
+        Background = new SolidColorBrush(Color.FromRgb(245, 246, 248)),
+        Foreground = new SolidColorBrush(Color.FromRgb(32, 36, 42)),
+    };
 
     private async Task OpenAttentionAsync(AttentionModel attention)
     {
@@ -882,8 +1313,142 @@ public partial class MainWindow : Window
 
     private async void Reconnect_OnClick(object sender, RoutedEventArgs e) => await ConnectAsync();
 
+    private void Menu_OnSubmenuOpened(object sender, RoutedEventArgs e)
+    {
+        var pane = snapshot.Panes.FirstOrDefault(value => value.Id == paneId);
+        var state = pane?.Terminal?.State;
+        var hasTerminalView = terminalViews.ContainsKey(paneId);
+        MenuCopy.IsEnabled = hasTerminalView;
+        MenuPaste.IsEnabled = hasTerminalView && state == "running";
+        MenuZoom.IsEnabled = pane is not null;
+        MenuZoom.Header = zoomPaneId == 0 ? "Zoom focused pane" : "Leave zoom";
+        MenuRestart.IsEnabled = pane?.Kind == "terminal" && state is "exited" or "failed" or "placeholder";
+        MenuRun.IsEnabled = MenuRestart.IsEnabled;
+        MenuStop.IsEnabled = pane?.Kind == "terminal" && state == "running";
+        MenuStashPane.IsEnabled = pane is { Transient: false };
+        MenuDeletePane.IsEnabled = pane?.Kind == "terminal" && state is "exited" or "failed" or "placeholder";
+    }
+
+    private void MenuExit_OnClick(object sender, RoutedEventArgs e) => Close();
+
+    private void MenuCopy_OnClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (!terminalViews.TryGetValue(paneId, out var terminal) || !terminal.CopySelection())
+            {
+                SetStatus("No terminal selection to copy");
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message);
+        }
+    }
+
+    private async void MenuPaste_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (terminalViews.TryGetValue(paneId, out var terminal))
+        {
+            await PasteClipboardAsync(terminal);
+        }
+    }
+
+    private void MenuZoom_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (paneId == 0)
+        {
+            return;
+        }
+        zoomPaneId = zoomPaneId == 0 ? paneId : 0;
+        Refresh();
+        SetStatus(zoomPaneId == 0 ? "Zoom off" : $"Pane {paneId} zoomed");
+    }
+
+    private async void MenuFocusLeft_OnClick(object sender, RoutedEventArgs e) => await MoveFocusAsync(-1, 0);
+    private async void MenuFocusDown_OnClick(object sender, RoutedEventArgs e) => await MoveFocusAsync(0, 1);
+    private async void MenuFocusUp_OnClick(object sender, RoutedEventArgs e) => await MoveFocusAsync(0, -1);
+    private async void MenuFocusRight_OnClick(object sender, RoutedEventArgs e) => await MoveFocusAsync(1, 0);
+    private async void MenuRestart_OnClick(object sender, RoutedEventArgs e) => await ExecutePaneActionAsync(paneId, PaneAction.Restart);
+    private async void MenuRun_OnClick(object sender, RoutedEventArgs e) => await ExecutePaneActionAsync(paneId, PaneAction.RunCommand);
+    private async void MenuStop_OnClick(object sender, RoutedEventArgs e) => await ExecutePaneActionAsync(paneId, PaneAction.Stop);
+    private async void MenuStashPane_OnClick(object sender, RoutedEventArgs e) => await ExecutePaneActionAsync(paneId, PaneAction.Stash);
+    private async void MenuDeletePane_OnClick(object sender, RoutedEventArgs e) => await ExecutePaneActionAsync(paneId, PaneAction.Delete);
+
+    private async void MenuSettings_OnClick(object sender, RoutedEventArgs e)
+    {
+        var currentClient = client;
+        if (currentClient is null)
+        {
+            SetStatus("Frontend is disconnected");
+            return;
+        }
+        var defaults = currentClient.Gui.DefaultKeybindings.Count > 0
+            ? currentClient.Gui.DefaultKeybindings
+            : LegacyKeybindings();
+        var settings = new SettingsWindow(this, keybindings, defaults, currentClient.Gui.FontSize, currentClient.Gui.ConfigPath);
+        if (settings.ShowDialog() == true && settings.EffectiveBindings is not null)
+        {
+            keybindings = settings.EffectiveBindings;
+            currentClient.Gui.FontSize = settings.GuiFontSize;
+            ApplyGuiOptions(currentClient.Gui);
+            CancelPrefix();
+            try
+            {
+                var reloaded = await currentClient.ReloadFrontendConfigAsync(lifetime.Token);
+                keybindings = reloaded.Keybindings.Count == 0
+                    ? LegacyKeybindings()
+                    : new Dictionary<string, string>(reloaded.Keybindings, StringComparer.Ordinal);
+                ApplyGuiOptions(reloaded);
+                SetStatus("Settings saved and applied");
+            }
+            catch (Exception ex)
+            {
+                SetStatus($"Settings applied locally; daemon reload failed: {ex.Message}");
+            }
+        }
+    }
+
+    private void MenuAbout_OnClick(object sender, RoutedEventArgs e) => MessageBox.Show(this,
+        "Ariadne for Windows\n\nTerminal workspace frontend",
+        "About Ariadne", MessageBoxButton.OK, MessageBoxImage.Information);
+
     private void ConnectionOnFailed(Exception error) => Dispatcher.BeginInvoke(() => SetStatus(error.Message));
     private void SetStatus(string value) => StatusText.Text = value;
+
+    private void ApplyGuiTheme(GuiOptions options)
+    {
+        var background = (Color)ColorConverter.ConvertFromString(options.Background);
+        var foreground = (Color)ColorConverter.ConvertFromString(options.Foreground);
+        SetResourceColor("WindowBackground", background);
+        SetResourceColor("Accent", (Color)ColorConverter.ConvertFromString(options.Accent));
+        Background = new SolidColorBrush(background);
+        Foreground = new SolidColorBrush(foreground);
+        PaneHost.Background = Background;
+    }
+
+    private void ApplyGuiOptions(GuiOptions options)
+    {
+        ApplyGuiTheme(options);
+        toolRenderers?.ApplyOptions(options);
+        foreach (var view in terminalViews.Values)
+        {
+            view.ApplyOptions(options);
+        }
+        foreach (var view in toolViews.Values)
+        {
+            view.ApplyOptions(options);
+        }
+        RefreshPaneFocus();
+    }
+
+    private void SetResourceColor(string name, Color color)
+    {
+        if (FindResource(name) is SolidColorBrush brush && !brush.IsFrozen)
+        {
+            brush.Color = color;
+        }
+    }
     private WindowModel? FindWindow(ulong id) => snapshot.Windows.FirstOrDefault(value => value.Id == id);
     private ToolInstanceModel? FindToolInstance(ToolDescriptor? descriptor) => descriptor is null
         ? null
@@ -923,6 +1488,7 @@ public partial class MainWindow : Window
         {
             old.Store.Changed -= StoreOnChanged;
             old.NavigateRequested -= NavigateAsync;
+            old.PluginInteractionRequested -= HandlePluginInteractionAsync;
             old.Failed -= ConnectionOnFailed;
             await old.DisposeAsync();
         }
@@ -938,5 +1504,7 @@ public partial class MainWindow : Window
         lifetime.Cancel();
         await DisconnectAsync();
         lifetime.Dispose();
+        interactionGate.Dispose();
+        focusGate.Dispose();
     }
 }

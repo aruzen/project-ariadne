@@ -13,13 +13,15 @@ internal sealed class TerminalPaneView : Border, IDisposable
     private readonly AriadneTerminalConnection connection;
     private readonly TerminalControl terminal;
     private readonly TextBlock title;
+    private readonly Brush accent;
     private bool focused;
 
-    public TerminalPaneView(AriadneClient client, PaneModel pane)
+    public TerminalPaneView(AriadneClient client, PaneModel pane, GuiOptions options)
     {
         PaneId = pane.Id;
         TerminalId = pane.Terminal?.Id ?? throw new ArgumentException("pane has no terminal ID", nameof(pane));
         Background = new SolidColorBrush(Color.FromRgb(12, 15, 19));
+        accent = new SolidColorBrush((Color)ColorConverter.ConvertFromString(options.Accent));
         BorderThickness = new Thickness(1);
         BorderBrush = Brushes.Transparent;
         SnapsToDevicePixels = true;
@@ -38,7 +40,7 @@ internal sealed class TerminalPaneView : Border, IDisposable
             HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment = VerticalAlignment.Stretch,
         };
-        terminal.SetTheme(CreateTheme(), "Cascadia Mono", 14, Colors.Transparent);
+        terminal.SetTheme(CreateTheme(options), options.FontFamily, (short)Math.Clamp(Math.Round(options.FontSize), 6, 96), Colors.Transparent);
         connection = new AriadneTerminalConnection(client, TerminalId, Dispatcher);
         connection.Failed += error => ConnectionFailed?.Invoke(this, error);
         terminal.Connection = connection;
@@ -49,8 +51,12 @@ internal sealed class TerminalPaneView : Border, IDisposable
         content.Children.Add(terminal);
         Child = content;
         Update(pane, false);
-        PreviewMouseDown += OnPreviewMouseDown;
-        terminal.PreviewKeyDown += TerminalOnPreviewKeyDown;
+        // TerminalControl handles mouse input internally. Listen on the control
+        // itself and include handled events so pane selection is not limited to
+        // the title bar or placeholder panes.
+        terminal.AddHandler(Mouse.PreviewMouseDownEvent, new MouseButtonEventHandler(OnPreviewMouseDown), true);
+        terminal.AddHandler(Keyboard.GotKeyboardFocusEvent, new KeyboardFocusChangedEventHandler(OnTerminalGotKeyboardFocus), true);
+        terminal.AddHandler(Keyboard.PreviewKeyDownEvent, new KeyEventHandler(TerminalOnPreviewKeyDown), true);
     }
 
     public ulong PaneId { get; }
@@ -63,25 +69,44 @@ internal sealed class TerminalPaneView : Border, IDisposable
 
     public void Update(PaneModel pane, bool isFocused)
     {
-        focused = isFocused;
         var command = pane.Terminal?.Launch.Argv.FirstOrDefault() ?? "terminal";
         title.Text = string.IsNullOrWhiteSpace(pane.Title) ? $"{pane.Id}: {command}" : pane.Title;
-        BorderBrush = isFocused
-            ? new SolidColorBrush(Color.FromRgb(81, 145, 255))
-            : Brushes.Transparent;
-        title.Foreground = isFocused ? Brushes.White : new SolidColorBrush(Color.FromRgb(190, 198, 208));
+        SetFocused(isFocused);
         ContextMenu = PaneContextMenu.Create(pane, (sender, args) => ActionRequested?.Invoke(this, args));
     }
+
+    public void SetFocused(bool isFocused)
+    {
+        focused = isFocused;
+        BorderBrush = isFocused ? accent : Brushes.Transparent;
+        title.Foreground = isFocused ? Brushes.White : new SolidColorBrush(Color.FromRgb(190, 198, 208));
+    }
+
+    public void ApplyOptions(GuiOptions options) =>
+        terminal.SetTheme(CreateTheme(options), options.FontFamily,
+            (short)Math.Clamp(Math.Round(options.FontSize), 6, 96), Colors.Transparent);
 
     public void FocusTerminal() => terminal.Focus();
 
     private void OnPreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
+        if (e.ChangedButton != MouseButton.Left)
+        {
+            return;
+        }
         if (!focused)
         {
             FocusRequested?.Invoke(this, EventArgs.Empty);
         }
         terminal.Focus();
+    }
+
+    private void OnTerminalGotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        if (!focused)
+        {
+            FocusRequested?.Invoke(this, EventArgs.Empty);
+        }
     }
 
     private void TerminalOnPreviewKeyDown(object sender, KeyEventArgs e)
@@ -95,12 +120,7 @@ internal sealed class TerminalPaneView : Border, IDisposable
         {
             if (copy)
             {
-                var selected = terminal.GetSelectedText();
-                if (!string.IsNullOrEmpty(selected))
-                {
-                    Clipboard.SetText(selected, TextDataFormat.UnicodeText);
-                    CopyRequested?.Invoke(selected);
-                }
+                CopySelection();
                 e.Handled = true;
             }
             else if (paste)
@@ -116,27 +136,40 @@ internal sealed class TerminalPaneView : Border, IDisposable
         }
     }
 
+    public bool CopySelection()
+    {
+        var selected = terminal.GetSelectedText();
+        if (string.IsNullOrEmpty(selected))
+        {
+            return false;
+        }
+        Clipboard.SetText(selected, TextDataFormat.UnicodeText);
+        CopyRequested?.Invoke(selected);
+        return true;
+    }
+
     public void Paste(string value) => connection.WriteInput(value);
     public void SendInput(string value) => connection.WriteInput(value);
 
-    private static TerminalTheme CreateTheme() => new()
+    private static TerminalTheme CreateTheme(GuiOptions options) => new()
     {
-        DefaultBackground = 0x000F0C0C,
-        DefaultForeground = 0x00EDEAE8,
-        DefaultSelectionBackground = 0x006B4C26,
-        ColorTable =
-        [
-            0x00000000, 0x002222CC, 0x0022AA22, 0x00AAAA22,
-            0x00CC7722, 0x00AA22AA, 0x0022AAAA, 0x00CCCCCC,
-            0x00666666, 0x006666FF, 0x0066DD66, 0x00DDDD66,
-            0x00FFAA66, 0x00DD66DD, 0x0066DDDD, 0x00FFFFFF,
-        ],
+        DefaultBackground = TerminalColor(options.Background),
+        DefaultForeground = TerminalColor(options.Foreground),
+        DefaultSelectionBackground = TerminalColor(options.Selection),
+        ColorTable = options.ColorTable.Select(TerminalColor).ToArray(),
     };
+
+    private static uint TerminalColor(string value)
+    {
+        var color = (Color)ColorConverter.ConvertFromString(value);
+        return (uint)(color.B << 16 | color.G << 8 | color.R);
+    }
 
     public void Dispose()
     {
-        PreviewMouseDown -= OnPreviewMouseDown;
-        terminal.PreviewKeyDown -= TerminalOnPreviewKeyDown;
+        terminal.RemoveHandler(Mouse.PreviewMouseDownEvent, new MouseButtonEventHandler(OnPreviewMouseDown));
+        terminal.RemoveHandler(Keyboard.GotKeyboardFocusEvent, new KeyboardFocusChangedEventHandler(OnTerminalGotKeyboardFocus));
+        terminal.RemoveHandler(Keyboard.PreviewKeyDownEvent, new KeyEventHandler(TerminalOnPreviewKeyDown));
         terminal.Connection = null!;
         connection.Dispose();
     }

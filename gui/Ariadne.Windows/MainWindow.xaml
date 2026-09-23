@@ -5,7 +5,68 @@
         Background="{StaticResource WindowBackground}" Foreground="#E8EAED"
         PreviewKeyDown="MainWindow_OnPreviewKeyDown">
   <DockPanel>
-    <Border DockPanel.Dock="Top" Background="{StaticResource PanelBackground}" Padding="8">
+    <Menu DockPanel.Dock="Top" Background="#20252D" Foreground="#E8EAED">
+      <Menu.Resources>
+        <Style TargetType="{x:Type MenuItem}">
+          <Setter Property="Foreground" Value="#20242A" />
+          <Style.Triggers>
+            <Trigger Property="Role" Value="TopLevelHeader">
+              <Setter Property="Foreground" Value="#E8EAED" />
+            </Trigger>
+            <Trigger Property="Role" Value="TopLevelItem">
+              <Setter Property="Foreground" Value="#E8EAED" />
+            </Trigger>
+          </Style.Triggers>
+        </Style>
+      </Menu.Resources>
+      <MenuItem Header="_File">
+        <MenuItem Header="New terminal / split right" InputGestureText="Ctrl+A, %" Click="NewTerminal_OnClick" />
+        <MenuItem Header="Split below" InputGestureText="Ctrl+A, &quot;" Click="SplitBelow_OnClick" />
+        <Separator />
+        <MenuItem Header="Reconnect" Click="Reconnect_OnClick" />
+        <Separator />
+        <MenuItem Header="E_xit" Click="MenuExit_OnClick" />
+      </MenuItem>
+      <MenuItem Header="_Edit" SubmenuOpened="Menu_OnSubmenuOpened">
+        <MenuItem x:Name="MenuCopy" Header="_Copy" InputGestureText="Ctrl+Shift+C" Click="MenuCopy_OnClick" />
+        <MenuItem x:Name="MenuPaste" Header="_Paste" InputGestureText="Ctrl+Shift+V" Click="MenuPaste_OnClick" />
+        <Separator />
+        <MenuItem Header="Command palette…" InputGestureText="Ctrl+Shift+P" Click="Palette_OnClick" />
+      </MenuItem>
+      <MenuItem Header="_View" SubmenuOpened="Menu_OnSubmenuOpened">
+        <MenuItem x:Name="MenuZoom" Header="Zoom focused pane" InputGestureText="Ctrl+A, Z" Click="MenuZoom_OnClick" />
+        <MenuItem Header="Focus">
+          <MenuItem Header="Left" InputGestureText="Ctrl+A, H" Click="MenuFocusLeft_OnClick" />
+          <MenuItem Header="Down" InputGestureText="Ctrl+A, J" Click="MenuFocusDown_OnClick" />
+          <MenuItem Header="Up" InputGestureText="Ctrl+A, K" Click="MenuFocusUp_OnClick" />
+          <MenuItem Header="Right" InputGestureText="Ctrl+A, L" Click="MenuFocusRight_OnClick" />
+        </MenuItem>
+        <Separator />
+        <MenuItem Header="Stash…" Click="Stash_OnClick" />
+        <MenuItem Header="Alerts…" Click="Attention_OnClick" />
+      </MenuItem>
+      <MenuItem Header="_Pane" SubmenuOpened="Menu_OnSubmenuOpened">
+        <MenuItem Header="Split right" Click="NewTerminal_OnClick" />
+        <MenuItem Header="Split below" Click="SplitBelow_OnClick" />
+        <Separator />
+        <MenuItem x:Name="MenuRestart" Header="Restart" Click="MenuRestart_OnClick" />
+        <MenuItem x:Name="MenuRun" Header="Run command…" Click="MenuRun_OnClick" />
+        <MenuItem x:Name="MenuStop" Header="Stop" Click="MenuStop_OnClick" />
+        <Separator />
+        <MenuItem x:Name="MenuStashPane" Header="Stash pane" Click="MenuStashPane_OnClick" />
+        <MenuItem x:Name="MenuDeletePane" Header="Delete pane…" Click="MenuDeletePane_OnClick" />
+      </MenuItem>
+      <MenuItem Header="_Help">
+        <MenuItem Header="Commands…" InputGestureText="Ctrl+Shift+P" Click="Palette_OnClick" />
+        <Separator />
+        <MenuItem Header="Settings…" Click="MenuSettings_OnClick" />
+        <MenuItem Header="About Ariadne" Click="MenuAbout_OnClick" />
+      </MenuItem>
+    </Menu>
+
+    <!-- Kept for a future toolbar redesign; menu commands provide the same operations. -->
+    <Border x:Name="LegacyOperationPalette" DockPanel.Dock="Top"
+            Background="{StaticResource PanelBackground}" Padding="8" Visibility="Collapsed">
       <Grid>
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="Auto" />

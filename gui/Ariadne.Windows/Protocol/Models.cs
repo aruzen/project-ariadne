@@ -135,11 +135,191 @@ public sealed class FrontendState
 public sealed class SyncResult
 {
     public Snapshot Snapshot { get; set; } = new();
+    public GuiOptions Gui { get; set; } = new();
+}
+
+public sealed class GuiOptions
+{
+    public string ConfigPath { get; set; } = "";
+    public string FontFamily { get; set; } = "Cascadia Mono";
+    public double FontSize { get; set; } = 14;
+    public bool SoftwareRendering { get; set; }
+    public string Background { get; set; } = "#0c0f13";
+    public string Foreground { get; set; } = "#e8eaed";
+    public string Selection { get; set; } = "#264c6b";
+    public string Accent { get; set; } = "#5191ff";
+    public List<string> ColorTable { get; set; } =
+    [
+        "#000000", "#cc2222", "#22aa22", "#22aaaa", "#2277cc", "#aa22aa", "#aaaa22", "#cccccc",
+        "#666666", "#ff6666", "#66dd66", "#66dddd", "#66aaff", "#dd66dd", "#dddd66", "#ffffff",
+    ];
+    public List<string> Shell { get; set; } = ["powershell.exe", "-NoLogo"];
+    public List<string> Editor { get; set; } = ["notepad.exe"];
+    public Dictionary<string, string> Keybindings { get; set; } = new(StringComparer.Ordinal);
+    public Dictionary<string, string> DefaultKeybindings { get; set; } = new(StringComparer.Ordinal);
+}
+
+public sealed class PluginManageRequest
+{
+    public string? RequestId { get; set; }
+    public string Action { get; set; } = "";
+    public string? Id { get; set; }
+    public PluginView? View { get; set; }
+    public PluginInput? Input { get; set; }
+    public PluginEditorRequest? Editor { get; set; }
+    public ulong PaneId { get; set; }
+}
+
+public sealed class PluginManageResult
+{
+    public PluginFrame? Frame { get; set; }
+    public PluginEditorResult? Editor { get; set; }
+}
+
+public sealed class PluginEditorRequest
+{
+    public List<string> Argv { get; set; } = [];
+    public string Cwd { get; set; } = "";
+    public List<string> Env { get; set; } = [];
+    public string Text { get; set; } = "";
+}
+
+public sealed class PluginEditorResult
+{
+    public ulong PaneId { get; set; }
+    public ulong TerminalId { get; set; }
+    public string Text { get; set; } = "";
+}
+
+public sealed class PluginContext
+{
+    public string PluginId { get; set; } = "";
+    public ulong PaneId { get; set; }
+}
+
+public sealed class PluginInteraction
+{
+    public string Kind { get; set; } = "";
+    public string Message { get; set; } = "";
+    public string Text { get; set; } = "";
+}
+
+public sealed class PluginInteractionRequest
+{
+    public string Id { get; set; } = "";
+    public PluginContext Context { get; set; } = new();
+    public PluginInteraction Interaction { get; set; } = new();
+}
+
+public sealed class PluginInteractionResult
+{
+    public string Text { get; set; } = "";
+    public bool Confirmed { get; set; }
+}
+
+public sealed class PluginView
+{
+    public ulong RuntimeGeneration { get; set; }
+    public string Id { get; set; } = "";
+    public ulong Generation { get; set; }
+    public ulong PaneId { get; set; }
+    public string Type { get; set; } = "";
+    public string Instance { get; set; } = "";
+    public int Width { get; set; }
+    public int Height { get; set; }
+}
+
+public sealed class PluginFrame
+{
+    public ulong RuntimeGeneration { get; set; }
+    public string ViewId { get; set; } = "";
+    public ulong Generation { get; set; }
+    public int Width { get; set; }
+    public int Height { get; set; }
+    public List<PluginCell> Cells { get; set; } = [];
+    public PluginCursor Cursor { get; set; } = new();
+}
+
+public sealed class PluginCell
+{
+    public string Text { get; set; } = "";
+    public byte Width { get; set; }
+    public PluginStyle Style { get; set; } = new();
+}
+
+public sealed class PluginStyle
+{
+    public PluginColor Foreground { get; set; } = new();
+    public PluginColor Background { get; set; } = new();
+    public bool Bold { get; set; }
+    public bool Italic { get; set; }
+    public bool Underline { get; set; }
+    public bool Strikethrough { get; set; }
+    public bool Faint { get; set; }
+    public bool Blink { get; set; }
+    public byte UnderlineStyle { get; set; }
+    public PluginColor UnderlineColor { get; set; } = new();
+    public bool HasUnderlineColor { get; set; }
+}
+
+public sealed class PluginColor
+{
+    public byte R { get; set; }
+    public byte G { get; set; }
+    public byte B { get; set; }
+}
+
+public sealed class PluginCursor
+{
+    public int X { get; set; }
+    public int Y { get; set; }
+    public bool Visible { get; set; }
+    public byte Shape { get; set; }
+}
+
+public sealed class PluginInput
+{
+    public PluginView View { get; set; } = new();
+    public byte[]? Data { get; set; }
+    public PluginMouse? Mouse { get; set; }
+    public bool Paste { get; set; }
+}
+
+public sealed class PluginMouse
+{
+    public int X { get; set; }
+    public int Y { get; set; }
+    public int Button { get; set; }
+    public int Action { get; set; }
+    public int Wheel { get; set; }
+    public bool Shift { get; set; }
+    public bool Alt { get; set; }
+    public bool Ctrl { get; set; }
 }
 
 public sealed class SetFocusResult
 {
     public FrontendState Focus { get; set; } = new();
+}
+
+public sealed class CreateWorkspaceResult
+{
+    public WorkspaceModel Workspace { get; set; } = new();
+}
+
+public sealed class CreateWindowResult
+{
+    public WindowModel Window { get; set; } = new();
+}
+
+public sealed class WorkspaceOperationResult
+{
+    public WorkspaceModel Workspace { get; set; } = new();
+}
+
+public sealed class WindowOperationResult
+{
+    public WindowModel Window { get; set; } = new();
 }
 
 public sealed class TerminalOperationResult

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using Ariadne.Windows.Protocol;
 
@@ -10,20 +11,40 @@ internal interface IToolPaneContentRenderer : IDisposable
 {
     FrameworkElement Content { get; }
     void Update(PaneModel pane, ToolInstanceModel? tool);
+    void ApplyOptions(GuiOptions options);
 }
 
 internal sealed class ToolPaneRendererRegistry
 {
-    private readonly Dictionary<(string Provider, string Type), Func<IToolPaneContentRenderer>> factories = new();
+    private readonly AriadneClient client;
+    private readonly GuiOptions options;
+    private readonly Dictionary<(string Provider, string Type), Func<PaneModel, IToolPaneContentRenderer>> factories = new();
 
-    public void Register(string provider, string type, Func<IToolPaneContentRenderer> factory) =>
+    public ToolPaneRendererRegistry(AriadneClient client, GuiOptions options)
+    {
+        this.client = client;
+        this.options = options;
+        Accent = new SolidColorBrush((Color)ColorConverter.ConvertFromString(options.Accent));
+    }
+
+    public Brush Accent { get; private set; }
+
+    public void ApplyOptions(GuiOptions updated) =>
+        Accent = new SolidColorBrush((Color)ColorConverter.ConvertFromString(updated.Accent));
+
+    public void Register(string provider, string type, Func<PaneModel, IToolPaneContentRenderer> factory) =>
         factories[(provider, type)] = factory;
 
-    public IToolPaneContentRenderer Create(ToolDescriptor? descriptor)
+    public IToolPaneContentRenderer Create(PaneModel pane)
     {
+        var descriptor = pane.Tool;
         if (descriptor is not null && factories.TryGetValue((descriptor.Provider, descriptor.Type), out var factory))
         {
-            return factory();
+            return factory(pane);
+        }
+        if (descriptor is not null && descriptor.Provider != "ariadne")
+        {
+            return new ExternalPluginToolRenderer(client, pane, options);
         }
         return new GenericToolPaneRenderer();
     }
@@ -75,6 +96,12 @@ internal sealed class GenericToolPaneRenderer : IToolPaneContentRenderer
             : JsonSerializer.Serialize(tool.State, new JsonSerializerOptions { WriteIndented = true });
     }
 
+    public void ApplyOptions(GuiOptions options)
+    {
+        state.FontFamily = new FontFamily(options.FontFamily);
+        state.FontSize = options.FontSize;
+    }
+
     public void Dispose()
     {
     }
@@ -94,6 +121,8 @@ internal sealed class TerminalPlaceholderRenderer : IToolPaneContentRenderer
     public void Update(PaneModel pane, ToolInstanceModel? tool) =>
         message.Text = $"Terminal is {pane.Terminal?.State ?? "unavailable"}. Use Restart or Run command.";
 
+    public void ApplyOptions(GuiOptions options) => message.FontSize = options.FontSize;
+
     public void Dispose()
     {
     }
@@ -106,11 +135,13 @@ internal sealed class ToolPaneView : Border, IDisposable
     private readonly Grid contentHost;
     private IToolPaneContentRenderer? renderer;
     private string rendererKey = "";
+    private bool focused;
 
     public ToolPaneView(ToolPaneRendererRegistry registry, PaneModel pane, ToolInstanceModel? tool)
     {
         this.registry = registry;
         PaneId = pane.Id;
+        Focusable = true;
         Padding = new Thickness(1);
         Background = new SolidColorBrush(Color.FromRgb(19, 23, 29));
         BorderThickness = new Thickness(1);
@@ -130,11 +161,14 @@ internal sealed class ToolPaneView : Border, IDisposable
         layout.Children.Add(title);
         layout.Children.Add(contentHost);
         Child = layout;
-        MouseLeftButtonDown += (_, _) => FocusRequested?.Invoke(this, EventArgs.Empty);
+        AddHandler(Mouse.PreviewMouseDownEvent, new MouseButtonEventHandler(OnPreviewMouseDown), true);
         Update(pane, tool, false);
     }
 
     public ulong PaneId { get; }
+    public bool ExternalFrameReady => renderer is ExternalPluginToolRenderer external && external.IsReady;
+    public int? ExternalInputCount => (renderer as ExternalPluginToolRenderer)?.InputCount;
+    public void SendExternalSmokeInput() => (renderer as ExternalPluginToolRenderer)?.SendSmokeInput();
     public event EventHandler? FocusRequested;
     public event EventHandler<PaneActionEventArgs>? ActionRequested;
 
@@ -147,15 +181,42 @@ internal sealed class ToolPaneView : Border, IDisposable
         if (key != rendererKey)
         {
             renderer?.Dispose();
-            renderer = pane.Kind == "terminal" ? new TerminalPlaceholderRenderer() : registry.Create(pane.Tool);
+            renderer = pane.Kind == "terminal" ? new TerminalPlaceholderRenderer() : registry.Create(pane);
             rendererKey = key;
             contentHost.Children.Clear();
             contentHost.Children.Add(renderer.Content);
         }
         renderer!.Update(pane, tool);
-        BorderBrush = focused ? new SolidColorBrush(Color.FromRgb(81, 145, 255)) : Brushes.Transparent;
+        SetFocused(focused);
         ContextMenu = PaneContextMenu.Create(pane, (sender, args) => ActionRequested?.Invoke(this, args));
     }
 
-    public void Dispose() => renderer?.Dispose();
+    public void SetFocused(bool isFocused)
+    {
+        focused = isFocused;
+        BorderBrush = isFocused ? registry.Accent : Brushes.Transparent;
+    }
+
+    public void ApplyOptions(GuiOptions options) => renderer?.ApplyOptions(options);
+
+    private void OnPreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Left)
+        {
+            return;
+        }
+        // Prevent a previously selected terminal from retaining keyboard input.
+        // Focusable child renderers take focus themselves later in the routed event.
+        Focus();
+        if (!focused)
+        {
+            FocusRequested?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    public void Dispose()
+    {
+        RemoveHandler(Mouse.PreviewMouseDownEvent, new MouseButtonEventHandler(OnPreviewMouseDown));
+        renderer?.Dispose();
+    }
 }

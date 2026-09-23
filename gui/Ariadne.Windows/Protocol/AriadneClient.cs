@@ -12,6 +12,8 @@ internal sealed class AriadneClient : IAsyncDisposable
 {
     private const ushort MessageCommand = 0x1000;
     private const ushort MessageEvent = 0x1001;
+    private const ushort MessagePluginInteraction = 0x1002;
+    private const ushort MessagePluginInteractionCancel = 0x1003;
     private const ushort MessageFrontendControl = 0x1004;
     private const ushort PtyAttach = 0x1103;
     private const ushort PtyDetach = 0x1104;
@@ -25,6 +27,7 @@ internal sealed class AriadneClient : IAsyncDisposable
 
     private readonly StreamMuxConnection connection;
     private readonly ConcurrentDictionary<ulong, AriadnePtyAttachment> attachments = new();
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> interactions = new();
     private readonly CancellationTokenSource lifetime = new();
 
     private AriadneClient(StreamMuxConnection connection)
@@ -37,7 +40,9 @@ internal sealed class AriadneClient : IAsyncDisposable
     }
 
     public SnapshotStore Store { get; }
+    public GuiOptions Gui { get; private set; } = new();
     public event Func<ulong, Task>? NavigateRequested;
+    public event Func<PluginInteractionRequest, CancellationToken, Task<PluginInteractionResult>>? PluginInteractionRequested;
     public event Action<Exception>? Failed;
 
     public static string DefaultEndpoint
@@ -126,6 +131,7 @@ internal sealed class AriadneClient : IAsyncDisposable
         {
             var synchronized = await client.CommandAsync<SyncResult>("sync", null, cancellationToken).ConfigureAwait(false);
             client.Store.Initialize(synchronized.Snapshot);
+            client.Gui = synchronized.Gui;
             return client;
         }
         catch
@@ -140,6 +146,21 @@ internal sealed class AriadneClient : IAsyncDisposable
 
     public Task<SetFocusResult> SelectWindowAsync(ulong windowId, CancellationToken cancellationToken = default) =>
         CommandAsync<SetFocusResult>("select_window", new { window_id = windowId }, cancellationToken);
+
+    public Task<CreateWorkspaceResult> CreateWorkspaceAsync(string name, CancellationToken cancellationToken = default) =>
+        CommandAsync<CreateWorkspaceResult>("create_workspace", new { name }, cancellationToken);
+
+    public Task<CreateWindowResult> CreateWindowAsync(ulong workspaceId, string name, CancellationToken cancellationToken = default) =>
+        CommandAsync<CreateWindowResult>("create_window", new { workspace_id = workspaceId, name }, cancellationToken);
+
+    public Task<WorkspaceOperationResult> RenameWorkspaceAsync(ulong workspaceId, string name, CancellationToken cancellationToken = default) =>
+        CommandAsync<WorkspaceOperationResult>("rename_workspace", new { workspace_id = workspaceId, name }, cancellationToken);
+
+    public Task<WindowOperationResult> RenameWindowAsync(ulong windowId, string name, CancellationToken cancellationToken = default) =>
+        CommandAsync<WindowOperationResult>("rename_window", new { window_id = windowId, name }, cancellationToken);
+
+    public Task<JsonElement> StashWindowAsync(ulong windowId, CancellationToken cancellationToken = default) =>
+        CommandAsync<JsonElement>("stash_window", new { window_id = windowId }, cancellationToken);
 
     public Task<TerminalOperationResult> NewTerminalAsync(
         ulong windowId,
@@ -213,6 +234,13 @@ internal sealed class AriadneClient : IAsyncDisposable
     public Task<JsonElement> AcknowledgeAttentionAsync(ulong id, CancellationToken cancellationToken = default) =>
         CommandAsync<JsonElement>("acknowledge_attention", new { id, at = DateTimeOffset.UtcNow }, cancellationToken);
 
+    public async Task<GuiOptions> ReloadFrontendConfigAsync(CancellationToken cancellationToken = default)
+    {
+        var reloaded = await CommandAsync<GuiOptions>("reload_frontend_config", null, cancellationToken).ConfigureAwait(false);
+        CopyGuiOptions(reloaded, Gui);
+        return Gui;
+    }
+
     public Task<ClipboardResult> ReadClipboardAsync(ulong paneId, CancellationToken cancellationToken = default) =>
         CommandAsync<ClipboardResult>("clipboard_read", new
         {
@@ -229,6 +257,29 @@ internal sealed class AriadneClient : IAsyncDisposable
             text = value,
             approved = true,
         }, cancellationToken);
+
+    public Task<PluginManageResult> PluginAsync(PluginManageRequest request, CancellationToken cancellationToken = default)
+    {
+        request.RequestId ??= $"gui-{Guid.NewGuid():N}";
+        return CommandAsync<PluginManageResult>("plugin", request, cancellationToken);
+    }
+
+    private static void CopyGuiOptions(GuiOptions source, GuiOptions destination)
+    {
+        destination.ConfigPath = source.ConfigPath;
+        destination.FontFamily = source.FontFamily;
+        destination.FontSize = source.FontSize;
+        destination.SoftwareRendering = source.SoftwareRendering;
+        destination.Background = source.Background;
+        destination.Foreground = source.Foreground;
+        destination.Selection = source.Selection;
+        destination.Accent = source.Accent;
+        destination.ColorTable = [.. source.ColorTable];
+        destination.Shell = [.. source.Shell];
+        destination.Editor = [.. source.Editor];
+        destination.Keybindings = new Dictionary<string, string>(source.Keybindings, StringComparer.Ordinal);
+        destination.DefaultKeybindings = new Dictionary<string, string>(source.DefaultKeybindings, StringComparer.Ordinal);
+    }
 
     private async Task<T> CommandAsync<T>(string operation, object? parameters, CancellationToken cancellationToken)
     {
@@ -334,13 +385,29 @@ internal sealed class AriadneClient : IAsyncDisposable
                     failed.DeliverError(frame.Payload);
                 }
                 break;
+            case MessagePluginInteractionCancel when frame.StreamId == 0:
+                var cancelled = Json.Deserialize<PluginInteractionRequest>(frame.Payload);
+                if (interactions.TryGetValue(cancelled.Id, out var interaction))
+                {
+                    interaction.Cancel();
+                }
+                break;
         }
         return Task.CompletedTask;
     }
 
     private async Task HandleRequestAsync(MuxFrame frame)
     {
-        if (frame.MessageType != MessageFrontendControl || frame.StreamId != 0)
+        if (frame.StreamId != 0)
+        {
+            throw new InvalidDataException($"unsupported Ariadne request type {frame.MessageType}");
+        }
+        if (frame.MessageType == MessagePluginInteraction)
+        {
+            await HandlePluginInteractionAsync(frame).ConfigureAwait(false);
+            return;
+        }
+        if (frame.MessageType != MessageFrontendControl)
         {
             throw new InvalidDataException($"unsupported Ariadne request type {frame.MessageType}");
         }
@@ -368,6 +435,37 @@ internal sealed class AriadneClient : IAsyncDisposable
         await connection.RespondAsync(frame, Json.Serialize(response), lifetime.Token).ConfigureAwait(false);
     }
 
+    private async Task HandlePluginInteractionAsync(MuxFrame frame)
+    {
+        var request = Json.Deserialize<PluginInteractionRequest>(frame.Payload);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        if (string.IsNullOrWhiteSpace(request.Id) || !interactions.TryAdd(request.Id, cancellation))
+        {
+            await connection.RespondAsync(frame, Json.Serialize(new { error = "plugin: invalid or duplicate interaction" }), lifetime.Token).ConfigureAwait(false);
+            return;
+        }
+        object response;
+        try
+        {
+            var handler = PluginInteractionRequested ?? throw new InvalidOperationException("plugin: frontend is not ready for interaction");
+            var result = await handler(request, cancellation.Token).ConfigureAwait(false);
+            response = new { result };
+        }
+        catch (OperationCanceledException)
+        {
+            response = new { error = "plugin: interaction cancelled" };
+        }
+        catch (Exception error)
+        {
+            response = new { error = error.Message };
+        }
+        finally
+        {
+            interactions.TryRemove(new KeyValuePair<string, CancellationTokenSource>(request.Id, cancellation));
+        }
+        await connection.RespondAsync(frame, Json.Serialize(response), lifetime.Token).ConfigureAwait(false);
+    }
+
     private static void EnsurePtyResponse(byte[] payload)
     {
         var response = Json.Deserialize<PtyProtocolResponse>(payload);
@@ -384,6 +482,11 @@ internal sealed class AriadneClient : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         lifetime.Cancel();
+        foreach (var interaction in interactions.Values)
+        {
+            interaction.Cancel();
+        }
+        interactions.Clear();
         foreach (var attachment in attachments.Values)
         {
             attachment.CloseLocally();

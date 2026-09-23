@@ -9,8 +9,11 @@ internal sealed class TextPromptWindow : Window
 {
     private readonly TextBox input;
 
-    public TextPromptWindow(Window owner, string title, string label)
+    private readonly bool allowEmpty;
+
+    public TextPromptWindow(Window owner, string title, string label, string initialValue = "", string acceptLabel = "Run", bool allowEmpty = false)
     {
+        this.allowEmpty = allowEmpty;
         Owner = owner;
         Title = title;
         Width = 640;
@@ -22,17 +25,21 @@ internal sealed class TextPromptWindow : Window
 
         input = new TextBox
         {
+            Text = initialValue,
             Margin = new Thickness(0, 8, 0, 12),
             Padding = new Thickness(6),
             Background = new SolidColorBrush(Color.FromRgb(12, 15, 19)),
             Foreground = Brushes.White,
+            CaretBrush = Brushes.White,
+            SelectionBrush = new SolidColorBrush(Color.FromRgb(52, 92, 140)),
+            SelectionTextBrush = Brushes.White,
             BorderBrush = new SolidColorBrush(Color.FromRgb(70, 80, 94)),
         };
-        var ok = new Button { Content = "Run", IsDefault = true, MinWidth = 90, Padding = new Thickness(10, 5, 10, 5) };
+        var ok = new Button { Content = acceptLabel, IsDefault = true, MinWidth = 90, Padding = new Thickness(10, 5, 10, 5) };
         var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 90, Padding = new Thickness(10, 5, 10, 5), Margin = new Thickness(8, 0, 0, 0) };
         ok.Click += (_, _) =>
         {
-            if (!string.IsNullOrWhiteSpace(input.Text))
+            if (this.allowEmpty || !string.IsNullOrWhiteSpace(input.Text))
             {
                 DialogResult = true;
             }
