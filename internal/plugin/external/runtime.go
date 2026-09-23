@@ -40,6 +40,7 @@ type session struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	peer          *Peer
+	notify        func(string, any) error
 	command       *exec.Cmd
 	done          chan struct{}
 	active        atomic.Bool
@@ -178,6 +179,7 @@ func (m *Manager) start(id string) {
 	s.subscription = subscription
 	s.updateObservation(initial)
 	s.peer = NewPeer(ctx, stdout, stdin, m.config, s.handleAPI, func(err error) { m.failed(s, err) })
+	s.notify = s.peer.Notify
 	m.mu.Lock()
 	m.sessions[id] = s
 	delete(m.failures, id)

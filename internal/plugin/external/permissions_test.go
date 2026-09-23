@@ -180,6 +180,68 @@ func TestFrontendNavigateRequiresObservedFrontendAndSurvivesContextRelease(t *te
 	}
 }
 
+func TestFrontendDetachNotifiesObservedAuthorizedGenerationOnce(t *testing.T) {
+	s, _, frontend := brokerSession(t)
+	s.manifest.Capabilities = append(s.manifest.Capabilities, v1.FrontendNavigate)
+	s.grants = []v1.Grant{{Capability: v1.FrontendNavigate, Scope: v1.Scope{Kind: "all"}}}
+	var method string
+	var events []v1.FrontendEvent
+	s.notify = func(value string, params any) error {
+		method = value
+		event, ok := params.(v1.FrontendEvent)
+		if !ok {
+			t.Fatalf("notification params = %T", params)
+		}
+		events = append(events, event)
+		return nil
+	}
+	s.observeFrontend(frontend)
+	s.manager.mu.Lock()
+	s.manager.sessions[s.id] = s
+	s.manager.mu.Unlock()
+	defer func() {
+		s.manager.mu.Lock()
+		delete(s.manager.sessions, s.id)
+		s.manager.mu.Unlock()
+	}()
+
+	s.manager.Detach(frontend)
+	s.manager.Detach(frontend)
+	s.manager.Detach(frontend + 1000)
+	if method != "frontend.event" || len(events) != 1 || events[0].Kind != v1.FrontendDetached || events[0].FrontendID != frontend {
+		t.Fatalf("detach notifications = %q %+v", method, events)
+	}
+	if s.observedFrontend(frontend) {
+		t.Fatal("detached frontend remained observed")
+	}
+}
+
+func TestFrontendDetachSkipsUnobservedUnauthorizedAndOldGeneration(t *testing.T) {
+	s, _, frontend := brokerSession(t)
+	called := false
+	s.notify = func(string, any) error { called = true; return nil }
+	s.observeFrontend(frontend)
+	s.manager.mu.Lock()
+	s.manager.sessions[s.id] = s
+	s.manager.mu.Unlock()
+	s.manager.Detach(frontend)
+	if called {
+		t.Fatal("detach notified plugin without frontend.navigate grant")
+	}
+
+	// A runtime no longer present in Manager.sessions is an old generation.
+	s.manifest.Capabilities = append(s.manifest.Capabilities, v1.FrontendNavigate)
+	s.grants = []v1.Grant{{Capability: v1.FrontendNavigate, Scope: v1.Scope{Kind: "all"}}}
+	s.observeFrontend(frontend + 1)
+	s.manager.mu.Lock()
+	delete(s.manager.sessions, s.id)
+	s.manager.mu.Unlock()
+	s.manager.Detach(frontend + 1)
+	if called {
+		t.Fatal("detach notified old plugin generation")
+	}
+}
+
 func TestTerminalProcessContextScopeAndIdentityResult(t *testing.T) {
 	s, engine, frontend := brokerSession(t)
 	operations := &recordingOperations{}

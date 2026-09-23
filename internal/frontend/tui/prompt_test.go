@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/aruzen/ariadne/internal/core"
@@ -36,6 +37,9 @@ func TestSplitPromptCommands(t *testing.T) {
 }
 
 func TestPromptCommandHelpers(t *testing.T) {
+	if description, ok := promptCommandDescription("commands"); !ok || !strings.Contains(description, "complete command") {
+		t.Fatalf("commands description = %q, %t", description, ok)
+	}
 	for _, test := range []struct {
 		value  string
 		resize bool

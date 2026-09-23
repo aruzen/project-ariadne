@@ -67,6 +67,7 @@ type Config struct {
 	DetachKey   string           `toml:"detach_key"`
 	Keybindings Keymaps          `toml:"keybindings"`
 	TUI         TUIOptions       `toml:"tui"`
+	GUI         GUIOptions       `toml:"gui"`
 	Terminal    TerminalLimits   `toml:"terminal"`
 	Clipboard   ClipboardOptions `toml:"clipboard"`
 	Transport   TransportLimits  `toml:"transport"`
@@ -163,6 +164,30 @@ type TUIOptions struct {
 	CWD           CWDOptions    `toml:"cwd"`
 }
 
+// GUIOptions controls Windows GUI presentation. It is sent to GUI frontends
+// during synchronization; daemon and TUI behavior do not depend on it.
+type GUIOptions struct {
+	FontFamily        string   `toml:"font_family" json:"font_family"`
+	FontSize          float64  `toml:"font_size" json:"font_size"`
+	SoftwareRendering bool     `toml:"software_rendering" json:"software_rendering"`
+	Background        string   `toml:"background" json:"background"`
+	Foreground        string   `toml:"foreground" json:"foreground"`
+	Selection         string   `toml:"selection" json:"selection"`
+	Accent            string   `toml:"accent" json:"accent"`
+	ColorTable        []string `toml:"color_table" json:"color_table"`
+}
+
+func DefaultGUIOptions() GUIOptions {
+	return GUIOptions{
+		FontFamily: "Cascadia Mono", FontSize: 14,
+		Background: "#0c0f13", Foreground: "#e8eaed", Selection: "#264c6b", Accent: "#5191ff",
+		ColorTable: []string{
+			"#000000", "#cc2222", "#22aa22", "#22aaaa", "#2277cc", "#aa22aa", "#aaaa22", "#cccccc",
+			"#666666", "#ff6666", "#66dd66", "#66dddd", "#66aaff", "#dd66dd", "#dddd66", "#ffffff",
+		},
+	}
+}
+
 // TerminalLimits bounds PTY output retained or queued by the daemon.
 type TerminalLimits struct {
 	SuccessfulExit       SuccessfulExitPolicy `toml:"successful_exit"`
@@ -192,6 +217,7 @@ func Default() Config {
 		DetachKey:   DefaultDetachKey,
 		Keybindings: DefaultKeymaps(),
 		TUI:         TUIOptions{PaneFrame: DefaultTUIFrameMode, PaneTitle: PaneTitleAuto, Mouse: true, MinPaneWidth: 2, MinPaneHeight: 1, Theme: DefaultTheme(), Status: DefaultStatusOptions(), CWD: CWDOptions{Terminal: "pane", Tool: "startup"}},
+		GUI:         DefaultGUIOptions(),
 		Terminal: TerminalLimits{
 			SuccessfulExit: DefaultSuccessfulExitPolicy,
 			HistoryBytes:   manager.HistoryBytes, MaxTotalHistoryBytes: manager.MaxTotalHistoryBytes,
@@ -300,6 +326,25 @@ func (configuration Config) validate() error {
 	if err := configuration.validatePresentation(); err != nil {
 		return err
 	}
+	if strings.TrimSpace(configuration.GUI.FontFamily) == "" || strings.ContainsRune(configuration.GUI.FontFamily, 0) {
+		return fmt.Errorf("%w: gui.font_family must not be empty or contain NUL", ErrInvalid)
+	}
+	if configuration.GUI.FontSize < 6 || configuration.GUI.FontSize > 96 || math.IsNaN(configuration.GUI.FontSize) || math.IsInf(configuration.GUI.FontSize, 0) {
+		return fmt.Errorf("%w: gui.font_size must be between 6 and 96", ErrInvalid)
+	}
+	if len(configuration.GUI.ColorTable) != 16 {
+		return fmt.Errorf("%w: gui.color_table must contain exactly 16 colors", ErrInvalid)
+	}
+	for name, value := range map[string]string{"background": configuration.GUI.Background, "foreground": configuration.GUI.Foreground, "selection": configuration.GUI.Selection, "accent": configuration.GUI.Accent} {
+		if !validHexColor(value) {
+			return fmt.Errorf("%w: gui.%s must be #rrggbb", ErrInvalid, name)
+		}
+	}
+	for index, value := range configuration.GUI.ColorTable {
+		if !validHexColor(value) {
+			return fmt.Errorf("%w: gui.color_table[%d] must be #rrggbb", ErrInvalid, index)
+		}
+	}
 	if configuration.Shell != "" {
 		if strings.TrimSpace(configuration.Shell) == "" {
 			return fmt.Errorf("%w: shell contains only whitespace", ErrInvalid)
@@ -368,6 +413,18 @@ func (configuration Config) validate() error {
 		return fmt.Errorf("%w: attention limits must be positive", ErrInvalid)
 	}
 	return nil
+}
+
+func validHexColor(value string) bool {
+	if len(value) != 7 || value[0] != '#' {
+		return false
+	}
+	for _, value := range value[1:] {
+		if !((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') || (value >= 'A' && value <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateCommand(name string, argv []string) error {

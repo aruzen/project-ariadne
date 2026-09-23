@@ -190,6 +190,17 @@ type FrontendNavigateParams struct {
 	PaneID     uint64 `json:"pane_id"`
 }
 
+type FrontendEventKind string
+
+const FrontendDetached FrontendEventKind = "detached"
+
+// FrontendEvent is a host lifecycle notification. FrontendDetached is
+// currently the only kind; attached frontends are learned from Context values.
+type FrontendEvent struct {
+	Kind       FrontendEventKind `json:"kind"`
+	FrontendID uint64            `json:"frontend_id"`
+}
+
 type TerminalProcessParams struct {
 	PaneID uint64 `json:"pane_id"`
 }

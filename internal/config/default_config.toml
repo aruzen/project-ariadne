@@ -20,6 +20,17 @@
 # min_pane_width = 2  # Content cells, excluding chrome/separators
 # min_pane_height = 1
 
+[gui]
+# Windows GUI presentation. DPI scaling uses per-monitor-v2 automatically.
+# font_family = "Cascadia Mono"
+# font_size = 14
+# software_rendering = false # Use WPF software rendering instead of the GPU.
+# background = "#0c0f13"
+# foreground = "#e8eaed"
+# selection = "#264c6b"
+# accent = "#5191ff"
+# color_table = ["#000000", "#cc2222", "#22aa22", "#22aaaa", "#2277cc", "#aa22aa", "#aaaa22", "#cccccc", "#666666", "#ff6666", "#66dd66", "#66dddd", "#66aaff", "#dd66dd", "#dddd66", "#ffffff"]
+
 [tui.cwd]
 # Widget cwd precedence: widget > provider/type > pane kind > defaults.
 # Sources: "pane", "startup", or an absolute directory.

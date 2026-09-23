@@ -33,6 +33,7 @@ type Operation string
 
 const (
 	OperationSync                 Operation = "sync"
+	OperationReloadFrontendConfig Operation = "reload_frontend_config"
 	OperationPlugin               Operation = "plugin"
 	OperationCreateWorkspace      Operation = "create_workspace"
 	OperationRenameWorkspace      Operation = "rename_workspace"
@@ -96,6 +97,29 @@ type Config struct {
 	CommandGuard func() (release func(), err error)
 	Terminal     TerminalController
 	Plugins      PluginController
+	GUI          GUIOptions
+	// GUIProvider returns the latest frontend presentation settings. When nil,
+	// GUI is used for compatibility with embedders that provide static options.
+	GUIProvider func() GUIOptions
+	// ReloadFrontendConfig reloads only frontend-safe settings from the daemon's
+	// configured file. The caller cannot select an arbitrary path.
+	ReloadFrontendConfig func(context.Context) (GUIOptions, error)
+}
+
+type GUIOptions struct {
+	ConfigPath         string            `json:"config_path,omitempty"`
+	FontFamily         string            `json:"font_family"`
+	FontSize           float64           `json:"font_size"`
+	SoftwareRendering  bool              `json:"software_rendering"`
+	Background         string            `json:"background"`
+	Foreground         string            `json:"foreground"`
+	Selection          string            `json:"selection"`
+	Accent             string            `json:"accent"`
+	ColorTable         []string          `json:"color_table"`
+	Shell              []string          `json:"shell"`
+	Editor             []string          `json:"editor"`
+	Keybindings        map[string]string `json:"keybindings"`
+	DefaultKeybindings map[string]string `json:"default_keybindings"`
 }
 
 // PluginController is the shared management and extension bridge for every frontend.
@@ -194,6 +218,7 @@ type Response struct {
 
 type SyncResult struct {
 	Snapshot core.Snapshot `json:"snapshot"`
+	GUI      GUIOptions    `json:"gui"`
 }
 
 type EventEnvelope struct {
@@ -530,10 +555,12 @@ func (protocol *Protocol) Close() error {
 		protocol.subscription = nil
 		protocol.mu.Unlock()
 		if subscription != nil {
+			// Remove the Core frontend first so a racing plugin invocation cannot
+			// capture a new Context after its lifecycle notification.
+			_ = subscription.Close()
 			if protocol.config.Plugins != nil {
 				protocol.config.Plugins.Detach(uint64(subscription.ID()))
 			}
-			_ = subscription.Close()
 		}
 	})
 	return nil
@@ -655,6 +682,24 @@ func (protocol *Protocol) handleCommand(ctx context.Context, peer *streammux.Pee
 			_ = protocol.respondResult(callCtx, frame, result)
 		}()
 		return nil
+	}
+	if request.Operation == OperationReloadFrontendConfig {
+		if _, err := protocol.frontendID(); err != nil {
+			return protocol.respondCoreError(ctx, frame, err)
+		}
+		if err := decodeNoParams(request.Params); err != nil {
+			return protocol.respondCoreError(ctx, frame, err)
+		}
+		if protocol.config.ReloadFrontendConfig == nil {
+			return protocol.respondError(ctx, frame, CodeInvalidState, "frontend configuration reload is unavailable")
+		}
+		result, err := protocol.config.ReloadFrontendConfig(ctx)
+		release()
+		release = nil
+		if err != nil {
+			return protocol.respondCoreError(ctx, frame, err)
+		}
+		return protocol.respondResult(ctx, frame, result)
 	}
 	if request.Operation == OperationListStash {
 		if _, err := protocol.frontendID(); err != nil {
@@ -878,7 +923,11 @@ func (protocol *Protocol) synchronize(params json.RawMessage) (SyncResult, *core
 			return SyncResult{}, nil, err
 		}
 	}
-	return SyncResult{Snapshot: snapshot}, subscription, nil
+	options := protocol.config.GUI
+	if protocol.config.GUIProvider != nil {
+		options = protocol.config.GUIProvider()
+	}
+	return SyncResult{Snapshot: snapshot, GUI: options}, subscription, nil
 }
 
 func DecodeFrontendControlRequest(data []byte) (FrontendControlRequest, error) {

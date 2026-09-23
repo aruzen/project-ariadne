@@ -18,6 +18,7 @@ var promptCommandCatalog = []promptCommandInfo{
 	{Usage: "kill [PANE]", Summary: "stop a terminal and retain its Pane"},
 	{Usage: "plugin [ACTION ID ...]", Summary: "manage plugins; plugin run ID COMMAND [ARGS...]"},
 	{Usage: "help [COMMAND]", Summary: "show commands or one command's usage"},
+	{Usage: "commands", Summary: "open the complete command and keybinding reference"},
 	{Usage: "command-prompt [INITIAL...]", Summary: "open the command prompt with optional initial text"},
 	{Usage: "command-palette", Summary: "open the command palette"},
 	{Usage: "detach", Summary: "leave the TUI without stopping the daemon"},

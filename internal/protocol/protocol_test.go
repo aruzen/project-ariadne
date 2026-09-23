@@ -21,6 +21,10 @@ type peerPair struct {
 }
 
 func newPeerPair(t *testing.T, engine *core.Core) *peerPair {
+	return newPeerPairWithConfig(t, engine, DefaultConfig())
+}
+
+func newPeerPairWithConfig(t *testing.T, engine *core.Core, configuration Config) *peerPair {
 	t.Helper()
 	clientStream, serverStream := net.Pipe()
 	clientConn, err := streammux.Open(context.Background(), clientStream, streammux.DefaultConfig())
@@ -39,7 +43,7 @@ func newPeerPair(t *testing.T, engine *core.Core) *peerPair {
 	if err != nil {
 		t.Fatalf("new server Peer: %v", err)
 	}
-	serverProtocol, err := Register(server, engine, DefaultConfig())
+	serverProtocol, err := Register(server, engine, configuration)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -65,6 +69,76 @@ func newPeerPair(t *testing.T, engine *core.Core) *peerPair {
 		_ = pair.server.Close()
 	})
 	return pair
+}
+
+func TestSyncIncludesGUIOptions(t *testing.T) {
+	engine := newProtocolCore(t)
+	configuration := DefaultConfig()
+	configuration.GUI = GUIOptions{FontFamily: "Iosevka", FontSize: 16, SoftwareRendering: true,
+		Background: "#010203", Foreground: "#040506", Selection: "#070809", Accent: "#0a0b0c",
+		ColorTable: []string{"#000000"}, Shell: []string{"pwsh.exe", "-NoLogo"}, Editor: []string{"notepad.exe"},
+		Keybindings: map[string]string{"ctrl-a h": "focus left"}, DefaultKeybindings: map[string]string{"ctrl-a z": "zoom toggle"}}
+	pair := newPeerPairWithConfig(t, engine, configuration)
+	response, err := call(t, pair.client, OperationSync, nil)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	var synchronized SyncResult
+	if err := json.Unmarshal(response.Result, &synchronized); err != nil {
+		t.Fatalf("decode sync result: %v", err)
+	}
+	if synchronized.GUI.FontFamily != "Iosevka" || synchronized.GUI.FontSize != 16 || !synchronized.GUI.SoftwareRendering ||
+		synchronized.GUI.Accent != "#0a0b0c" || len(synchronized.GUI.ColorTable) != 1 || len(synchronized.GUI.Shell) != 2 ||
+		len(synchronized.GUI.Editor) != 1 ||
+		synchronized.GUI.Keybindings["ctrl-a h"] != "focus left" || synchronized.GUI.DefaultKeybindings["ctrl-a z"] != "zoom toggle" {
+		t.Fatalf("GUI options = %+v", synchronized.GUI)
+	}
+}
+
+func TestReloadFrontendConfigUpdatesFutureSync(t *testing.T) {
+	engine := newProtocolCore(t)
+	var current = GUIOptions{FontFamily: "Cascadia Mono", FontSize: 14}
+	configuration := DefaultConfig()
+	configuration.GUIProvider = func() GUIOptions { return current }
+	configuration.ReloadFrontendConfig = func(context.Context) (GUIOptions, error) {
+		current.FontSize = 18
+		return current, nil
+	}
+	first := newPeerPairWithConfig(t, engine, configuration)
+	if _, err := call(t, first.client, OperationSync, nil); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	response, err := call(t, first.client, OperationReloadFrontendConfig, nil)
+	if err != nil {
+		t.Fatalf("reload frontend config: %v", err)
+	}
+	var reloaded GUIOptions
+	if err := json.Unmarshal(response.Result, &reloaded); err != nil || reloaded.FontSize != 18 {
+		t.Fatalf("reloaded GUI options = %+v, %v", reloaded, err)
+	}
+
+	second := newPeerPairWithConfig(t, engine, configuration)
+	response, err = call(t, second.client, OperationSync, nil)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	var synchronized SyncResult
+	if err := json.Unmarshal(response.Result, &synchronized); err != nil || synchronized.GUI.FontSize != 18 {
+		t.Fatalf("second sync GUI options = %+v, %v", synchronized.GUI, err)
+	}
+}
+
+func TestReloadFrontendConfigRequiresSyncAndController(t *testing.T) {
+	pair := newPeerPair(t, newProtocolCore(t))
+	if _, err := call(t, pair.client, OperationReloadFrontendConfig, nil); !errors.Is(err, &RemoteError{Code: CodeInvalidState}) {
+		t.Fatalf("reload before sync error = %v", err)
+	}
+	if _, err := call(t, pair.client, OperationSync, nil); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if _, err := call(t, pair.client, OperationReloadFrontendConfig, nil); !errors.Is(err, &RemoteError{Code: CodeInvalidState}) {
+		t.Fatalf("reload without controller error = %v", err)
+	}
 }
 
 func call(t *testing.T, peer *streammux.Peer, operation Operation, params any) (Response, error) {

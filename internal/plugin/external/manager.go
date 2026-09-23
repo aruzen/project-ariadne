@@ -495,10 +495,15 @@ func (s *session) observedFrontend(frontend uint64) bool {
 	return ok
 }
 
-func (s *session) forgetFrontend(frontend uint64) {
+func (s *session) detachFrontend(frontend uint64) {
 	s.observedMu.Lock()
+	_, observed := s.observed[frontend]
 	delete(s.observed, frontend)
 	s.observedMu.Unlock()
+	if !observed || !s.hasCapability(v1.FrontendNavigate) || s.notify == nil {
+		return
+	}
+	_ = s.notify("frontend.event", v1.FrontendEvent{Kind: v1.FrontendDetached, FrontendID: frontend})
 }
 
 func (m *Manager) invocationSource(s *session, token string) (invocationOrigin, string) {
@@ -573,7 +578,7 @@ func (m *Manager) Detach(frontend uint64) {
 	m.cancelInteractionsLocked(func(interaction interactionSession) bool { return interaction.frontend == frontend })
 	m.mu.Unlock()
 	for _, runtime := range sessions {
-		runtime.forgetFrontend(frontend)
+		runtime.detachFrontend(frontend)
 	}
 	for _, sub := range subscriptions {
 		sub.runtime.unsubscribe(sub.token)

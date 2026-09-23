@@ -57,12 +57,27 @@ func TestParseIsStrict(t *testing.T) {
 		{name: "zero attention entries", data: "[attention]\nmax_entries = 0\n"},
 		{name: "zero marker bytes", data: "[attention]\nmarker_bytes = 0\n"},
 		{name: "zero plugin queue", data: "[attention]\nplugin_queue_bytes = 0\n"},
+		{name: "empty GUI font", data: "[gui]\nfont_family = \"\"\n"},
+		{name: "small GUI font", data: "[gui]\nfont_size = 5\n"},
+		{name: "invalid GUI color", data: "[gui]\nbackground = \"black\"\n"},
+		{name: "short GUI palette", data: "[gui]\ncolor_table = [\"#000000\"]\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := Parse([]byte(test.data)); !errors.Is(err, ErrInvalid) {
 				t.Fatalf("Parse error = %v", err)
 			}
 		})
+	}
+}
+
+func TestParseGUIOptions(t *testing.T) {
+	configuration, err := Parse([]byte("[gui]\nfont_family = \"Iosevka\"\nfont_size = 17.5\nsoftware_rendering = true\naccent = \"#abcdef\"\n"))
+	if err != nil {
+		t.Fatalf("Parse GUI options: %v", err)
+	}
+	if configuration.GUI.FontFamily != "Iosevka" || configuration.GUI.FontSize != 17.5 ||
+		!configuration.GUI.SoftwareRendering || configuration.GUI.Accent != "#abcdef" || len(configuration.GUI.ColorTable) != 16 {
+		t.Fatalf("GUI = %+v", configuration.GUI)
 	}
 }
 
