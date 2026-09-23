@@ -103,6 +103,7 @@ public Go DTOは[`api/plugin/v1`](../api/plugin/v1/types.go)に置く。内部Go
 | `shutdown` | null | null | 2s |
 | `view.close` notification | `{"view_id":"...","generation":N}` | なし | — |
 | `interaction.result` notification | `{"id":"...","result":InteractionResult?,"error":"..."?}` | なし | — |
+| `frontend.event` notification | `{"kind":"detached","frontend_id":N}` | なし | — |
 | `cancel` notification | `{"id":N}` | なし | — |
 
 initializeは`api_version`、Plugin `id`、実行`generation`、manifestが現在要求する承認済み`grants`、`data_directory`を渡す。実装がAPI v1に対応しない場合はerrorを返す。実際の利用可能capabilityはmanifest要求と通知されたgrantの両方で決まる。権限変更時は旧実行generationを無効化し、再起動・initializeする。
@@ -172,6 +173,8 @@ resourceを扱うcapabilityに`all`、`workspace`、`pane`、`context`を用い�
 clipboard、frontend.interact、frontend.editorはglobal capabilityでscopeは`all`のみ。PTY入力はPane権限に加えて、contextのPane／Terminalに限定する。再起動によるTerminal差し替え後の古い入力は拒否する。Label／attentionのsource、Tool stateのproviderは自身のIDに限定する。
 
 `frontend.navigate`が指定できるfrontendは、現在のPlugin generationで一度以上Contextを受け取った接続に限定する。Context自体の終了後も観測状態はgeneration中維持し、frontend detach、Plugin restart、権限変更で破棄する。通常Paneへの移動は既存preview、copy/search、zoomを終了する。stash済みPaneは開始前のfocusを維持したままpreviewし、別のstash済みPaneへの移動ではpreview対象だけを切り替える。prompt、confirm、editor、mouse drag中はbusyとして拒否する。非対応frontendでは失敗する。
+
+`frontend.navigate`がgrantされ、現在のPlugin generationで観測済みのfrontendがdetachすると、Hostは`frontend.event` notificationを同じfrontend IDについて高々1回送る。未知frontend、未許可Plugin、旧generationへは送らない。再接続は新しいContextで観測するため`attached` notificationは送らない。
 
 `process.inspect`はPIDをSnapshot、event、state file、logへ含めない。`terminal.process`はrunningなTerminalの現在の`terminal_id`とroot PIDを同時に返し、restart前のTerminal identityは成功させない。子孫process、実行path、OS上の開始時刻はPluginがOS APIで調査する。
 

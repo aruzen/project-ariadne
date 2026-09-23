@@ -7,8 +7,8 @@ clipboard integration, ToolPanes, and trusted local plugins.
 
 日本語概要: Ariadneは、macOS・Linux・Windowsで動作する常駐型ターミナル
 マルチプレクサです。単一実行ファイルでdaemonとTUIを提供し、Workspace、
-Window、Pane、履歴、clipboard、Pluginを共通Core上で管理します。GUIは
-v1.0.0には含まれません。
+Window、Pane、履歴、clipboard、Pluginを共通Core上で管理します。Windowsでは
+同じdaemonへ接続するWinUI 3 frontendも提供します。
 
 ## Install
 
@@ -55,6 +55,11 @@ Pane processes remain managed by the daemon after a frontend detaches. A process
 that exits normally leaves its pane available for `restart`, `run`, or deletion.
 Use `ariadne help <command>` for CLI details.
 
+On Windows, the `ariadne-gui_*` archive contains `Ariadne.WinUI.exe`, the
+`ariadne.exe` daemon/CLI, and a user-local installer. The GUI requires Windows
+10 version 2004 or later. It shares workspaces, panes, keybindings, clipboard,
+ToolPanes, and plugins with the TUI; closing it does not stop managed terminals.
+
 ## Configuration and data
 
 `ariadne init` writes `config.toml` to the first applicable location:
@@ -93,7 +98,9 @@ The external Plugin API v1 is documented in
 ## Build from source
 
 Requirements are Go 1.27 and Zig 0.16.0. The build tool fetches the pinned
-Ghostty revision and statically links libghostty-vt into Ariadne.
+Ghostty revision and statically links libghostty-vt into Ariadne. Building the
+Windows GUI additionally requires the .NET 10 SDK on Windows; publish it with
+`gui/Ariadne.WinUI/build.ps1`.
 
 ```sh
 make build
@@ -114,8 +121,8 @@ go vet ./...
 - Existing supported state-file versions are migrated forward. Downgrading a
   state file is not supported.
 - A daemon and its frontends should use the same Ariadne release.
-- GUI support is planned after the TUI v1 series and will use the same daemon
-  protocol and Core model.
+- The Windows WinUI 3 frontend and the TUI use the same daemon protocol and Core
+  model. Frontend-only zoom and visual state are not persisted by the daemon.
 
 ## License
 
