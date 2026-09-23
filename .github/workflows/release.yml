@@ -126,6 +126,37 @@ jobs:
           go run ./tools/package-release \
             -root . -binary "$binary" -output "$archive" \
             -version "$GITHUB_REF_NAME" -os "${{ matrix.goos }}" -arch "${{ matrix.goarch }}"
+      - name: Publish Windows GUI bundle
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_CERTIFICATE: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE }}
+          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        run: |
+          $runtime = if ('${{ matrix.goarch }}' -eq 'amd64') { 'win-x64' } else { 'win-arm64' }
+          $core = (Resolve-Path 'build/release/ariadne.exe').Path
+          & gui/Ariadne.WinUI/build.ps1 -Runtime $runtime -AriadneExecutable $core
+          $guiOutput = Join-Path (Resolve-Path 'gui/Ariadne.WinUI').Path "bin\publish\$runtime"
+          Copy-Item -LiteralPath gui/installer -Destination (Join-Path $guiOutput 'installer') -Recurse -Force
+          $smoke = Start-Process -FilePath (Join-Path $guiOutput 'Ariadne.WinUI.exe') -ArgumentList '--smoke-test' -Wait -PassThru
+          if ($smoke.ExitCode -ne 0) { throw "GUI smoke test failed with exit code $($smoke.ExitCode)" }
+          & (Join-Path $guiOutput 'ariadne.exe') daemon stop
+          if ($env:WINDOWS_SIGNING_CERTIFICATE) {
+            $certificate = Join-Path $env:RUNNER_TEMP 'ariadne-signing.pfx'
+            [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERTIFICATE))
+            $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
+              Where-Object FullName -Match '\\x64\\signtool.exe$' | Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $signTool) { throw 'signtool.exe not found' }
+            Get-ChildItem $guiOutput -Include *.exe,*.dll -Recurse | ForEach-Object {
+              & $signTool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificate /p $env:WINDOWS_SIGNING_PASSWORD $_.FullName
+              if ($LASTEXITCODE -ne 0) { throw "signing failed: $($_.FullName)" }
+            }
+            Remove-Item -LiteralPath $certificate -Force
+          } else {
+            Write-Warning 'WINDOWS_SIGNING_CERTIFICATE is not configured; publishing unsigned GUI binaries.'
+          }
+          $archive = "dist/ariadne-gui_${env:GITHUB_REF_NAME}_windows_${{ matrix.goarch }}.zip"
+          Compress-Archive -Path "$guiOutput\*" -DestinationPath $archive -CompressionLevel Optimal
       - name: Attest archive
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:

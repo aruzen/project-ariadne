@@ -10,6 +10,11 @@ Microsoft Terminal WPF, revision 9ae724aa5b080aafbeea2bbf88db630b182cc802
   License: MIT
   License file: third_party/windows-terminal/LICENSE
 
+EasyWindowsTerminalControl WinUI host, revision 0741a4b8853c47bcac4412d005ed4ae1d96d2c13
+  Upstream: https://github.com/MitchCapper/EasyWindowsTerminalControl
+  License: MIT
+  License file: third_party/easy-windows-terminal-control/LICENSE
+
 github.com/Microsoft/go-winio v0.6.2
   License: MIT
   License file: third_party/go/github.com/Microsoft/go-winio/LICENSE

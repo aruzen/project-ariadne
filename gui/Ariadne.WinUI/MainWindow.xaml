@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Ariadne.WinUI.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Ariadne">
+  <Window.SystemBackdrop>
+    <MicaBackdrop Kind="BaseAlt" />
+  </Window.SystemBackdrop>
+
+  <Grid x:Name="Root" KeyDown="Root_OnKeyDown">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="48" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="32" />
+    </Grid.RowDefinitions>
+
+    <Grid x:Name="AppTitleBar" Grid.Row="0" Padding="16,0,140,0" Background="Transparent">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
+      <FontIcon Glyph="&#xE756;" FontSize="16" VerticalAlignment="Center" />
+      <TextBlock Grid.Column="1" Text="Ariadne" FontSize="14" FontWeight="SemiBold"
+                 Margin="10,0,0,0" VerticalAlignment="Center" />
+      <TextBlock x:Name="RevisionText" Grid.Column="2" Opacity="0.62" VerticalAlignment="Center" />
+    </Grid>
+
+    <Grid Grid.Row="1" Height="42" Padding="8,0"
+          Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
+      <MenuBar VerticalAlignment="Center">
+        <MenuBarItem Title="File">
+          <MenuFlyoutItem Text="New terminal" Click="NewTerminal_OnClick" />
+          <MenuFlyoutItem Text="New Window" Click="NewWindow_OnClick" />
+          <MenuFlyoutItem Text="New Workspace" Click="NewWorkspace_OnClick" />
+          <MenuFlyoutSeparator />
+          <MenuFlyoutItem Text="Reconnect" Click="Reconnect_OnClick" />
+          <MenuFlyoutItem Text="Exit" Click="Exit_OnClick" />
+        </MenuBarItem>
+        <MenuBarItem Title="Pane">
+          <MenuFlyoutItem Text="Split right" Click="NewTerminal_OnClick" />
+          <MenuFlyoutItem Text="Split below" Click="SplitBelow_OnClick" />
+          <MenuFlyoutItem Text="Toggle zoom" Click="Zoom_OnClick" />
+          <MenuFlyoutSeparator />
+          <MenuFlyoutItem Text="Stash Window" Click="StashWindow_OnClick" />
+        </MenuBarItem>
+        <MenuBarItem Title="View">
+          <MenuFlyoutItem Text="Commands…" Click="Commands_OnClick" />
+          <MenuFlyoutItem Text="Settings…" Click="Settings_OnClick" />
+          <MenuFlyoutSeparator />
+          <MenuFlyoutItem Text="About Ariadne" Click="About_OnClick" />
+        </MenuBarItem>
+      </MenuBar>
+      <Button x:Name="AttentionButton" Grid.Column="2" Content="Alerts" Padding="10,4"
+              Margin="0,0,8,0" Click="Attention_OnClick" />
+      <ComboBox x:Name="WorkspacePicker" Grid.Column="3" Width="170" PlaceholderText="Workspace"
+                SelectionChanged="WorkspacePicker_OnSelectionChanged" />
+      <ComboBox x:Name="WindowPicker" Grid.Column="4" Width="170" Margin="8,0,0,0"
+                PlaceholderText="Window" SelectionChanged="WindowPicker_OnSelectionChanged" />
+    </Grid>
+
+    <Grid Grid.Row="2" Padding="8">
+      <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+              BorderThickness="1" CornerRadius="8">
+        <Grid x:Name="PaneHost" Background="{StaticResource TerminalSurfaceBrush}" />
+      </Border>
+      <ProgressRing x:Name="Connecting" Width="36" Height="36" IsActive="True"
+                    HorizontalAlignment="Center" VerticalAlignment="Center" />
+    </Grid>
+
+    <Grid Grid.Row="3" Padding="12,0">
+      <TextBlock x:Name="StatusText" Text="Connecting…" VerticalAlignment="Center" Opacity="0.72" />
+    </Grid>
+  </Grid>
+</Window>

@@ -84,6 +84,13 @@ jobs:
         run: go test -shuffle=on ./...
       - name: Vet
         run: go vet ./...
+      - name: Build Windows GUI
+        if: startsWith(matrix.target, 'windows-')
+        shell: pwsh
+        run: |
+          $runtime = if ('${{ matrix.target }}' -eq 'windows-arm64') { 'win-arm64' } else { 'win-x64' }
+          dotnet build gui/Ariadne.Windows/Ariadne.Windows.csproj -c Release -r $runtime -p:RestoreLockedMode=true -p:ContinuousIntegrationBuild=true
+          dotnet build gui/Ariadne.WinUI/Ariadne.WinUI.csproj -c Release -r $runtime -p:RestoreLockedMode=true -p:ContinuousIntegrationBuild=true
       - name: Real daemon and PTY E2E
         if: matrix.race
         env:
